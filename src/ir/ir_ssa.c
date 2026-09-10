@@ -12,7 +12,7 @@ int ir_ssa_enabled(void) {
   static int cached = -1;
   if (cached < 0) {
     const char *setting = getenv("METTLE_IR_SSA");
-    cached = (setting && *setting && strcmp(setting, "0") != 0) ? 1 : 0;
+    cached = (setting && *setting && strcmp(setting, "0") == 0) ? 0 : 1;
   }
   return cached;
 }
