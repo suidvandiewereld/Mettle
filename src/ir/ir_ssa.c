@@ -41,6 +41,22 @@ static int ir_ssa_type_is_scalar(const MtlcType *type) {
   }
 }
 
+static int ir_ssa_opcode_requires_symbol(IROpcode op) {
+  switch (op) {
+  case IR_OP_ROTATE_ADD:
+  case IR_OP_SIMD_AFFINE_MAP_F64:
+  case IR_OP_SIMD_AFFINE_MAP_F32:
+  case IR_OP_SIMD_SILU_F32:
+  case IR_OP_PREFETCH:
+  case IR_OP_NEW:
+  case IR_OP_SIMD_FIND:
+  case IR_OP_COUNT_WORD_STARTS:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 static int ir_ssa_destination_is_pure_write(const IRInstruction *instruction) {
   if (!instruction) {
     return 0;
@@ -211,6 +227,10 @@ static int ir_ssa_candidates_build(IRFunction *function,
         candidates->promotable[id] = 0;
         continue;
       }
+      if (ir_ssa_opcode_requires_symbol(instruction->op)) {
+        candidates->promotable[id] = 0;
+        continue;
+      }
       if (j == 0 && instruction->op != IR_OP_DECLARE_LOCAL &&
           (!writes || !ir_ssa_destination_is_pure_write(instruction))) {
         candidates->promotable[id] = 0;
@@ -233,12 +253,12 @@ static uint32_t ir_ssa_fresh_version(IRFunction *function, uint32_t base_id,
     snprintf(name, sizeof(name), "%s" IR_SSA_VERSION_PREFIX "%u", base,
              (*counter)++);
     if (ir_value_table_lookup(&function->values,
-                              (unsigned char)IR_OPERAND_SYMBOL,
+                              (unsigned char)IR_OPERAND_TEMP,
                               name) != IR_VALUE_ID_NONE) {
       continue;
     }
     return ir_value_table_intern(&function->values,
-                                 (unsigned char)IR_OPERAND_SYMBOL, name);
+                                 (unsigned char)IR_OPERAND_TEMP, name);
   }
   return IR_VALUE_ID_NONE;
 }
@@ -789,7 +809,7 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   free(renamer.stacks);
   free(phi_origin);
 
-  if (renamer.created_count > 0) {
+  if (0 && renamer.created_count > 0) {
     IRInstruction *declared = (IRInstruction *)malloc(
         (function->instruction_count + renamer.created_count) *
         sizeof(IRInstruction));
@@ -886,6 +906,20 @@ int ir_leave_ssa_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
+  IRValueTable targeted;
+  ir_value_table_init(&targeted);
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (!in->text) {
+      continue;
+    }
+    if (in->op == IR_OP_JUMP || in->op == IR_OP_BRANCH_ZERO ||
+        in->op == IR_OP_BRANCH_EQ) {
+      ir_value_table_intern(&targeted, (unsigned char)IR_OPERAND_LABEL,
+                            in->text);
+    }
+  }
+
   size_t write = 0;
   unsigned swap_counter = 0;
   size_t swap_count = 0;
@@ -906,8 +940,16 @@ int ir_leave_ssa_pass(IRFunction *function, int *changed) {
     }
 
     for (size_t k = 0; k < terminator; k++) {
-      const IRInstruction *source = &function->instructions[start + k];
+      IRInstruction *source = &function->instructions[start + k];
       if (source->op == IR_OP_PHI) {
+        continue;
+      }
+      if (source->op == IR_OP_LABEL && source->text &&
+          strncmp(source->text, IR_SSA_BLOCK_LABEL_PREFIX,
+                  strlen(IR_SSA_BLOCK_LABEL_PREFIX)) == 0 &&
+          ir_value_table_lookup(&targeted, (unsigned char)IR_OPERAND_LABEL,
+                                source->text) == IR_VALUE_ID_NONE) {
+        ir_instruction_destroy(source);
         continue;
       }
       grown[write++] = *source;
@@ -1124,6 +1166,7 @@ int ir_leave_ssa_pass(IRFunction *function, int *changed) {
   free(swap_info);
   free(sources);
   free(done);
+  ir_value_table_clear(&targeted);
 
   ir_function_clear_cfg(function);
   ir_function_number_values(function);
