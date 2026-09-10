@@ -2138,14 +2138,14 @@ $cases = @(
     ShouldSucceed = $true
     Args          = @("-O")
     IrMustNotMatch = @("%\.?t[0-9]+ <- @x")
-    IrMustMatch   = @("branch_zero @x ->")
+    IrMustMatch   = @("branch_zero @x(?:__ssa[0-9]+)? ->")
   },
   @{
     Name          = "opt_strength_cse"
     Path          = "tests/test_optimize_strength_cse.mettle"
     ShouldSucceed = $true
     Args          = @("-O")
-    IrMustMatch   = @("@x = @a << 3", "@y <- @x")
+    IrMustMatch   = @("@x(?:__ssa[0-9]+)? = @a(?:__ssa[0-9]+)? << 3", "@y(?:__ssa[0-9]+)? <- @x(?:__ssa[0-9]+)?")
     IrMustNotMatch = @("@y = 8 \\* @a", "@w = @b \\+ @a")
   },
   @{
@@ -2170,7 +2170,7 @@ $cases = @(
                       "%\.?t[0-9]+ = @u >> 6",      # unsigned_div: uint32 / 64
                       "%\.?t[0-9]+ = @u & 63",      # unsigned_mod: uint32 % 64
                       "%\.?t[0-9]+ = @n >> 5",      # shift_chain: else-side guard, merged
-                      "%\.?t[0-9]+ = @i & 3")       # counter_mod: monotone counter
+                      "%\.?t[0-9]+ = @i(?:__ssa[0-9]+)? & 3")       # counter_mod: monotone counter
     # decided(): every comparison against a uint16 is settled by its type.
     IrMustNotMatch = @("%\.?t[0-9]+ = @u < 0", "%\.?t[0-9]+ = @u > 100000")
   },
@@ -2187,7 +2187,7 @@ $cases = @(
     Path          = "tests/test_opt_collatz_odd_fold.mettle"
     ShouldSucceed = $true
     Args          = @("-O", "--dump-ir")
-    IrMustMatch   = @("(?s)%\.?t[0-9]+ = 3 \* @x.*@x = %\.?t[0-9]+ \+ 1.*@x = @x >> 1.*@count = @count \+ 2.*jump ir_while_")
+    IrMustMatch   = @("(?s)%\.?t[0-9]+ = 3 \* @x(?:__ssa[0-9]+)?.*@x(?:__ssa[0-9]+)? = %\.?t[0-9]+ \+ 1.*@x(?:__ssa[0-9]+)? = @x(?:__ssa[0-9]+)? >> 1.*@count(?:__ssa[0-9]+)? = @count(?:__ssa[0-9]+)? \+ 2.*jump ir_while_")
   },
   @{
     Name          = "opt_popcount_fold"
@@ -2212,7 +2212,7 @@ $cases = @(
     Args          = @("--build", "--emit-obj", "--linker", "internal", "--release", "--profile-runtime-ops", "--dump-ir")
     # popcount_buffer itself inlines now, so the accumulator carries the
     # inliner's local prefix
-    IrMustMatch   = @("%pbf[0-9]+_raw <-", "total = @\S*total \+ %pbf")
+    IrMustMatch   = @("%pbf[0-9]+_raw <-", "total(?:__ssa[0-9]+)? = @\S*total(?:__ssa[0-9]+)? \+ %pbf")
     IrMustNotMatch = @("%\.?t[0-9]+ = popcount_byte", "__inl_popcount_byte", "local_count")
   },
   @{
@@ -2220,7 +2220,7 @@ $cases = @(
     Path          = "tests/test_optimize_popcount_buffer_fuse.mettle"
     ShouldSucceed = $true
     Args          = @("--build", "--emit-obj", "--linker", "internal", "--release", "--dump-ir")
-    IrMustMatch   = @("%pbf[0-9]+_raw <-", "total = @\S*total \+ %pbf")
+    IrMustMatch   = @("%pbf[0-9]+_raw <-", "total(?:__ssa[0-9]+)? = @\S*total(?:__ssa[0-9]+)? \+ %pbf")
     IrMustNotMatch = @("%\.?t[0-9]+ = popcount_byte", "__inl_popcount_byte", "local_count")
   },
   @{
@@ -2228,7 +2228,7 @@ $cases = @(
     Path          = "tests/test_opt_branch_notzero_forward.mettle"
     ShouldSucceed = $true
     Args          = @("-O")
-    IrMustMatch   = @("branch_zero @x ->")
+    IrMustMatch   = @("branch_zero @x(?:__ssa[0-9]+)? ->")
     IrMustNotMatch = @("%\.?t[0-9]+ = @x != 0")
   },
   @{
@@ -6731,7 +6731,7 @@ try {
     throw "could not locate 'a * b' in _mlopt.ir"
   }
   $badIdx = $irLine.Matches[0].Groups[1].Value
-  $negLine = Select-String -Path "_mlopt.ir" -Pattern "^\s+(\d+): @neg <- 0" | Select-Object -First 1
+  $negLine = Select-String -Path "_mlopt.ir" -Pattern "^\s+(\d+): @neg(?:__ssa[0-9]+)? <- 0" | Select-Object -First 1
   if (-not $negLine) {
     throw "could not locate '@neg <- 0' in _mlopt.ir"
   }

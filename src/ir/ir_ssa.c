@@ -253,12 +253,12 @@ static uint32_t ir_ssa_fresh_version(IRFunction *function, uint32_t base_id,
     snprintf(name, sizeof(name), "%s" IR_SSA_VERSION_PREFIX "%u", base,
              (*counter)++);
     if (ir_value_table_lookup(&function->values,
-                              (unsigned char)IR_OPERAND_TEMP,
+                              (unsigned char)IR_OPERAND_SYMBOL,
                               name) != IR_VALUE_ID_NONE) {
       continue;
     }
     return ir_value_table_intern(&function->values,
-                                 (unsigned char)IR_OPERAND_TEMP, name);
+                                 (unsigned char)IR_OPERAND_SYMBOL, name);
   }
   return IR_VALUE_ID_NONE;
 }
@@ -809,7 +809,7 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   free(renamer.stacks);
   free(phi_origin);
 
-  if (0 && renamer.created_count > 0) {
+  if (renamer.created_count > 0) {
     IRInstruction *declared = (IRInstruction *)malloc(
         (function->instruction_count + renamer.created_count) *
         sizeof(IRInstruction));
