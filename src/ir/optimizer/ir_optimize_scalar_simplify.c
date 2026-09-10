@@ -2777,6 +2777,25 @@ static int ir_label_ref_set_build(const IRFunction *function,
     }
     set->names[slot] = instruction->text;
   }
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    for (size_t j = 0; j < instruction->argument_count; j++) {
+      const IROperand *operand =
+          instruction->arguments ? &instruction->arguments[j] : NULL;
+      if (!operand || operand->kind != IR_OPERAND_LABEL || !operand->name) {
+        continue;
+      }
+      size_t slot = (size_t)mettle_fnv1a_hash(operand->name) & mask;
+      while (set->names[slot]) {
+        if (strcmp(set->names[slot], operand->name) == 0) {
+          break;
+        }
+        slot = (slot + 1) & mask;
+      }
+      set->names[slot] = operand->name;
+    }
+  }
   return 1;
 }
 
