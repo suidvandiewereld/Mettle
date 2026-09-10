@@ -19054,6 +19054,50 @@ else {
   }
 }
 
+# Phi incomings are positional: leave_ssa reads arguments[slot * 2] by
+# predecessor index and never looks at the label, so a control-flow pass that
+# reorders a block's predecessors silently miscompiles unless the incomings are
+# repaired. METTLE_SSA_SABOTAGE=incoming sorts every phi's incomings by label,
+# which is the wrong order for every block whose predecessors are not already
+# label-sorted. With the repair on the program must still be correct; with
+# METTLE_SSA_REPAIR=0 the same build must produce a different answer, which is
+# what proves the repair is doing the work rather than the sabotage being inert.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $ssaSrc = "examples/crc32/crc32.mettle"
+  $ssaGood = Join-Path $tmpDir "ssa_repair_good.exe"
+  $ssaBad = Join-Path $tmpDir "ssa_repair_bad.exe"
+
+  $env:METTLE_SSA_SABOTAGE = "incoming"
+  $out = & $CompilerPath --build --release $ssaSrc -o $ssaGood 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { Remove-Item Env:METTLE_SSA_SABOTAGE; throw "the repaired build failed: $out" }
+  $env:METTLE_SSA_REPAIR = "0"
+  $out = & $CompilerPath --build --release $ssaSrc -o $ssaBad 2>&1 | Out-String
+  Remove-Item Env:METTLE_SSA_REPAIR
+  Remove-Item Env:METTLE_SSA_SABOTAGE
+  if ($LASTEXITCODE -ne 0) { throw "the unrepaired build failed to compile: $out" }
+
+  $goodRun = & $ssaGood 2>&1 | Out-String
+  if ($goodRun -notmatch "CRC = 3521164528") { throw "the repaired build computes the wrong checksum: $goodRun" }
+
+  $badJob = Start-Job -ScriptBlock { param($exe) & $exe 2>&1 | Out-String } -ArgumentList $ssaBad
+  $badRun = ""
+  if (Wait-Job $badJob -Timeout 60) { $badRun = (Receive-Job $badJob) | Out-String }
+  else { $badRun = "<timed out>" }
+  Remove-Job $badJob -Force
+  if ($badRun -match "CRC = 3521164528") {
+    throw "sorting the phi incomings changed nothing, so the repair is not what makes the program correct"
+  }
+  Write-CaseResult -Name "ssa_phi_repair" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_SSA_SABOTAGE) { Remove-Item Env:METTLE_SSA_SABOTAGE }
+  if (Test-Path Env:METTLE_SSA_REPAIR) { Remove-Item Env:METTLE_SSA_REPAIR }
+  Write-CaseResult -Name "ssa_phi_repair" -Passed $false -Reason $_.Exception.Message
+}
+
 # libmtlc self-containment audit. Computes the archive's external symbol
 # closure (every symbol some member references that no member defines) and
 # fails if any final symbol is not an explicit Windows OS import. It also

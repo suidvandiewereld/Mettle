@@ -148,6 +148,11 @@ static const IROptNamedPass g_ir_ssa_enter[] = {
 static const IROptNamedPass g_ir_ssa_optimize[] = {
     {"ssa_propagate", ir_ssa_propagate_pass,
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
+    {"ssa_sabotage", ir_ssa_sabotage_pass,
+     {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
+    {"ssa_branch_simplify", ir_constant_and_branch_simplify_pass, {0, 0}},
+    {"ssa_redundant_jumps", ir_remove_redundant_jumps_pass, {0, 0}},
+    {"ssa_unused_labels", ir_remove_unused_labels_pass, {0, 0}},
 };
 static const IROptNamedPass g_ir_ssa_leave[] = {
     {"leave_ssa", ir_leave_ssa_pass,

@@ -347,6 +347,11 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   ir_function_number_values(function);
   ir_structure_maybe_sabotage(function, pass->name);
   ir_structure_check_after_pass(function, pass->name, structure_before);
+  {
+    int repaired = 0;
+    ir_repair_phis(function, &repaired);
+    ir_function_number_values(function);
+  }
   ir_phi_check_after_pass(function, pass->name);
   ir_analysis_self_check(function);
 

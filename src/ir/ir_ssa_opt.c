@@ -10,6 +10,17 @@
 static unsigned long long g_ssa_trivial_phis = 0;
 static unsigned long long g_ssa_dead_phis = 0;
 static unsigned long long g_ssa_uses_rewritten = 0;
+static unsigned long long g_ssa_phis_repaired = 0;
+static unsigned long long g_ssa_repair_bailouts = 0;
+
+static int ir_ssa_opt_enabled(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *setting = getenv("METTLE_SSA_OPT");
+    cached = (setting && *setting && strcmp(setting, "0") == 0) ? 0 : 1;
+  }
+  return cached;
+}
 
 static int ir_ssa_opt_stats_enabled(void) {
   static int cached = -1;
@@ -26,6 +37,8 @@ void ir_ssa_opt_report_stats(void) {
   fprintf(stderr, "SSA-OPT\ttrivial_phis\t%llu\n", g_ssa_trivial_phis);
   fprintf(stderr, "SSA-OPT\tdead_phis\t%llu\n", g_ssa_dead_phis);
   fprintf(stderr, "SSA-OPT\tuses_rewritten\t%llu\n", g_ssa_uses_rewritten);
+  fprintf(stderr, "SSA-OPT\tphis_repaired\t%llu\n", g_ssa_phis_repaired);
+  fprintf(stderr, "SSA-OPT\trepair_bailouts\t%llu\n", g_ssa_repair_bailouts);
 }
 
 static int ir_ssa_opt_function_is_eligible(const IRFunction *function,
@@ -248,6 +261,9 @@ static size_t ir_ssa_opt_remove_dead_phis(IRFunction *function,
     IRInstruction *instruction = &function->instructions[i];
     const int writes = ir_instruction_writes_destination(instruction);
     const size_t operands = 3 + instruction->argument_count;
+    const uint32_t own = (instruction->op == IR_OP_PHI)
+                             ? instruction->dest.value_id
+                             : IR_VALUE_ID_NONE;
     for (size_t j = writes ? 1 : 0; j < operands; j++) {
       const IROperand *operand = NULL;
       if (j == 0) {
@@ -263,6 +279,9 @@ static size_t ir_ssa_opt_remove_dead_phis(IRFunction *function,
       if (!operand || !ir_operand_is_value(operand) ||
           operand->value_id == IR_VALUE_ID_NONE ||
           operand->value_id >= value_count) {
+        continue;
+      }
+      if (operand->value_id == own) {
         continue;
       }
       uses[operand->value_id]++;
@@ -314,11 +333,243 @@ static size_t ir_ssa_opt_remove_dead_phis(IRFunction *function,
   return dead;
 }
 
+static int ir_repair_phi_incomings(const IRBasicBlock *blocks,
+                                   size_t block_count, size_t b,
+                                   IRInstruction *phi) {
+  const IRBasicBlock *block = &blocks[b];
+  const size_t wanted = block->predecessor_count;
+  int identical = (phi->argument_count == wanted * 2);
+  for (size_t p = 0; identical && p < wanted; p++) {
+    const size_t pred = block->predecessors[p];
+    const char *want = (pred < block_count) ? blocks[pred].label : NULL;
+    const IROperand *have = &phi->arguments[p * 2 + 1];
+    if (want) {
+      if (have->kind != IR_OPERAND_LABEL || !have->name ||
+          strcmp(have->name, want) != 0) {
+        identical = 0;
+      }
+    } else if (have->kind != IR_OPERAND_NONE) {
+      identical = 0;
+    }
+  }
+  if (identical) {
+    return 1;
+  }
+
+  IROperand agreed = ir_operand_none();
+  int agrees = 1;
+  for (size_t p = 0; p * 2 < phi->argument_count; p++) {
+    const IROperand *incoming = &phi->arguments[p * 2];
+    if (incoming->kind == IR_OPERAND_NONE) {
+      continue;
+    }
+    if (ir_operand_is_value(incoming) &&
+        incoming->value_id == phi->dest.value_id) {
+      continue;
+    }
+    if (agreed.kind == IR_OPERAND_NONE) {
+      agreed = *incoming;
+    } else if (!ir_operand_same(&agreed, incoming)) {
+      agrees = 0;
+      break;
+    }
+  }
+
+  const size_t old_pairs = phi->argument_count / 2;
+  unsigned char *claimed =
+      (unsigned char *)calloc(old_pairs ? old_pairs : 1, sizeof(unsigned char));
+  IROperand *rebuilt =
+      (IROperand *)calloc(wanted ? wanted * 2 : 1, sizeof(IROperand));
+  if (!rebuilt || !claimed) {
+    free(rebuilt);
+    free(claimed);
+    return 0;
+  }
+
+  for (size_t p = 0; p < wanted; p++) {
+    const size_t pred = block->predecessors[p];
+    const char *want = (pred < block_count) ? blocks[pred].label : NULL;
+    const IROperand *source = NULL;
+    for (size_t q = 0; q < old_pairs; q++) {
+      const IROperand *label = &phi->arguments[q * 2 + 1];
+      if (claimed[q]) {
+        continue;
+      }
+      if (want) {
+        if (label->kind == IR_OPERAND_LABEL && label->name &&
+            strcmp(label->name, want) == 0) {
+          source = &phi->arguments[q * 2];
+          claimed[q] = 1;
+          break;
+        }
+      } else if (label->kind == IR_OPERAND_NONE) {
+        source = &phi->arguments[q * 2];
+        claimed[q] = 1;
+        break;
+      }
+    }
+    if (!source) {
+      if (getenv("METTLE_SSA_REPAIR_DEBUG")) {
+        fprintf(stderr, "ssa-repair: block %s wants pred %s; phi %s has",
+                block->label ? block->label : "?", want ? want : "?",
+                phi->dest.name ? phi->dest.name : "?");
+        for (size_t q = 0; q * 2 + 1 < phi->argument_count; q++) {
+          const IROperand *label = &phi->arguments[q * 2 + 1];
+          fprintf(stderr, " %s", (label->kind == IR_OPERAND_LABEL && label->name)
+                                     ? label->name
+                                     : "<none>");
+        }
+        fprintf(stderr, " agree=%d\n", agrees);
+      }
+      if (!agrees || agreed.kind == IR_OPERAND_NONE) {
+        for (size_t d = 0; d < p * 2; d++) {
+          ir_operand_destroy(&rebuilt[d]);
+        }
+        free(rebuilt);
+        free(claimed);
+        return 0;
+      }
+      source = &agreed;
+    }
+    rebuilt[p * 2] = ir_operand_copy(source);
+    rebuilt[p * 2 + 1] = want ? ir_operand_label(want) : ir_operand_none();
+  }
+
+  free(claimed);
+  for (size_t q = 0; q < phi->argument_count; q++) {
+    ir_operand_destroy(&phi->arguments[q]);
+  }
+  free(phi->arguments);
+  phi->arguments = rebuilt;
+  phi->argument_count = wanted * 2;
+  return 2;
+}
+
+static int ir_ssa_repair_enabled(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *setting = getenv("METTLE_SSA_REPAIR");
+    cached = (setting && *setting && strcmp(setting, "0") == 0) ? 0 : 1;
+  }
+  return cached;
+}
+
+static int ir_ssa_sabotage_incomings(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *setting = getenv("METTLE_SSA_SABOTAGE");
+    cached = (setting && strcmp(setting, "incoming") == 0) ? 1 : 0;
+  }
+  return cached;
+}
+
+int ir_ssa_sabotage_pass(IRFunction *function, int *changed) {
+  if (changed) {
+    *changed = 0;
+  }
+  if (!function || !ir_ssa_sabotage_incomings()) {
+    return 1;
+  }
+  size_t scrambled = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *phi = &function->instructions[i];
+    if (phi->op != IR_OP_PHI || !phi->arguments) {
+      continue;
+    }
+    const size_t pairs = phi->argument_count / 2;
+    if (pairs < 2) {
+      continue;
+    }
+    for (size_t p = 1; p < pairs; p++) {
+      for (size_t q = p; q > 0; q--) {
+        const char *left = phi->arguments[(q - 1) * 2 + 1].name;
+        const char *right = phi->arguments[q * 2 + 1].name;
+        const int order = (!left && !right)  ? 0
+                          : !left            ? -1
+                          : !right           ? 1
+                                             : strcmp(left, right);
+        if (order <= 0) {
+          break;
+        }
+        IROperand value = phi->arguments[(q - 1) * 2];
+        IROperand label = phi->arguments[(q - 1) * 2 + 1];
+        phi->arguments[(q - 1) * 2] = phi->arguments[q * 2];
+        phi->arguments[(q - 1) * 2 + 1] = phi->arguments[q * 2 + 1];
+        phi->arguments[q * 2] = value;
+        phi->arguments[q * 2 + 1] = label;
+        scrambled++;
+      }
+    }
+  }
+  (void)scrambled;
+  return 1;
+}
+
+int ir_repair_phis(IRFunction *function, int *changed) {
+  if (changed) {
+    *changed = 0;
+  }
+  if (!function || function->instruction_count == 0 ||
+      !ir_ssa_repair_enabled()) {
+    return 1;
+  }
+  size_t phis = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (function->instructions[i].op == IR_OP_PHI) {
+      phis++;
+    }
+  }
+  if (phis == 0) {
+    return 1;
+  }
+
+  size_t block_count = 0;
+  const IRBasicBlock *blocks = ir_function_blocks(function, &block_count);
+  if (!blocks || block_count == 0) {
+    return ir_leave_ssa_pass(function, changed);
+  }
+
+  int failed = 0;
+  for (size_t b = 0; b < block_count && !failed; b++) {
+    const IRBasicBlock *block = &blocks[b];
+    const size_t start = block->first_instruction;
+    for (size_t k = 0; k < block->instruction_count; k++) {
+      IRInstruction *instruction = &function->instructions[start + k];
+      if (instruction->op == IR_OP_LABEL) {
+        continue;
+      }
+      if (instruction->op != IR_OP_PHI) {
+        break;
+      }
+      const int outcome =
+          ir_repair_phi_incomings(blocks, block_count, b, instruction);
+      if (outcome == 0) {
+        failed = 1;
+        break;
+      }
+      if (outcome == 2) {
+        g_ssa_phis_repaired++;
+      }
+    }
+  }
+
+  if (failed) {
+    g_ssa_repair_bailouts++;
+    return ir_leave_ssa_pass(function, changed);
+  }
+
+  ir_function_number_values(function);
+  if (changed) {
+    *changed = 0;
+  }
+  return 1;
+}
+
 int ir_ssa_propagate_pass(IRFunction *function, int *changed) {
   if (changed) {
     *changed = 0;
   }
-  if (!function || function->instruction_count == 0) {
+  if (!function || function->instruction_count == 0 || !ir_ssa_opt_enabled()) {
     return 1;
   }
   size_t phi_count = 0;
