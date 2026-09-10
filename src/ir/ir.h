@@ -502,6 +502,10 @@ int ir_function_check_structure(const IRFunction *function,
                                 size_t why_capacity);
 size_t ir_structure_dominance_violations(IRFunction *function, char *why,
                                          size_t why_capacity);
+size_t ir_function_check_phis(IRFunction *function, char *why,
+                              size_t why_capacity);
+void ir_phi_check_after_pass(IRFunction *function, const char *pass_name);
+size_t ir_phi_violation_count(void);
 size_t ir_structure_snapshot(const IRFunction *function);
 void ir_structure_check_after_pass(const IRFunction *function,
                                    const char *pass_name, size_t before);

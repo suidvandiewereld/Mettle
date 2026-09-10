@@ -329,6 +329,93 @@ size_t ir_structure_dominance_violations(IRFunction *function, char *why,
   return violations;
 }
 
+static size_t g_phi_violations = 0;
+
+size_t ir_phi_violation_count(void) { return g_phi_violations; }
+
+size_t ir_function_check_phis(IRFunction *function, char *why,
+                              size_t why_capacity) {
+  if (!function || function->instruction_count == 0) {
+    return 0;
+  }
+  size_t phi_count = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (function->instructions[i].op == IR_OP_PHI) {
+      phi_count++;
+    }
+  }
+  if (phi_count == 0) {
+    return 0;
+  }
+
+  IRValueTable labels;
+  ir_value_table_init(&labels);
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_LABEL && in->text) {
+      ir_value_table_intern(&labels, (unsigned char)IR_OPERAND_LABEL, in->text);
+    }
+  }
+
+  size_t block_count = 0;
+  const IRBasicBlock *blocks = ir_function_blocks(function, &block_count);
+  size_t bad = 0;
+
+  for (size_t b = 0; b < block_count; b++) {
+    const size_t start = blocks[b].first_instruction;
+    for (size_t k = 0; k < blocks[b].instruction_count; k++) {
+      const IRInstruction *phi = &function->instructions[start + k];
+      if (phi->op != IR_OP_PHI) {
+        continue;
+      }
+      const size_t incoming = phi->argument_count / 2;
+      if (incoming != blocks[b].predecessor_count) {
+        bad++;
+        if (bad == 1 && why && why_capacity) {
+          snprintf(why, why_capacity,
+                   "phi at %zu has %zu incoming for %zu predecessors",
+                   start + k, incoming, blocks[b].predecessor_count);
+        }
+        continue;
+      }
+      for (size_t a = 0; a + 1 < phi->argument_count; a += 2) {
+        const IROperand *label = &phi->arguments[a + 1];
+        if (label->kind != IR_OPERAND_LABEL || !label->name) {
+          continue;
+        }
+        if (ir_value_table_lookup(&labels, (unsigned char)IR_OPERAND_LABEL,
+                                  label->name) == IR_VALUE_ID_NONE) {
+          bad++;
+          if (bad == 1 && why && why_capacity) {
+            snprintf(why, why_capacity,
+                     "phi at %zu names predecessor '%s' which no label defines",
+                     start + k, label->name);
+          }
+        }
+      }
+    }
+  }
+
+  ir_value_table_clear(&labels);
+  return bad;
+}
+
+void ir_phi_check_after_pass(IRFunction *function, const char *pass_name) {
+  if (!getenv("METTLE_PHI_AUDIT") || !function) {
+    return;
+  }
+  char why[320];
+  why[0] = 0;
+  const size_t bad = ir_function_check_phis(function, why, sizeof(why));
+  if (bad == 0) {
+    return;
+  }
+  g_phi_violations++;
+  fprintf(stderr, "mettle: pass '%s' broke %zu phis in '%s': %s\n",
+          pass_name ? pass_name : "<unnamed>", bad,
+          function->name ? function->name : "<unnamed>", why);
+}
+
 size_t ir_structure_snapshot(const IRFunction *function) {
   if (!ir_structure_enabled() || !function) {
     return 0;
