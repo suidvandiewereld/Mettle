@@ -424,6 +424,8 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed);
 int ir_promote_scalar_locals_pass(IRFunction *function, int *changed);
 int ir_leave_ssa_pass(IRFunction *function, int *changed);
 int ir_ssa_enabled(void);
+int ir_ssa_propagate_pass(IRFunction *function, int *changed);
+void ir_ssa_opt_report_stats(void);
 int ir_select_adjacent_field_pass(IRFunction *function, int *changed);
 
 int ir_or_chain_to_bitset_pass(IRFunction *function, int *changed);

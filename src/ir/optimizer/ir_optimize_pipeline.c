@@ -145,6 +145,10 @@ static const IROptNamedPass g_ir_ssa_enter[] = {
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
 };
 
+static const IROptNamedPass g_ir_ssa_optimize[] = {
+    {"ssa_propagate", ir_ssa_propagate_pass,
+     {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
+};
 static const IROptNamedPass g_ir_ssa_leave[] = {
     {"leave_ssa", ir_leave_ssa_pass,
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
@@ -666,6 +670,13 @@ int ir_optimize_function_pipeline(IRFunction *function) {
                                      0)) {
       return 0;
     }
+    mettle_compiler_ctx_set_pass_name("ssa optimize");
+    if (!ir_run_named_stage_fixpoint(function, g_ir_ssa_optimize,
+                                     IR_ARRAY_COUNT(g_ir_ssa_optimize), 4,
+                                     "ssa optimize",
+                                     "IR optimization pass failed", 0)) {
+      return 0;
+    }
     mettle_compiler_ctx_set_pass_name("leave ssa");
     if (!ir_run_named_stage_fixpoint(function, g_ir_ssa_leave,
                                      IR_ARRAY_COUNT(g_ir_ssa_leave), 1,
@@ -1028,6 +1039,7 @@ int ir_optimize_program_pipeline(IRProgram *program,
   }
   ir_pass_time_report();
   ir_analysis_report_stats();
+  ir_ssa_opt_report_stats();
   ir_verify_end_program();
 
   ir_function_index_reset();
