@@ -469,11 +469,26 @@ static void ir_ssa_rename_block(IRSsaRenamer *renamer, size_t block_index) {
   free(saved);
 }
 
+static int ir_ssa_blocks_tile(const IRFunction *function,
+                              const IRBasicBlock *blocks, size_t block_count) {
+  size_t covered = 0;
+  for (size_t b = 0; b < block_count; b++) {
+    if (blocks[b].first_instruction != covered) {
+      return 0;
+    }
+    covered += blocks[b].instruction_count;
+  }
+  return covered == function->instruction_count;
+}
+
 static int ir_ssa_ensure_block_labels(IRFunction *function, int *changed) {
   size_t block_count = 0;
   const IRBasicBlock *blocks = ir_function_blocks(function, &block_count);
   if (!blocks || block_count == 0) {
     return 1;
+  }
+  if (!ir_ssa_blocks_tile(function, blocks, block_count)) {
+    return 0;
   }
 
   size_t missing = 0;
@@ -574,6 +589,7 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
+  ir_function_clear_cfg(function);
   ir_function_number_values(function);
 
   IRSsaCandidates candidates;
@@ -607,6 +623,31 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
       !blocks || block_count == 0) {
     ir_ssa_candidates_destroy(&candidates);
     return 1;
+  }
+
+  if (!ir_ssa_blocks_tile(function, blocks, block_count)) {
+    ir_ssa_candidates_destroy(&candidates);
+    return 1;
+  }
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *instruction = &function->instructions[i];
+    const int writes = ir_instruction_writes_destination(instruction);
+    const size_t operands = ir_ssa_operand_count(instruction);
+    for (size_t j = writes ? 1 : 0; j < operands; j++) {
+      IROperand *operand = ir_ssa_operand_at(instruction, j);
+      if (!operand || operand->kind != IR_OPERAND_SYMBOL ||
+          operand->value_id == IR_VALUE_ID_NONE ||
+          operand->value_id >= candidates.value_count ||
+          !candidates.promotable[operand->value_id]) {
+        continue;
+      }
+      const uint32_t declared = candidates.declared_at[operand->value_id];
+      if (declared == IR_INSTRUCTION_NONE ||
+          !ir_function_instruction_dominates(function, declared, i)) {
+        candidates.promotable[operand->value_id] = 0;
+      }
+    }
   }
 
   unsigned char *has_phi =
@@ -802,6 +843,24 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   }
 
   ir_ssa_rename_block(&renamer, function->entry_block);
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *phi = &function->instructions[i];
+    if (phi->op != IR_OP_PHI || !phi->arguments) {
+      continue;
+    }
+    const uint32_t base = phi_origin[i];
+    if (base == IR_VALUE_ID_NONE) {
+      continue;
+    }
+    for (size_t a = 0; a + 1 < phi->argument_count; a += 2) {
+      if (phi->arguments[a].value_id != base) {
+        continue;
+      }
+      ir_operand_destroy(&phi->arguments[a]);
+      phi->arguments[a] = ir_operand_none();
+    }
+  }
 
   for (size_t i = 0; i < candidates.value_count; i++) {
     free(renamer.stacks[i].entries);

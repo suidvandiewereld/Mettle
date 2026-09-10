@@ -363,9 +363,25 @@ size_t ir_function_check_phis(IRFunction *function, char *why,
 
   for (size_t b = 0; b < block_count; b++) {
     const size_t start = blocks[b].first_instruction;
+    size_t head = 0;
+    while (head < blocks[b].instruction_count &&
+           (function->instructions[start + head].op == IR_OP_LABEL ||
+            function->instructions[start + head].op == IR_OP_NOP ||
+            function->instructions[start + head].op == IR_OP_PHI)) {
+      head++;
+    }
     for (size_t k = 0; k < blocks[b].instruction_count; k++) {
       const IRInstruction *phi = &function->instructions[start + k];
       if (phi->op != IR_OP_PHI) {
+        continue;
+      }
+      if (k >= head) {
+        bad++;
+        if (bad == 1 && why && why_capacity) {
+          snprintf(why, why_capacity,
+                   "phi at %zu is not at the head of its block",
+                   start + k);
+        }
         continue;
       }
       const size_t incoming = phi->argument_count / 2;
@@ -400,10 +416,53 @@ size_t ir_function_check_phis(IRFunction *function, char *why,
   return bad;
 }
 
+static void ir_phi_check_declarations(IRFunction *function,
+                                      const char *pass_name) {
+  IRValueTable declared;
+  ir_value_table_init(&declared);
+  for (size_t p = 0; p < function->parameter_count; p++) {
+    if (function->parameter_names && function->parameter_names[p]) {
+      ir_value_table_intern(&declared, (unsigned char)IR_OPERAND_SYMBOL,
+                            function->parameter_names[p]);
+    }
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_DECLARE_LOCAL && in->dest.kind == IR_OPERAND_SYMBOL &&
+        in->dest.name) {
+      ir_value_table_intern(&declared, (unsigned char)IR_OPERAND_SYMBOL,
+                            in->dest.name);
+    }
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op != IR_OP_PHI || !in->arguments) {
+      continue;
+    }
+    for (size_t a = 0; a + 1 < in->argument_count; a += 2) {
+      const IROperand *v = &in->arguments[a];
+      if (v->kind != IR_OPERAND_SYMBOL || !v->name) {
+        continue;
+      }
+      if (ir_value_table_lookup(&declared, (unsigned char)IR_OPERAND_SYMBOL,
+                                v->name) == IR_VALUE_ID_NONE) {
+        fprintf(stderr,
+                "mettle: pass '%s' left phi incoming '%s' undeclared in '%s'\n",
+                pass_name ? pass_name : "<unnamed>", v->name,
+                function->name ? function->name : "<unnamed>");
+        ir_value_table_clear(&declared);
+        return;
+      }
+    }
+  }
+  ir_value_table_clear(&declared);
+}
+
 void ir_phi_check_after_pass(IRFunction *function, const char *pass_name) {
   if (!getenv("METTLE_PHI_AUDIT") || !function) {
     return;
   }
+  ir_phi_check_declarations(function, pass_name);
   char why[320];
   why[0] = 0;
   const size_t bad = ir_function_check_phis(function, why, sizeof(why));
