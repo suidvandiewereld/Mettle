@@ -333,9 +333,64 @@ static size_t ir_ssa_opt_remove_dead_phis(IRFunction *function,
   return dead;
 }
 
-static int ir_repair_phi_incomings(const IRBasicBlock *blocks,
-                                   size_t block_count, size_t b,
-                                   IRInstruction *phi) {
+static size_t ir_ssa_base_length(const char *name) {
+  const char *last = NULL;
+  const char *scan = name;
+  while (scan && (scan = strstr(scan, "__ssa")) != NULL) {
+    last = scan;
+    scan += 5;
+  }
+  return last ? (size_t)(last - name) : 0;
+}
+
+static int ir_ssa_name_is_version_of(const char *name, const char *base,
+                                     size_t base_length) {
+  if (!name || !base || base_length == 0) {
+    return 0;
+  }
+  return strncmp(name, base, base_length) == 0 &&
+         strncmp(name + base_length, "__ssa", 5) == 0;
+}
+
+static const IROperand *ir_ssa_reaching_def(IRFunction *function,
+                                            const IRBasicBlock *blocks,
+                                            size_t block_count,
+                                            const IRDomTree *dom, size_t from,
+                                            const char *base,
+                                            size_t base_length) {
+  size_t block = from;
+  for (size_t hops = 0; hops <= block_count && block != IR_BLOCK_NONE &&
+                        block < block_count;
+       hops++) {
+    const IRBasicBlock *scan = &blocks[block];
+    for (size_t k = scan->instruction_count; k > 0; k--) {
+      const IRInstruction *instruction =
+          &function->instructions[scan->first_instruction + k - 1];
+      if (!ir_instruction_writes_destination(instruction) ||
+          instruction->dest.kind != IR_OPERAND_SYMBOL) {
+        continue;
+      }
+      if (ir_ssa_name_is_version_of(instruction->dest.name, base,
+                                    base_length)) {
+        return &instruction->dest;
+      }
+    }
+    if (!dom || !dom->built || !dom->idom || block >= dom->block_count) {
+      break;
+    }
+    const size_t next = dom->idom[block];
+    if (next == block) {
+      break;
+    }
+    block = next;
+  }
+  return NULL;
+}
+
+static int ir_repair_phi_incomings(IRFunction *function,
+                                   const IRBasicBlock *blocks,
+                                   size_t block_count, const IRDomTree *dom,
+                                   size_t b, IRInstruction *phi) {
   const IRBasicBlock *block = &blocks[b];
   const size_t wanted = block->predecessor_count;
   int identical = (phi->argument_count == wanted * 2);
@@ -408,11 +463,18 @@ static int ir_repair_phi_incomings(const IRBasicBlock *blocks,
         break;
       }
     }
+    if (!source && pred < block_count) {
+      const size_t base_length = ir_ssa_base_length(phi->dest.name);
+      source = ir_ssa_reaching_def(function, blocks, block_count, dom, pred,
+                                   phi->dest.name, base_length);
+    }
     if (!source) {
       if (getenv("METTLE_SSA_REPAIR_DEBUG")) {
-        fprintf(stderr, "ssa-repair: block %s wants pred %s; phi %s has",
-                block->label ? block->label : "?", want ? want : "?",
-                phi->dest.name ? phi->dest.name : "?");
+        fprintf(stderr,
+                "ssa-repair: block %s preds %zu incomings %zu wants pred %s; "
+                "phi %s has",
+                block->label ? block->label : "?", wanted, old_pairs,
+                want ? want : "?", phi->dest.name ? phi->dest.name : "?");
         for (size_t q = 0; q * 2 + 1 < phi->argument_count; q++) {
           const IROperand *label = &phi->arguments[q * 2 + 1];
           fprintf(stderr, " %s", (label->kind == IR_OPERAND_LABEL && label->name)
@@ -421,7 +483,7 @@ static int ir_repair_phi_incomings(const IRBasicBlock *blocks,
         }
         fprintf(stderr, " agree=%d\n", agrees);
       }
-      if (!agrees || agreed.kind == IR_OPERAND_NONE) {
+      if (1) {
         for (size_t d = 0; d < p * 2; d++) {
           ir_operand_destroy(&rebuilt[d]);
         }
@@ -528,6 +590,15 @@ int ir_repair_phis(IRFunction *function, int *changed) {
   if (!blocks || block_count == 0) {
     return ir_leave_ssa_pass(function, changed);
   }
+  char why[320];
+  why[0] = 0;
+  if (ir_function_check_phis(function, why, sizeof(why)) > 0) {
+    g_ssa_repair_bailouts++;
+    return ir_leave_ssa_pass(function, changed);
+  }
+
+  const IRAnalysis *analysis = ir_function_analysis(function);
+  const IRDomTree *dom = analysis ? &analysis->dom : NULL;
 
   int failed = 0;
   for (size_t b = 0; b < block_count && !failed; b++) {
@@ -541,8 +612,9 @@ int ir_repair_phis(IRFunction *function, int *changed) {
       if (instruction->op != IR_OP_PHI) {
         break;
       }
-      const int outcome =
-          ir_repair_phi_incomings(blocks, block_count, b, instruction);
+      const int outcome = ir_repair_phi_incomings(function, blocks,
+                                                 block_count, dom, b,
+                                                 instruction);
       if (outcome == 0) {
         failed = 1;
         break;

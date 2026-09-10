@@ -473,6 +473,7 @@ int ir_leave_ssa_pass(IRFunction *function, int *changed);
 int ir_ssa_propagate_pass(IRFunction *function, int *changed);
 int ir_repair_phis(IRFunction *function, int *changed);
 int ir_ssa_sabotage_pass(IRFunction *function, int *changed);
+int ir_ssa_enabled(void);
 void ir_ssa_opt_report_stats(void);
 int ir_instruction_writes_destination(const IRInstruction *instruction);
 uint64_t ir_function_fingerprint(const IRFunction *function);
