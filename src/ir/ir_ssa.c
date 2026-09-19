@@ -345,11 +345,114 @@ static uint32_t ir_ssa_reaching(const IRSsaRenamer *renamer, uint32_t id) {
   return stack->count ? stack->entries[stack->count - 1] : id;
 }
 
+static size_t ir_ssa_predecessor_slot(const IRBasicBlock *target,
+                                      size_t block) {
+  for (size_t p = 0; p < target->predecessor_count; p++) {
+    if (target->predecessors[p] == block) {
+      return p;
+    }
+  }
+  return SIZE_MAX;
+}
+
+static void ir_ssa_rename_uses(IRSsaRenamer *renamer,
+                               IRInstruction *instruction, int writes) {
+  const IRSsaCandidates *candidates = renamer->candidates;
+  const size_t operands = ir_ssa_operand_count(instruction);
+  for (size_t j = writes ? 1 : 0; j < operands; j++) {
+    IROperand *operand = ir_ssa_operand_at(instruction, j);
+    if (!operand || operand->kind != IR_OPERAND_SYMBOL ||
+        operand->value_id == IR_VALUE_ID_NONE ||
+        operand->value_id >= candidates->value_count ||
+        !candidates->promotable[operand->value_id]) {
+      continue;
+    }
+    const uint32_t reaching = ir_ssa_reaching(renamer, operand->value_id);
+    if (reaching != operand->value_id) {
+      ir_ssa_set_operand(renamer->function, operand, reaching);
+    }
+  }
+}
+
+static int ir_ssa_rename_definition(IRSsaRenamer *renamer, size_t index) {
+  IRFunction *function = renamer->function;
+  const IRSsaCandidates *candidates = renamer->candidates;
+  IRInstruction *instruction = &function->instructions[index];
+
+  const uint32_t base = (instruction->op == IR_OP_PHI)
+                            ? renamer->phi_origin[index]
+                            : instruction->dest.value_id;
+  if (base == IR_VALUE_ID_NONE || base >= candidates->value_count) {
+    return 1;
+  }
+  const uint32_t version =
+      ir_ssa_fresh_version(function, base, &renamer->counter);
+  if (version == IR_VALUE_ID_NONE) {
+    renamer->failed = 1;
+    return 0;
+  }
+  ir_ssa_set_operand(function, &instruction->dest, version);
+  if (!ir_ssa_record_version(renamer, version, base) ||
+      !ir_ssa_stack_push(&renamer->stacks[base], version)) {
+    renamer->failed = 1;
+    return 0;
+  }
+  return 1;
+}
+
+static int ir_ssa_rename_instruction(IRSsaRenamer *renamer, size_t index) {
+  const IRSsaCandidates *candidates = renamer->candidates;
+  IRInstruction *instruction = &renamer->function->instructions[index];
+  const int writes = ir_instruction_writes_destination(instruction);
+
+  if (instruction->op == IR_OP_DECLARE_LOCAL) {
+    if (instruction->dest.value_id != IR_VALUE_ID_NONE &&
+        instruction->dest.value_id < candidates->value_count &&
+        candidates->promotable[instruction->dest.value_id] &&
+        !ir_ssa_stack_push(&renamer->stacks[instruction->dest.value_id],
+                           instruction->dest.value_id)) {
+      renamer->failed = 1;
+    }
+    return 1;
+  }
+
+  if (instruction->op != IR_OP_PHI) {
+    ir_ssa_rename_uses(renamer, instruction, writes);
+  }
+
+  if (!writes || instruction->dest.value_id == IR_VALUE_ID_NONE ||
+      instruction->dest.value_id >= candidates->value_count ||
+      !candidates->promotable[instruction->dest.value_id]) {
+    return 1;
+  }
+  return ir_ssa_rename_definition(renamer, index);
+}
+
+static void ir_ssa_rename_successor_phis(IRSsaRenamer *renamer,
+                                         const IRBasicBlock *target,
+                                         size_t slot) {
+  const IRSsaCandidates *candidates = renamer->candidates;
+  const size_t target_start = target->first_instruction;
+  for (size_t k = 0; k < target->instruction_count; k++) {
+    const size_t index = target_start + k;
+    IRInstruction *phi = &renamer->function->instructions[index];
+    if (phi->op != IR_OP_PHI) {
+      continue;
+    }
+    const uint32_t base = renamer->phi_origin[index];
+    if (base == IR_VALUE_ID_NONE || base >= candidates->value_count ||
+        slot * 2 >= phi->argument_count) {
+      continue;
+    }
+    const uint32_t reaching = ir_ssa_reaching(renamer, base);
+    ir_ssa_set_operand(renamer->function, &phi->arguments[slot * 2], reaching);
+  }
+}
+
 static void ir_ssa_rename_block(IRSsaRenamer *renamer, size_t block_index) {
   if (renamer->failed || block_index >= renamer->block_count) {
     return;
   }
-  IRFunction *function = renamer->function;
   const IRSsaCandidates *candidates = renamer->candidates;
   const IRBasicBlock *block = &renamer->blocks[block_index];
 
@@ -364,60 +467,7 @@ static void ir_ssa_rename_block(IRSsaRenamer *renamer, size_t block_index) {
 
   const size_t start = block->first_instruction;
   for (size_t k = 0; k < block->instruction_count; k++) {
-    const size_t index = start + k;
-    IRInstruction *instruction = &function->instructions[index];
-    const int writes = ir_instruction_writes_destination(instruction);
-
-    if (instruction->op == IR_OP_DECLARE_LOCAL) {
-      if (instruction->dest.value_id != IR_VALUE_ID_NONE &&
-          instruction->dest.value_id < candidates->value_count &&
-          candidates->promotable[instruction->dest.value_id] &&
-          !ir_ssa_stack_push(&renamer->stacks[instruction->dest.value_id],
-                             instruction->dest.value_id)) {
-        renamer->failed = 1;
-      }
-      continue;
-    }
-
-    if (instruction->op != IR_OP_PHI) {
-      const size_t operands = ir_ssa_operand_count(instruction);
-      for (size_t j = writes ? 1 : 0; j < operands; j++) {
-        IROperand *operand = ir_ssa_operand_at(instruction, j);
-        if (!operand || operand->kind != IR_OPERAND_SYMBOL ||
-            operand->value_id == IR_VALUE_ID_NONE ||
-            operand->value_id >= candidates->value_count ||
-            !candidates->promotable[operand->value_id]) {
-          continue;
-        }
-        const uint32_t reaching = ir_ssa_reaching(renamer, operand->value_id);
-        if (reaching != operand->value_id) {
-          ir_ssa_set_operand(function, operand, reaching);
-        }
-      }
-    }
-
-    if (!writes || instruction->dest.value_id == IR_VALUE_ID_NONE ||
-        instruction->dest.value_id >= candidates->value_count ||
-        !candidates->promotable[instruction->dest.value_id]) {
-      continue;
-    }
-
-    const uint32_t base = (instruction->op == IR_OP_PHI)
-                              ? renamer->phi_origin[index]
-                              : instruction->dest.value_id;
-    if (base == IR_VALUE_ID_NONE || base >= candidates->value_count) {
-      continue;
-    }
-    const uint32_t version =
-        ir_ssa_fresh_version(function, base, &renamer->counter);
-    if (version == IR_VALUE_ID_NONE) {
-      renamer->failed = 1;
-      break;
-    }
-    ir_ssa_set_operand(function, &instruction->dest, version);
-    if (!ir_ssa_record_version(renamer, version, base) ||
-        !ir_ssa_stack_push(&renamer->stacks[base], version)) {
-      renamer->failed = 1;
+    if (!ir_ssa_rename_instruction(renamer, start + k)) {
       break;
     }
   }
@@ -428,33 +478,11 @@ static void ir_ssa_rename_block(IRSsaRenamer *renamer, size_t block_index) {
       continue;
     }
     const IRBasicBlock *target = &renamer->blocks[successor];
-    size_t slot = SIZE_MAX;
-    for (size_t p = 0; p < target->predecessor_count; p++) {
-      if (target->predecessors[p] == block_index) {
-        slot = p;
-        break;
-      }
-    }
+    const size_t slot = ir_ssa_predecessor_slot(target, block_index);
     if (slot == SIZE_MAX) {
       continue;
     }
-    const size_t target_start = target->first_instruction;
-    for (size_t k = 0; k < target->instruction_count; k++) {
-      const size_t index = target_start + k;
-      IRInstruction *phi = &function->instructions[index];
-      if (phi->op != IR_OP_PHI) {
-        continue;
-      }
-      const uint32_t base = renamer->phi_origin[index];
-      if (base == IR_VALUE_ID_NONE || base >= candidates->value_count) {
-        continue;
-      }
-      if (slot * 2 >= phi->argument_count) {
-        continue;
-      }
-      const uint32_t reaching = ir_ssa_reaching(renamer, base);
-      ir_ssa_set_operand(function, &phi->arguments[slot * 2], reaching);
-    }
+    ir_ssa_rename_successor_phis(renamer, target, slot);
   }
 
   for (size_t child = renamer->dom->child_head[block_index];
@@ -584,6 +612,291 @@ static void ir_ssa_audit_declarations(IRFunction *function, const char *stage) {
   ir_value_table_clear(&declared);
 }
 
+static size_t ir_ssa_promotable_count(const IRSsaCandidates *candidates) {
+  size_t count = 0;
+  for (size_t i = 0; i < candidates->value_count; i++) {
+    if (candidates->promotable[i]) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static void ir_ssa_reject_nondominated(IRFunction *function,
+                                       IRSsaCandidates *candidates) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *instruction = &function->instructions[i];
+    const int writes = ir_instruction_writes_destination(instruction);
+    const size_t operands = ir_ssa_operand_count(instruction);
+    for (size_t j = writes ? 1 : 0; j < operands; j++) {
+      IROperand *operand = ir_ssa_operand_at(instruction, j);
+      if (!operand || operand->kind != IR_OPERAND_SYMBOL ||
+          operand->value_id == IR_VALUE_ID_NONE ||
+          operand->value_id >= candidates->value_count ||
+          !candidates->promotable[operand->value_id]) {
+        continue;
+      }
+      const uint32_t declared = candidates->declared_at[operand->value_id];
+      if (declared == IR_INSTRUCTION_NONE ||
+          !ir_function_instruction_dominates(function, declared, i)) {
+        candidates->promotable[operand->value_id] = 0;
+      }
+    }
+  }
+}
+
+static void ir_ssa_seed_phi_worklist(const IRFunction *function,
+                                     const IRAnalysis *analysis, uint32_t id,
+                                     size_t *worklist, unsigned char *on_list,
+                                     size_t *tail) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    if (!ir_instruction_writes_destination(instruction) ||
+        instruction->dest.value_id != id) {
+      continue;
+    }
+    const size_t block = analysis->instruction_block[i];
+    if (block == IR_BLOCK_NONE || on_list[block]) {
+      continue;
+    }
+    on_list[block] = 1;
+    worklist[(*tail)++] = block;
+  }
+}
+
+static size_t ir_ssa_spread_phis(IRFunction *function,
+                                 const IRBasicBlock *blocks,
+                                 size_t block_count,
+                                 const IRSsaCandidates *candidates,
+                                 unsigned char *has_phi, uint32_t id,
+                                 size_t *worklist, unsigned char *on_list,
+                                 size_t tail) {
+  size_t placed = 0;
+  size_t head = 0;
+  while (head < tail) {
+    const size_t block = worklist[head++];
+    size_t frontier_count = 0;
+    const size_t *frontier =
+        ir_function_dominance_frontier(function, block, &frontier_count);
+    for (size_t k = 0; k < frontier_count; k++) {
+      const size_t target = frontier[k];
+      if (target >= block_count || blocks[target].predecessor_count < 2 ||
+          has_phi[target * candidates->value_count + id]) {
+        continue;
+      }
+      has_phi[target * candidates->value_count + id] = 1;
+      placed++;
+      if (!on_list[target] && tail < block_count) {
+        on_list[target] = 1;
+        worklist[tail++] = target;
+      }
+    }
+  }
+  return placed;
+}
+
+static int ir_ssa_place_phis(IRFunction *function, const IRAnalysis *analysis,
+                             const IRBasicBlock *blocks, size_t block_count,
+                             const IRSsaCandidates *candidates,
+                             unsigned char *has_phi, size_t *phi_total) {
+  size_t *worklist = (size_t *)malloc(block_count * sizeof(size_t));
+  unsigned char *on_list = (unsigned char *)calloc(block_count, 1);
+  if (!worklist || !on_list) {
+    free(worklist);
+    free(on_list);
+    return 0;
+  }
+
+  *phi_total = 0;
+  for (uint32_t id = 1; id < (uint32_t)candidates->value_count; id++) {
+    if (!candidates->promotable[id]) {
+      continue;
+    }
+    memset(on_list, 0, block_count);
+    size_t tail = 0;
+    ir_ssa_seed_phi_worklist(function, analysis, id, worklist, on_list, &tail);
+    *phi_total += ir_ssa_spread_phis(function, blocks, block_count, candidates,
+                                     has_phi, id, worklist, on_list, tail);
+  }
+
+  free(worklist);
+  free(on_list);
+  return 1;
+}
+
+static int ir_ssa_phi_sits_on_critical_edge(const IRBasicBlock *blocks,
+                                            size_t block_count,
+                                            const IRSsaCandidates *candidates,
+                                            const unsigned char *has_phi,
+                                            uint32_t id) {
+  for (size_t b = 0; b < block_count; b++) {
+    if (!has_phi[b * candidates->value_count + id]) {
+      continue;
+    }
+    for (size_t p = 0; p < blocks[b].predecessor_count; p++) {
+      const size_t pred = blocks[b].predecessors[p];
+      if (pred < block_count && blocks[pred].successor_count > 1) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static void ir_ssa_reject_critical_edge_phis(const IRBasicBlock *blocks,
+                                             size_t block_count,
+                                             IRSsaCandidates *candidates,
+                                             unsigned char *has_phi,
+                                             size_t *phi_total) {
+  for (uint32_t id = 1; id < (uint32_t)candidates->value_count; id++) {
+    if (!candidates->promotable[id] ||
+        !ir_ssa_phi_sits_on_critical_edge(blocks, block_count, candidates,
+                                          has_phi, id)) {
+      continue;
+    }
+    candidates->promotable[id] = 0;
+    for (size_t b = 0; b < block_count; b++) {
+      if (has_phi[b * candidates->value_count + id]) {
+        has_phi[b * candidates->value_count + id] = 0;
+        (*phi_total)--;
+      }
+    }
+  }
+}
+
+static IRInstruction ir_ssa_build_phi(IRFunction *function,
+                                      const IRBasicBlock *blocks,
+                                      size_t block_count, size_t block,
+                                      const IRSsaCandidates *candidates,
+                                      uint32_t id) {
+  const IRSsaDeclInfo *info = &candidates->declarations[id];
+  const char *base_name = ir_value_table_name(&function->values, id);
+  IRInstruction phi;
+  memset(&phi, 0, sizeof(phi));
+  phi.op = IR_OP_PHI;
+  phi.location = info->location;
+  phi.dest = ir_operand_symbol(base_name);
+  phi.dest.value_id = id;
+  phi.value_type = info->value_type;
+  phi.is_float = info->is_float;
+  phi.float_bits = info->float_bits;
+  phi.is_unsigned = info->is_unsigned;
+  phi.alias_class = info->alias_class;
+  phi.argument_count = blocks[block].predecessor_count * 2;
+  phi.arguments = (IROperand *)calloc(phi.argument_count, sizeof(IROperand));
+  if (!phi.arguments) {
+    phi.argument_count = 0;
+    return phi;
+  }
+  for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
+    const size_t pred = blocks[block].predecessors[p];
+    phi.arguments[p * 2] = ir_operand_symbol(base_name);
+    phi.arguments[p * 2].value_id = id;
+    const char *label = (pred < block_count) ? blocks[pred].label : NULL;
+    phi.arguments[p * 2 + 1] =
+        label ? ir_operand_label(label) : ir_operand_none();
+  }
+  return phi;
+}
+
+static size_t ir_ssa_emit_with_phis(IRFunction *function,
+                                    const IRBasicBlock *blocks,
+                                    size_t block_count,
+                                    const IRSsaCandidates *candidates,
+                                    const unsigned char *has_phi,
+                                    IRInstruction *grown,
+                                    uint32_t *phi_origin) {
+  size_t write = 0;
+  for (size_t b = 0; b < block_count; b++) {
+    const size_t start = blocks[b].first_instruction;
+    const size_t count = blocks[b].instruction_count;
+    size_t emitted = 0;
+    if (count > 0 && function->instructions[start].op == IR_OP_LABEL) {
+      phi_origin[write] = IR_VALUE_ID_NONE;
+      grown[write++] = function->instructions[start];
+      emitted = 1;
+    }
+    for (uint32_t id = 1; id < (uint32_t)candidates->value_count; id++) {
+      if (!has_phi[b * candidates->value_count + id]) {
+        continue;
+      }
+      phi_origin[write] = id;
+      grown[write++] =
+          ir_ssa_build_phi(function, blocks, block_count, b, candidates, id);
+    }
+    for (size_t k = emitted; k < count; k++) {
+      phi_origin[write] = IR_VALUE_ID_NONE;
+      grown[write++] = function->instructions[start + k];
+    }
+  }
+  return write;
+}
+
+static void ir_ssa_clear_phi_base_arguments(IRFunction *function,
+                                            const uint32_t *phi_origin) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *phi = &function->instructions[i];
+    if (phi->op != IR_OP_PHI || !phi->arguments) {
+      continue;
+    }
+    const uint32_t base = phi_origin[i];
+    if (base == IR_VALUE_ID_NONE) {
+      continue;
+    }
+    for (size_t a = 0; a + 1 < phi->argument_count; a += 2) {
+      if (phi->arguments[a].value_id != base) {
+        continue;
+      }
+      ir_operand_destroy(&phi->arguments[a]);
+      phi->arguments[a] = ir_operand_none();
+    }
+  }
+}
+
+static void ir_ssa_insert_created_declarations(
+    IRFunction *function, const IRSsaCandidates *candidates,
+    const IRSsaRenamer *renamer) {
+  IRInstruction *declared = (IRInstruction *)malloc(
+      (function->instruction_count + renamer->created_count) *
+      sizeof(IRInstruction));
+  if (!declared) {
+    return;
+  }
+  size_t out = 0;
+  size_t head = 0;
+  if (function->instruction_count > 0 &&
+      function->instructions[0].op == IR_OP_LABEL) {
+    declared[out++] = function->instructions[0];
+    head = 1;
+  }
+  for (size_t k = 0; k < renamer->created_count; k++) {
+    const uint32_t base = renamer->created_bases[k];
+    const IRSsaDeclInfo *origin = &candidates->declarations[base];
+    const char *name =
+        ir_value_table_name(&function->values, renamer->created_versions[k]);
+    IRInstruction declaration;
+    memset(&declaration, 0, sizeof(declaration));
+    declaration.op = IR_OP_DECLARE_LOCAL;
+    declaration.location = origin->location;
+    declaration.dest = ir_operand_symbol(name);
+    declaration.dest.value_id = renamer->created_versions[k];
+    declaration.text = mettle_strdup(origin->type_name);
+    declaration.value_type = origin->value_type;
+    declaration.is_float = origin->is_float;
+    declaration.float_bits = origin->float_bits;
+    declaration.is_unsigned = origin->is_unsigned;
+    declaration.alias_class = origin->alias_class;
+    declared[out++] = declaration;
+  }
+  for (size_t k = head; k < function->instruction_count; k++) {
+    declared[out++] = function->instructions[k];
+  }
+  free(function->instructions);
+  function->instructions = declared;
+  function->instruction_count = out;
+  function->instruction_capacity = out;
+}
+
 int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   if (!function || function->instruction_count == 0 || !ir_ssa_enabled()) {
     return 1;
@@ -597,17 +910,11 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
-  size_t promotable_count = 0;
-  for (size_t i = 0; i < candidates.value_count; i++) {
-    if (candidates.promotable[i]) {
-      promotable_count++;
-    }
-  }
+  const size_t promotable_count = ir_ssa_promotable_count(&candidates);
+  ir_ssa_candidates_destroy(&candidates);
   if (promotable_count == 0) {
-    ir_ssa_candidates_destroy(&candidates);
     return 1;
   }
-  ir_ssa_candidates_destroy(&candidates);
 
   if (!ir_ssa_ensure_block_labels(function, changed)) {
     return 1;
@@ -630,113 +937,25 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    IRInstruction *instruction = &function->instructions[i];
-    const int writes = ir_instruction_writes_destination(instruction);
-    const size_t operands = ir_ssa_operand_count(instruction);
-    for (size_t j = writes ? 1 : 0; j < operands; j++) {
-      IROperand *operand = ir_ssa_operand_at(instruction, j);
-      if (!operand || operand->kind != IR_OPERAND_SYMBOL ||
-          operand->value_id == IR_VALUE_ID_NONE ||
-          operand->value_id >= candidates.value_count ||
-          !candidates.promotable[operand->value_id]) {
-        continue;
-      }
-      const uint32_t declared = candidates.declared_at[operand->value_id];
-      if (declared == IR_INSTRUCTION_NONE ||
-          !ir_function_instruction_dominates(function, declared, i)) {
-        candidates.promotable[operand->value_id] = 0;
-      }
-    }
-  }
+  ir_ssa_reject_nondominated(function, &candidates);
 
   unsigned char *has_phi =
       (unsigned char *)calloc(block_count * candidates.value_count, 1);
-  size_t *worklist = (size_t *)malloc(block_count * sizeof(size_t));
-  unsigned char *on_list = (unsigned char *)calloc(block_count, 1);
-  if (!has_phi || !worklist || !on_list) {
-    free(has_phi);
-    free(worklist);
-    free(on_list);
+  if (!has_phi) {
     ir_ssa_candidates_destroy(&candidates);
     return 1;
   }
 
   size_t phi_total = 0;
-  for (uint32_t id = 1; id < (uint32_t)candidates.value_count; id++) {
-    if (!candidates.promotable[id]) {
-      continue;
-    }
-    memset(on_list, 0, block_count);
-    size_t head = 0;
-    size_t tail = 0;
-    for (size_t i = 0; i < function->instruction_count; i++) {
-      const IRInstruction *instruction = &function->instructions[i];
-      if (!ir_instruction_writes_destination(instruction) ||
-          instruction->dest.value_id != id) {
-        continue;
-      }
-      const size_t block = analysis->instruction_block[i];
-      if (block == IR_BLOCK_NONE || on_list[block]) {
-        continue;
-      }
-      on_list[block] = 1;
-      worklist[tail++] = block;
-    }
-
-    while (head < tail) {
-      const size_t block = worklist[head++];
-      size_t frontier_count = 0;
-      const size_t *frontier =
-          ir_function_dominance_frontier(function, block, &frontier_count);
-      for (size_t k = 0; k < frontier_count; k++) {
-        const size_t target = frontier[k];
-        if (target >= block_count ||
-            blocks[target].predecessor_count < 2 ||
-            has_phi[target * candidates.value_count + id]) {
-          continue;
-        }
-        has_phi[target * candidates.value_count + id] = 1;
-        phi_total++;
-        if (!on_list[target] && tail < block_count) {
-          on_list[target] = 1;
-          worklist[tail++] = target;
-        }
-      }
-    }
+  if (!ir_ssa_place_phis(function, analysis, blocks, block_count, &candidates,
+                         has_phi, &phi_total)) {
+    free(has_phi);
+    ir_ssa_candidates_destroy(&candidates);
+    return 1;
   }
 
-  free(worklist);
-  free(on_list);
-
-  for (uint32_t id = 1; id < (uint32_t)candidates.value_count; id++) {
-    if (!candidates.promotable[id]) {
-      continue;
-    }
-    int critical = 0;
-    for (size_t b = 0; b < block_count && !critical; b++) {
-      if (!has_phi[b * candidates.value_count + id]) {
-        continue;
-      }
-      for (size_t p = 0; p < blocks[b].predecessor_count; p++) {
-        const size_t pred = blocks[b].predecessors[p];
-        if (pred < block_count && blocks[pred].successor_count > 1) {
-          critical = 1;
-          break;
-        }
-      }
-    }
-    if (!critical) {
-      continue;
-    }
-    candidates.promotable[id] = 0;
-    for (size_t b = 0; b < block_count; b++) {
-      if (has_phi[b * candidates.value_count + id]) {
-        has_phi[b * candidates.value_count + id] = 0;
-        phi_total--;
-      }
-    }
-  }
+  ir_ssa_reject_critical_edge_phis(blocks, block_count, &candidates, has_phi,
+                                   &phi_total);
 
   IRInstruction *grown = (IRInstruction *)malloc(
       (function->instruction_count + phi_total + 1) * sizeof(IRInstruction));
@@ -750,56 +969,8 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
-  size_t write = 0;
-  for (size_t b = 0; b < block_count; b++) {
-    const size_t start = blocks[b].first_instruction;
-    const size_t count = blocks[b].instruction_count;
-    size_t emitted = 0;
-    if (count > 0 && function->instructions[start].op == IR_OP_LABEL) {
-      phi_origin[write] = IR_VALUE_ID_NONE;
-      grown[write++] = function->instructions[start];
-      emitted = 1;
-    }
-    for (uint32_t id = 1; id < (uint32_t)candidates.value_count; id++) {
-      if (!has_phi[b * candidates.value_count + id]) {
-        continue;
-      }
-      const IRSsaDeclInfo *info = &candidates.declarations[id];
-      const char *base_name = ir_value_table_name(&function->values, id);
-      IRInstruction phi;
-      memset(&phi, 0, sizeof(phi));
-      phi.op = IR_OP_PHI;
-      phi.location = info->location;
-      phi.dest = ir_operand_symbol(base_name);
-      phi.dest.value_id = id;
-      phi.value_type = info->value_type;
-      phi.is_float = info->is_float;
-      phi.float_bits = info->float_bits;
-      phi.is_unsigned = info->is_unsigned;
-      phi.alias_class = info->alias_class;
-      phi.argument_count = blocks[b].predecessor_count * 2;
-      phi.arguments =
-          (IROperand *)calloc(phi.argument_count, sizeof(IROperand));
-      if (!phi.arguments) {
-        phi.argument_count = 0;
-      } else {
-        for (size_t p = 0; p < blocks[b].predecessor_count; p++) {
-          const size_t pred = blocks[b].predecessors[p];
-          phi.arguments[p * 2] = ir_operand_symbol(base_name);
-          phi.arguments[p * 2].value_id = id;
-          const char *label = (pred < block_count) ? blocks[pred].label : NULL;
-          phi.arguments[p * 2 + 1] =
-              label ? ir_operand_label(label) : ir_operand_none();
-        }
-      }
-      phi_origin[write] = id;
-      grown[write++] = phi;
-    }
-    for (size_t k = emitted; k < count; k++) {
-      phi_origin[write] = IR_VALUE_ID_NONE;
-      grown[write++] = function->instructions[start + k];
-    }
-  }
+  const size_t write = ir_ssa_emit_with_phis(
+      function, blocks, block_count, &candidates, has_phi, grown, phi_origin);
 
   free(has_phi);
   if (getenv("METTLE_IR_SSA_DEBUG")) {
@@ -844,23 +1015,7 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
 
   ir_ssa_rename_block(&renamer, function->entry_block);
 
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    IRInstruction *phi = &function->instructions[i];
-    if (phi->op != IR_OP_PHI || !phi->arguments) {
-      continue;
-    }
-    const uint32_t base = phi_origin[i];
-    if (base == IR_VALUE_ID_NONE) {
-      continue;
-    }
-    for (size_t a = 0; a + 1 < phi->argument_count; a += 2) {
-      if (phi->arguments[a].value_id != base) {
-        continue;
-      }
-      ir_operand_destroy(&phi->arguments[a]);
-      phi->arguments[a] = ir_operand_none();
-    }
-  }
+  ir_ssa_clear_phi_base_arguments(function, phi_origin);
 
   for (size_t i = 0; i < candidates.value_count; i++) {
     free(renamer.stacks[i].entries);
@@ -869,44 +1024,7 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   free(phi_origin);
 
   if (renamer.created_count > 0) {
-    IRInstruction *declared = (IRInstruction *)malloc(
-        (function->instruction_count + renamer.created_count) *
-        sizeof(IRInstruction));
-    if (declared) {
-      size_t out = 0;
-      size_t head = 0;
-      if (function->instruction_count > 0 &&
-          function->instructions[0].op == IR_OP_LABEL) {
-        declared[out++] = function->instructions[0];
-        head = 1;
-      }
-      for (size_t k = 0; k < renamer.created_count; k++) {
-        const uint32_t base = renamer.created_bases[k];
-        const IRSsaDeclInfo *origin = &candidates.declarations[base];
-        const char *name =
-            ir_value_table_name(&function->values, renamer.created_versions[k]);
-        IRInstruction declaration;
-        memset(&declaration, 0, sizeof(declaration));
-        declaration.op = IR_OP_DECLARE_LOCAL;
-        declaration.location = origin->location;
-        declaration.dest = ir_operand_symbol(name);
-        declaration.dest.value_id = renamer.created_versions[k];
-        declaration.text = mettle_strdup(origin->type_name);
-        declaration.value_type = origin->value_type;
-        declaration.is_float = origin->is_float;
-        declaration.float_bits = origin->float_bits;
-        declaration.is_unsigned = origin->is_unsigned;
-        declaration.alias_class = origin->alias_class;
-        declared[out++] = declaration;
-      }
-      for (size_t k = head; k < function->instruction_count; k++) {
-        declared[out++] = function->instructions[k];
-      }
-      free(function->instructions);
-      function->instructions = declared;
-      function->instruction_count = out;
-      function->instruction_capacity = out;
-    }
+    ir_ssa_insert_created_declarations(function, &candidates, &renamer);
   }
 
   free(renamer.created_versions);
@@ -922,18 +1040,306 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
+typedef struct {
+  IRInstruction *grown;
+  size_t write;
+  const IRInstruction **sources;
+  unsigned char *done;
+  char **swap_names;
+  IRSsaDeclInfo *swap_info;
+  size_t swap_count;
+  unsigned swap_counter;
+} IRSsaLeave;
+
+static size_t ir_ssa_count_phis(const IRFunction *function) {
+  size_t count = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (function->instructions[i].op == IR_OP_PHI) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static size_t ir_ssa_phi_argument_total(const IRFunction *function) {
+  size_t total = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *phi = &function->instructions[i];
+    if (phi->op == IR_OP_PHI) {
+      total += phi->argument_count;
+    }
+  }
+  return total;
+}
+
+static void ir_ssa_collect_targeted_labels(const IRFunction *function,
+                                           IRValueTable *targeted) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (!in->text) {
+      continue;
+    }
+    if (in->op == IR_OP_JUMP || in->op == IR_OP_BRANCH_ZERO ||
+        in->op == IR_OP_BRANCH_EQ) {
+      ir_value_table_intern(targeted, (unsigned char)IR_OPERAND_LABEL,
+                            in->text);
+    }
+  }
+}
+
+static size_t ir_ssa_block_terminator(const IRFunction *function,
+                                      const IRBasicBlock *block) {
+  const size_t count = block->instruction_count;
+  if (count == 0) {
+    return count;
+  }
+  const IROpcode last =
+      function->instructions[block->first_instruction + count - 1].op;
+  if (last == IR_OP_JUMP || last == IR_OP_RETURN || last == IR_OP_BRANCH_ZERO ||
+      last == IR_OP_BRANCH_EQ) {
+    return count - 1;
+  }
+  return count;
+}
+
+static IRInstruction ir_ssa_make_copy(const IRInstruction *shape,
+                                      IROperand dest, IROperand lhs) {
+  IRInstruction copy;
+  memset(&copy, 0, sizeof(copy));
+  copy.op = IR_OP_ASSIGN;
+  copy.location = shape->location;
+  copy.dest = dest;
+  copy.lhs = lhs;
+  copy.value_type = shape->value_type;
+  copy.is_float = shape->is_float;
+  copy.float_bits = shape->float_bits;
+  copy.is_unsigned = shape->is_unsigned;
+  copy.alias_class = shape->alias_class;
+  return copy;
+}
+
+static void ir_ssa_copy_block_body(IRSsaLeave *state, IRFunction *function,
+                                   IRValueTable *targeted, size_t start,
+                                   size_t terminator) {
+  for (size_t k = 0; k < terminator; k++) {
+    IRInstruction *source = &function->instructions[start + k];
+    if (source->op == IR_OP_PHI) {
+      continue;
+    }
+    if (source->op == IR_OP_LABEL && source->text &&
+        strncmp(source->text, IR_SSA_BLOCK_LABEL_PREFIX,
+                strlen(IR_SSA_BLOCK_LABEL_PREFIX)) == 0 &&
+        ir_value_table_lookup(targeted, (unsigned char)IR_OPERAND_LABEL,
+                              source->text) == IR_VALUE_ID_NONE) {
+      ir_instruction_destroy(source);
+      continue;
+    }
+    state->grown[state->write++] = *source;
+  }
+}
+
+static size_t ir_ssa_collect_phi_pairs(IRSsaLeave *state,
+                                       const IRFunction *function,
+                                       const IRBasicBlock *target,
+                                       size_t slot) {
+  size_t pair_count = 0;
+  for (size_t k = 0; k < target->instruction_count; k++) {
+    const IRInstruction *phi =
+        &function->instructions[target->first_instruction + k];
+    if (phi->op != IR_OP_PHI || slot * 2 >= phi->argument_count) {
+      continue;
+    }
+    const IROperand *incoming = &phi->arguments[slot * 2];
+    if (incoming->kind == IR_OPERAND_NONE ||
+        ir_operand_same(incoming, &phi->dest)) {
+      continue;
+    }
+    state->sources[pair_count] = phi;
+    state->done[pair_count] = 0;
+    pair_count++;
+  }
+  return pair_count;
+}
+
+static int ir_ssa_copy_is_blocked(const IRSsaLeave *state, size_t slot,
+                                  size_t pair_count, size_t index) {
+  const IRInstruction *phi = state->sources[index];
+  for (size_t j = 0; j < pair_count; j++) {
+    if (state->done[j] || j == index) {
+      continue;
+    }
+    if (ir_operand_same(&state->sources[j]->arguments[slot * 2], &phi->dest)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ir_ssa_emit_ready_copies(IRSsaLeave *state, size_t slot,
+                                    size_t pair_count, size_t *emitted) {
+  int progressed = 0;
+  for (size_t i = 0; i < pair_count; i++) {
+    if (state->done[i] || ir_ssa_copy_is_blocked(state, slot, pair_count, i)) {
+      continue;
+    }
+    const IRInstruction *phi = state->sources[i];
+    state->grown[state->write++] =
+        ir_ssa_make_copy(phi, ir_operand_copy(&phi->dest),
+                         ir_operand_copy(&phi->arguments[slot * 2]));
+    state->done[i] = 1;
+    (*emitted)++;
+    progressed = 1;
+  }
+  return progressed;
+}
+
+static int ir_ssa_record_swap(IRSsaLeave *state, const IRInstruction *phi,
+                              const char *name) {
+  char **grown_names = (char **)realloc(
+      state->swap_names, (state->swap_count + 1) * sizeof(char *));
+  if (!grown_names) {
+    return 0;
+  }
+  state->swap_names = grown_names;
+  IRSsaDeclInfo *grown_info = (IRSsaDeclInfo *)realloc(
+      state->swap_info, (state->swap_count + 1) * sizeof(IRSsaDeclInfo));
+  if (!grown_info) {
+    return 0;
+  }
+  state->swap_info = grown_info;
+  state->swap_names[state->swap_count] = mettle_strdup(name);
+  memset(&state->swap_info[state->swap_count], 0, sizeof(IRSsaDeclInfo));
+  state->swap_info[state->swap_count].value_type = phi->value_type;
+  state->swap_info[state->swap_count].location = phi->location;
+  state->swap_info[state->swap_count].is_float = phi->is_float;
+  state->swap_info[state->swap_count].float_bits = phi->float_bits;
+  state->swap_info[state->swap_count].is_unsigned = phi->is_unsigned;
+  state->swap_info[state->swap_count].alias_class = phi->alias_class;
+  state->swap_count++;
+  return 1;
+}
+
+static int ir_ssa_break_copy_cycle(IRSsaLeave *state, size_t slot,
+                                   size_t pair_count, size_t *emitted) {
+  size_t pick = pair_count;
+  for (size_t i = 0; i < pair_count; i++) {
+    if (!state->done[i]) {
+      pick = i;
+      break;
+    }
+  }
+  if (pick == pair_count) {
+    return 0;
+  }
+
+  const IRInstruction *phi = state->sources[pick];
+  char name[256];
+  snprintf(name, sizeof(name), "__ssa_swap%u", state->swap_counter++);
+  if (!ir_ssa_record_swap(state, phi, name)) {
+    return 0;
+  }
+
+  state->grown[state->write++] = ir_ssa_make_copy(
+      phi, ir_operand_symbol(name), ir_operand_copy(&phi->dest));
+
+  for (size_t j = 0; j < pair_count; j++) {
+    if (state->done[j] ||
+        !ir_operand_same(&state->sources[j]->arguments[slot * 2],
+                         &phi->dest)) {
+      continue;
+    }
+    state->grown[state->write++] =
+        ir_ssa_make_copy(state->sources[j],
+                         ir_operand_copy(&state->sources[j]->dest),
+                         ir_operand_symbol(name));
+    state->done[j] = 1;
+    (*emitted)++;
+  }
+  return 1;
+}
+
+static void ir_ssa_emit_edge_copies(IRSsaLeave *state, IRFunction *function,
+                                    const IRBasicBlock *blocks,
+                                    size_t block_count, size_t block) {
+  for (size_t sidx = 0; sidx < blocks[block].successor_count; sidx++) {
+    const size_t successor = blocks[block].successors[sidx];
+    if (successor >= block_count) {
+      continue;
+    }
+    const IRBasicBlock *target = &blocks[successor];
+    const size_t slot = ir_ssa_predecessor_slot(target, block);
+    if (slot == SIZE_MAX) {
+      continue;
+    }
+    const size_t pair_count =
+        ir_ssa_collect_phi_pairs(state, function, target, slot);
+    size_t emitted = 0;
+    while (emitted < pair_count) {
+      if (ir_ssa_emit_ready_copies(state, slot, pair_count, &emitted)) {
+        continue;
+      }
+      if (!ir_ssa_break_copy_cycle(state, slot, pair_count, &emitted)) {
+        break;
+      }
+    }
+  }
+}
+
+static void ir_ssa_insert_swap_declarations(IRFunction *function,
+                                            const IRSsaLeave *state) {
+  IRInstruction *declared = (IRInstruction *)malloc(
+      (function->instruction_count + state->swap_count) *
+      sizeof(IRInstruction));
+  if (!declared) {
+    return;
+  }
+  size_t out = 0;
+  size_t head = 0;
+  if (function->instruction_count > 0 &&
+      function->instructions[0].op == IR_OP_LABEL) {
+    declared[out++] = function->instructions[0];
+    head = 1;
+  }
+  for (size_t k = 0; k < state->swap_count; k++) {
+    const IRSsaDeclInfo *info = &state->swap_info[k];
+    IRInstruction declaration;
+    memset(&declaration, 0, sizeof(declaration));
+    declaration.op = IR_OP_DECLARE_LOCAL;
+    declaration.location = info->location;
+    declaration.dest = ir_operand_symbol(state->swap_names[k]);
+    declaration.text = mettle_strdup(
+        (info->value_type && info->value_type->name) ? info->value_type->name
+                                                     : "int64");
+    declaration.value_type = info->value_type;
+    declaration.is_float = info->is_float;
+    declaration.float_bits = info->float_bits;
+    declaration.is_unsigned = info->is_unsigned;
+    declaration.alias_class = info->alias_class;
+    declared[out++] = declaration;
+  }
+  for (size_t k = head; k < function->instruction_count; k++) {
+    declared[out++] = function->instructions[k];
+  }
+  free(function->instructions);
+  function->instructions = declared;
+  function->instruction_count = out;
+  function->instruction_capacity = out;
+}
+
+static void ir_ssa_destroy_phis(IRFunction *function) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (function->instructions[i].op == IR_OP_PHI) {
+      ir_instruction_destroy(&function->instructions[i]);
+    }
+  }
+}
+
 int ir_leave_ssa_pass(IRFunction *function, int *changed) {
   if (!function || function->instruction_count == 0) {
     return 1;
   }
 
-  size_t phi_count = 0;
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    if (function->instructions[i].op == IR_OP_PHI) {
-      phi_count++;
-    }
-  }
-  if (phi_count == 0) {
+  if (ir_ssa_count_phis(function) == 0) {
     return 1;
   }
 
@@ -944,287 +1350,58 @@ int ir_leave_ssa_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
-  size_t copy_budget = 0;
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *phi = &function->instructions[i];
-    if (phi->op == IR_OP_PHI) {
-      copy_budget += phi->argument_count;
-    }
-  }
+  const size_t copy_budget = ir_ssa_phi_argument_total(function);
 
-  IRInstruction *grown = (IRInstruction *)malloc(
+  IRSsaLeave state;
+  memset(&state, 0, sizeof(state));
+  state.grown = (IRInstruction *)malloc(
       (function->instruction_count + copy_budget * 2 + 8) *
       sizeof(IRInstruction));
-  const IRInstruction **sources =
+  state.sources =
       (const IRInstruction **)malloc((copy_budget + 8) * sizeof(void *));
-  unsigned char *done = (unsigned char *)malloc(copy_budget + 8);
-  if (!grown || !sources || !done) {
-    free(grown);
-    free(sources);
-    free(done);
+  state.done = (unsigned char *)malloc(copy_budget + 8);
+  if (!state.grown || !state.sources || !state.done) {
+    free(state.grown);
+    free(state.sources);
+    free(state.done);
     return 1;
   }
 
   IRValueTable targeted;
   ir_value_table_init(&targeted);
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *in = &function->instructions[i];
-    if (!in->text) {
-      continue;
-    }
-    if (in->op == IR_OP_JUMP || in->op == IR_OP_BRANCH_ZERO ||
-        in->op == IR_OP_BRANCH_EQ) {
-      ir_value_table_intern(&targeted, (unsigned char)IR_OPERAND_LABEL,
-                            in->text);
-    }
-  }
-
-  size_t write = 0;
-  unsigned swap_counter = 0;
-  size_t swap_count = 0;
-  char **swap_names = NULL;
-  IRSsaDeclInfo *swap_info = NULL;
+  ir_ssa_collect_targeted_labels(function, &targeted);
 
   for (size_t b = 0; b < block_count; b++) {
     const size_t start = blocks[b].first_instruction;
     const size_t count = blocks[b].instruction_count;
+    const size_t terminator = ir_ssa_block_terminator(function, &blocks[b]);
 
-    size_t terminator = count;
-    if (count > 0) {
-      const IROpcode last = function->instructions[start + count - 1].op;
-      if (last == IR_OP_JUMP || last == IR_OP_RETURN ||
-          last == IR_OP_BRANCH_ZERO || last == IR_OP_BRANCH_EQ) {
-        terminator = count - 1;
-      }
-    }
-
-    for (size_t k = 0; k < terminator; k++) {
-      IRInstruction *source = &function->instructions[start + k];
-      if (source->op == IR_OP_PHI) {
-        continue;
-      }
-      if (source->op == IR_OP_LABEL && source->text &&
-          strncmp(source->text, IR_SSA_BLOCK_LABEL_PREFIX,
-                  strlen(IR_SSA_BLOCK_LABEL_PREFIX)) == 0 &&
-          ir_value_table_lookup(&targeted, (unsigned char)IR_OPERAND_LABEL,
-                                source->text) == IR_VALUE_ID_NONE) {
-        ir_instruction_destroy(source);
-        continue;
-      }
-      grown[write++] = *source;
-    }
-
-    for (size_t sidx = 0; sidx < blocks[b].successor_count; sidx++) {
-      const size_t successor = blocks[b].successors[sidx];
-      if (successor >= block_count) {
-        continue;
-      }
-      const IRBasicBlock *target = &blocks[successor];
-      size_t slot = SIZE_MAX;
-      for (size_t p = 0; p < target->predecessor_count; p++) {
-        if (target->predecessors[p] == b) {
-          slot = p;
-          break;
-        }
-      }
-      if (slot == SIZE_MAX) {
-        continue;
-      }
-
-      size_t pair_count = 0;
-      for (size_t k = 0; k < target->instruction_count; k++) {
-        const IRInstruction *phi =
-            &function->instructions[target->first_instruction + k];
-        if (phi->op != IR_OP_PHI || slot * 2 >= phi->argument_count) {
-          continue;
-        }
-        const IROperand *incoming = &phi->arguments[slot * 2];
-        if (incoming->kind == IR_OPERAND_NONE ||
-            ir_operand_same(incoming, &phi->dest)) {
-          continue;
-        }
-        sources[pair_count] = phi;
-        done[pair_count] = 0;
-        pair_count++;
-      }
-      if (pair_count == 0) {
-        continue;
-      }
-
-      size_t emitted = 0;
-      while (emitted < pair_count) {
-        int progressed = 0;
-        for (size_t i = 0; i < pair_count; i++) {
-          if (done[i]) {
-            continue;
-          }
-          const IRInstruction *phi = sources[i];
-          int blocked = 0;
-          for (size_t j = 0; j < pair_count && !blocked; j++) {
-            if (done[j] || j == i) {
-              continue;
-            }
-            if (ir_operand_same(&sources[j]->arguments[slot * 2], &phi->dest)) {
-              blocked = 1;
-            }
-          }
-          if (blocked) {
-            continue;
-          }
-          IRInstruction copy;
-          memset(&copy, 0, sizeof(copy));
-          copy.op = IR_OP_ASSIGN;
-          copy.location = phi->location;
-          copy.dest = ir_operand_copy(&phi->dest);
-          copy.lhs = ir_operand_copy(&phi->arguments[slot * 2]);
-          copy.value_type = phi->value_type;
-          copy.is_float = phi->is_float;
-          copy.float_bits = phi->float_bits;
-          copy.is_unsigned = phi->is_unsigned;
-          copy.alias_class = phi->alias_class;
-          grown[write++] = copy;
-          done[i] = 1;
-          emitted++;
-          progressed = 1;
-        }
-        if (progressed) {
-          continue;
-        }
-
-        size_t pick = pair_count;
-        for (size_t i = 0; i < pair_count; i++) {
-          if (!done[i]) {
-            pick = i;
-            break;
-          }
-        }
-        if (pick == pair_count) {
-          break;
-        }
-        const IRInstruction *phi = sources[pick];
-        char name[256];
-        snprintf(name, sizeof(name), "__ssa_swap%u", swap_counter++);
-        char **grown_names =
-            (char **)realloc(swap_names, (swap_count + 1) * sizeof(char *));
-        if (!grown_names) {
-          break;
-        }
-        swap_names = grown_names;
-        IRSsaDeclInfo *grown_info = (IRSsaDeclInfo *)realloc(
-            swap_info, (swap_count + 1) * sizeof(IRSsaDeclInfo));
-        if (!grown_info) {
-          break;
-        }
-        swap_info = grown_info;
-        swap_names[swap_count] = mettle_strdup(name);
-        memset(&swap_info[swap_count], 0, sizeof(IRSsaDeclInfo));
-        swap_info[swap_count].value_type = phi->value_type;
-        swap_info[swap_count].location = phi->location;
-        swap_info[swap_count].is_float = phi->is_float;
-        swap_info[swap_count].float_bits = phi->float_bits;
-        swap_info[swap_count].is_unsigned = phi->is_unsigned;
-        swap_info[swap_count].alias_class = phi->alias_class;
-        swap_count++;
-
-        IRInstruction save;
-        memset(&save, 0, sizeof(save));
-        save.op = IR_OP_ASSIGN;
-        save.location = phi->location;
-        save.dest = ir_operand_symbol(name);
-        save.lhs = ir_operand_copy(&phi->dest);
-        save.value_type = phi->value_type;
-        save.is_float = phi->is_float;
-        save.float_bits = phi->float_bits;
-        save.is_unsigned = phi->is_unsigned;
-        save.alias_class = phi->alias_class;
-        grown[write++] = save;
-
-        for (size_t j = 0; j < pair_count; j++) {
-          if (done[j]) {
-            continue;
-          }
-          if (!ir_operand_same(&sources[j]->arguments[slot * 2], &phi->dest)) {
-            continue;
-          }
-          IRInstruction copy;
-          memset(&copy, 0, sizeof(copy));
-          copy.op = IR_OP_ASSIGN;
-          copy.location = sources[j]->location;
-          copy.dest = ir_operand_copy(&sources[j]->dest);
-          copy.lhs = ir_operand_symbol(name);
-          copy.value_type = sources[j]->value_type;
-          copy.is_float = sources[j]->is_float;
-          copy.float_bits = sources[j]->float_bits;
-          copy.is_unsigned = sources[j]->is_unsigned;
-          copy.alias_class = sources[j]->alias_class;
-          grown[write++] = copy;
-          done[j] = 1;
-          emitted++;
-        }
-      }
-    }
+    ir_ssa_copy_block_body(&state, function, &targeted, start, terminator);
+    ir_ssa_emit_edge_copies(&state, function, blocks, block_count, b);
 
     for (size_t k = terminator; k < count; k++) {
-      grown[write++] = function->instructions[start + k];
+      state.grown[state.write++] = function->instructions[start + k];
     }
   }
 
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    if (function->instructions[i].op == IR_OP_PHI) {
-      ir_instruction_destroy(&function->instructions[i]);
-    }
-  }
+  ir_ssa_destroy_phis(function);
 
   free(function->instructions);
-  function->instructions = grown;
-  function->instruction_count = write;
-  function->instruction_capacity = write;
+  function->instructions = state.grown;
+  function->instruction_count = state.write;
+  function->instruction_capacity = state.write;
 
-  if (swap_count > 0) {
-    IRInstruction *declared = (IRInstruction *)malloc(
-        (function->instruction_count + swap_count) * sizeof(IRInstruction));
-    if (declared) {
-      size_t out = 0;
-      size_t head = 0;
-      if (function->instruction_count > 0 &&
-          function->instructions[0].op == IR_OP_LABEL) {
-        declared[out++] = function->instructions[0];
-        head = 1;
-      }
-      for (size_t k = 0; k < swap_count; k++) {
-        IRInstruction declaration;
-        memset(&declaration, 0, sizeof(declaration));
-        declaration.op = IR_OP_DECLARE_LOCAL;
-        declaration.location = swap_info[k].location;
-        declaration.dest = ir_operand_symbol(swap_names[k]);
-        declaration.text = mettle_strdup(
-            (swap_info[k].value_type && swap_info[k].value_type->name)
-                ? swap_info[k].value_type->name
-                : "int64");
-        declaration.value_type = swap_info[k].value_type;
-        declaration.is_float = swap_info[k].is_float;
-        declaration.float_bits = swap_info[k].float_bits;
-        declaration.is_unsigned = swap_info[k].is_unsigned;
-        declaration.alias_class = swap_info[k].alias_class;
-        declared[out++] = declaration;
-      }
-      for (size_t k = head; k < function->instruction_count; k++) {
-        declared[out++] = function->instructions[k];
-      }
-      free(function->instructions);
-      function->instructions = declared;
-      function->instruction_count = out;
-      function->instruction_capacity = out;
-    }
+  if (state.swap_count > 0) {
+    ir_ssa_insert_swap_declarations(function, &state);
   }
 
-  for (size_t k = 0; k < swap_count; k++) {
-    free(swap_names[k]);
+  for (size_t k = 0; k < state.swap_count; k++) {
+    free(state.swap_names[k]);
   }
-  free(swap_names);
-  free(swap_info);
-  free(sources);
-  free(done);
+  free(state.swap_names);
+  free(state.swap_info);
+  free(state.sources);
+  free(state.done);
   ir_value_table_clear(&targeted);
 
   ir_function_clear_cfg(function);

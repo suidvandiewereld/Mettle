@@ -84,6 +84,23 @@ static void ir_ssa_opt_write_operand(IRFunction *function, IROperand *operand,
   operand->value_id = id;
 }
 
+static IROperand *ir_ssa_opt_operand_at(IRInstruction *instruction,
+                                        size_t index) {
+  if (index == 0) {
+    return &instruction->dest;
+  }
+  if (index == 1) {
+    return &instruction->lhs;
+  }
+  if (index == 2) {
+    return &instruction->rhs;
+  }
+  if (instruction->arguments && index - 3 < instruction->argument_count) {
+    return &instruction->arguments[index - 3];
+  }
+  return NULL;
+}
+
 static uint32_t ir_ssa_opt_resolve(const uint32_t *replacement, uint32_t id,
                                    size_t count) {
   uint32_t current = id;
@@ -95,6 +112,138 @@ static uint32_t ir_ssa_opt_resolve(const uint32_t *replacement, uint32_t id,
     current = next;
   }
   return current;
+}
+
+static uint32_t ir_ssa_opt_sole_incoming(const IRInstruction *phi,
+                                         uint32_t self, size_t value_count) {
+  uint32_t only = IR_VALUE_ID_NONE;
+  for (size_t p = 0; p * 2 < phi->argument_count; p++) {
+    const IROperand *incoming = &phi->arguments[p * 2];
+    if (incoming->kind == IR_OPERAND_NONE) {
+      continue;
+    }
+    if (!ir_operand_is_value(incoming) ||
+        incoming->value_id == IR_VALUE_ID_NONE) {
+      return IR_VALUE_ID_NONE;
+    }
+    if (incoming->value_id == self) {
+      continue;
+    }
+    if (only == IR_VALUE_ID_NONE) {
+      only = incoming->value_id;
+    } else if (only != incoming->value_id) {
+      return IR_VALUE_ID_NONE;
+    }
+  }
+  return only < value_count ? only : IR_VALUE_ID_NONE;
+}
+
+static size_t ir_ssa_opt_mark_trivial_phis(IRFunction *function,
+                                           size_t value_count,
+                                           uint32_t *replacement,
+                                           unsigned char *drop) {
+  size_t eliminated = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *phi = &function->instructions[i];
+    if (phi->op != IR_OP_PHI || !phi->arguments) {
+      continue;
+    }
+    const uint32_t self = phi->dest.value_id;
+    if (self == IR_VALUE_ID_NONE || self >= value_count) {
+      continue;
+    }
+    const uint32_t only = ir_ssa_opt_sole_incoming(phi, self, value_count);
+    if (only == IR_VALUE_ID_NONE ||
+        !ir_ssa_opt_operand_is_versioned(function, &phi->dest)) {
+      continue;
+    }
+    replacement[self] = only;
+    drop[i] = 1;
+    eliminated++;
+  }
+  return eliminated;
+}
+
+static int ir_ssa_opt_replacement_cycles(const uint32_t *replacement,
+                                         uint32_t self, size_t value_count) {
+  uint32_t walk = replacement[self];
+  for (size_t step = 0;
+       step < value_count && walk != IR_VALUE_ID_NONE && walk < value_count;
+       step++) {
+    if (walk == self) {
+      return 1;
+    }
+    if (replacement[walk] == IR_VALUE_ID_NONE) {
+      return 0;
+    }
+    walk = replacement[walk];
+  }
+  return 0;
+}
+
+static void ir_ssa_opt_drop_cyclic_replacements(IRFunction *function,
+                                                size_t value_count,
+                                                uint32_t *replacement,
+                                                unsigned char *drop,
+                                                size_t *eliminated) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (!drop[i]) {
+      continue;
+    }
+    const uint32_t self = function->instructions[i].dest.value_id;
+    if (!ir_ssa_opt_replacement_cycles(replacement, self, value_count)) {
+      continue;
+    }
+    replacement[self] = IR_VALUE_ID_NONE;
+    drop[i] = 0;
+    (*eliminated)--;
+  }
+}
+
+static void ir_ssa_opt_rewrite_replaced_uses(IRFunction *function,
+                                             size_t value_count,
+                                             const uint32_t *replacement,
+                                             const unsigned char *drop) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *instruction = &function->instructions[i];
+    if (drop[i]) {
+      continue;
+    }
+    const int writes = ir_instruction_writes_destination(instruction);
+    const size_t operands = 3 + instruction->argument_count;
+    for (size_t j = writes ? 1 : 0; j < operands; j++) {
+      IROperand *operand = ir_ssa_opt_operand_at(instruction, j);
+      if (!operand || !ir_operand_is_value(operand) ||
+          operand->value_id == IR_VALUE_ID_NONE ||
+          operand->value_id >= value_count ||
+          replacement[operand->value_id] == IR_VALUE_ID_NONE) {
+        continue;
+      }
+      const uint32_t target =
+          ir_ssa_opt_resolve(replacement, operand->value_id, value_count);
+      if (target == operand->value_id || target == IR_VALUE_ID_NONE) {
+        continue;
+      }
+      ir_ssa_opt_write_operand(function, operand, target);
+      g_ssa_uses_rewritten++;
+    }
+  }
+}
+
+static void ir_ssa_opt_compact(IRFunction *function,
+                               const unsigned char *drop) {
+  size_t write = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (drop[i]) {
+      ir_instruction_destroy(&function->instructions[i]);
+      continue;
+    }
+    if (write != i) {
+      function->instructions[write] = function->instructions[i];
+    }
+    write++;
+  }
+  function->instruction_count = write;
 }
 
 static size_t ir_ssa_opt_eliminate_trivial(IRFunction *function,
@@ -109,136 +258,20 @@ static size_t ir_ssa_opt_eliminate_trivial(IRFunction *function,
     return 0;
   }
 
-  size_t eliminated = 0;
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    IRInstruction *phi = &function->instructions[i];
-    if (phi->op != IR_OP_PHI || !phi->arguments) {
-      continue;
-    }
-    const uint32_t self = phi->dest.value_id;
-    if (self == IR_VALUE_ID_NONE || self >= value_count) {
-      continue;
-    }
-    uint32_t only = IR_VALUE_ID_NONE;
-    int usable = 1;
-    for (size_t p = 0; p * 2 < phi->argument_count; p++) {
-      const IROperand *incoming = &phi->arguments[p * 2];
-      if (incoming->kind == IR_OPERAND_NONE) {
-        continue;
-      }
-      if (!ir_operand_is_value(incoming) ||
-          incoming->value_id == IR_VALUE_ID_NONE) {
-        usable = 0;
-        break;
-      }
-      if (incoming->value_id == self) {
-        continue;
-      }
-      if (only == IR_VALUE_ID_NONE) {
-        only = incoming->value_id;
-      } else if (only != incoming->value_id) {
-        usable = 0;
-        break;
-      }
-    }
-    if (!usable || only == IR_VALUE_ID_NONE || only >= value_count) {
-      continue;
-    }
-    if (!ir_ssa_opt_operand_is_versioned(function, &phi->dest)) {
-      continue;
-    }
-    replacement[self] = only;
-    drop[i] = 1;
-    eliminated++;
+  size_t eliminated =
+      ir_ssa_opt_mark_trivial_phis(function, value_count, replacement, drop);
+  if (eliminated > 0) {
+    ir_ssa_opt_drop_cyclic_replacements(function, value_count, replacement,
+                                        drop, &eliminated);
   }
-
   if (eliminated == 0) {
     free(replacement);
     free(drop);
     return 0;
   }
 
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    IRInstruction *phi = &function->instructions[i];
-    uint32_t self;
-    uint32_t walk;
-    size_t step;
-    if (!drop[i]) {
-      continue;
-    }
-    self = phi->dest.value_id;
-    walk = replacement[self];
-    for (step = 0; step < value_count && walk != IR_VALUE_ID_NONE &&
-                   walk < value_count;
-         step++) {
-      if (walk == self) {
-        replacement[self] = IR_VALUE_ID_NONE;
-        drop[i] = 0;
-        eliminated--;
-        break;
-      }
-      if (replacement[walk] == IR_VALUE_ID_NONE) {
-        break;
-      }
-      walk = replacement[walk];
-    }
-  }
-
-  if (eliminated == 0) {
-    free(replacement);
-    free(drop);
-    return 0;
-  }
-
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    IRInstruction *instruction = &function->instructions[i];
-    if (drop[i]) {
-      continue;
-    }
-    const int writes = ir_instruction_writes_destination(instruction);
-    const size_t operands = 3 + instruction->argument_count;
-    for (size_t j = writes ? 1 : 0; j < operands; j++) {
-      IROperand *operand = NULL;
-      if (j == 0) {
-        operand = &instruction->dest;
-      } else if (j == 1) {
-        operand = &instruction->lhs;
-      } else if (j == 2) {
-        operand = &instruction->rhs;
-      } else if (instruction->arguments &&
-                 j - 3 < instruction->argument_count) {
-        operand = &instruction->arguments[j - 3];
-      }
-      if (!operand || !ir_operand_is_value(operand) ||
-          operand->value_id == IR_VALUE_ID_NONE ||
-          operand->value_id >= value_count) {
-        continue;
-      }
-      if (replacement[operand->value_id] == IR_VALUE_ID_NONE) {
-        continue;
-      }
-      const uint32_t target =
-          ir_ssa_opt_resolve(replacement, operand->value_id, value_count);
-      if (target == operand->value_id || target == IR_VALUE_ID_NONE) {
-        continue;
-      }
-      ir_ssa_opt_write_operand(function, operand, target);
-      g_ssa_uses_rewritten++;
-    }
-  }
-
-  size_t write = 0;
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    if (drop[i]) {
-      ir_instruction_destroy(&function->instructions[i]);
-      continue;
-    }
-    if (write != i) {
-      function->instructions[write] = function->instructions[i];
-    }
-    write++;
-  }
-  function->instruction_count = write;
+  ir_ssa_opt_rewrite_replaced_uses(function, value_count, replacement, drop);
+  ir_ssa_opt_compact(function, drop);
 
   free(replacement);
   free(drop);
@@ -387,32 +420,32 @@ static const IROperand *ir_ssa_reaching_def(IRFunction *function,
   return NULL;
 }
 
-static int ir_repair_phi_incomings(IRFunction *function,
-                                   const IRBasicBlock *blocks,
-                                   size_t block_count, const IRDomTree *dom,
-                                   size_t b, IRInstruction *phi) {
-  const IRBasicBlock *block = &blocks[b];
+static int ir_repair_labels_match(const IRBasicBlock *blocks,
+                                  size_t block_count,
+                                  const IRBasicBlock *block,
+                                  const IRInstruction *phi) {
   const size_t wanted = block->predecessor_count;
-  int identical = (phi->argument_count == wanted * 2);
-  for (size_t p = 0; identical && p < wanted; p++) {
+  if (phi->argument_count != wanted * 2) {
+    return 0;
+  }
+  for (size_t p = 0; p < wanted; p++) {
     const size_t pred = block->predecessors[p];
     const char *want = (pred < block_count) ? blocks[pred].label : NULL;
     const IROperand *have = &phi->arguments[p * 2 + 1];
     if (want) {
       if (have->kind != IR_OPERAND_LABEL || !have->name ||
           strcmp(have->name, want) != 0) {
-        identical = 0;
+        return 0;
       }
     } else if (have->kind != IR_OPERAND_NONE) {
-      identical = 0;
+      return 0;
     }
   }
-  if (identical) {
-    return 1;
-  }
+  return 1;
+}
 
+static int ir_repair_incomings_agree(const IRInstruction *phi) {
   IROperand agreed = ir_operand_none();
-  int agrees = 1;
   for (size_t p = 0; p * 2 < phi->argument_count; p++) {
     const IROperand *incoming = &phi->arguments[p * 2];
     if (incoming->kind == IR_OPERAND_NONE) {
@@ -425,9 +458,63 @@ static int ir_repair_phi_incomings(IRFunction *function,
     if (agreed.kind == IR_OPERAND_NONE) {
       agreed = *incoming;
     } else if (!ir_operand_same(&agreed, incoming)) {
-      agrees = 0;
-      break;
+      return 0;
     }
+  }
+  return 1;
+}
+
+static void ir_repair_report_missing(const IRBasicBlock *block,
+                                     const IRInstruction *phi, size_t wanted,
+                                     size_t old_pairs, const char *want) {
+  if (!getenv("METTLE_SSA_REPAIR_DEBUG")) {
+    return;
+  }
+  fprintf(stderr,
+          "ssa-repair: block %s preds %zu incomings %zu wants pred %s; "
+          "phi %s has",
+          block->label ? block->label : "?", wanted, old_pairs,
+          want ? want : "?", phi->dest.name ? phi->dest.name : "?");
+  for (size_t q = 0; q * 2 + 1 < phi->argument_count; q++) {
+    const IROperand *label = &phi->arguments[q * 2 + 1];
+    fprintf(stderr, " %s",
+            (label->kind == IR_OPERAND_LABEL && label->name) ? label->name
+                                                             : "<none>");
+  }
+  fprintf(stderr, " agree=%d\n", ir_repair_incomings_agree(phi));
+}
+
+static const IROperand *ir_repair_claim_incoming(IRInstruction *phi,
+                                                 unsigned char *claimed,
+                                                 size_t old_pairs,
+                                                 const char *want) {
+  for (size_t q = 0; q < old_pairs; q++) {
+    const IROperand *label = &phi->arguments[q * 2 + 1];
+    if (claimed[q]) {
+      continue;
+    }
+    if (want) {
+      if (label->kind == IR_OPERAND_LABEL && label->name &&
+          strcmp(label->name, want) == 0) {
+        claimed[q] = 1;
+        return &phi->arguments[q * 2];
+      }
+    } else if (label->kind == IR_OPERAND_NONE) {
+      claimed[q] = 1;
+      return &phi->arguments[q * 2];
+    }
+  }
+  return NULL;
+}
+
+static int ir_repair_phi_incomings(IRFunction *function,
+                                   const IRBasicBlock *blocks,
+                                   size_t block_count, const IRDomTree *dom,
+                                   size_t b, IRInstruction *phi) {
+  const IRBasicBlock *block = &blocks[b];
+  const size_t wanted = block->predecessor_count;
+  if (ir_repair_labels_match(blocks, block_count, block, phi)) {
+    return 1;
   }
 
   const size_t old_pairs = phi->argument_count / 2;
@@ -444,54 +531,21 @@ static int ir_repair_phi_incomings(IRFunction *function,
   for (size_t p = 0; p < wanted; p++) {
     const size_t pred = block->predecessors[p];
     const char *want = (pred < block_count) ? blocks[pred].label : NULL;
-    const IROperand *source = NULL;
-    for (size_t q = 0; q < old_pairs; q++) {
-      const IROperand *label = &phi->arguments[q * 2 + 1];
-      if (claimed[q]) {
-        continue;
-      }
-      if (want) {
-        if (label->kind == IR_OPERAND_LABEL && label->name &&
-            strcmp(label->name, want) == 0) {
-          source = &phi->arguments[q * 2];
-          claimed[q] = 1;
-          break;
-        }
-      } else if (label->kind == IR_OPERAND_NONE) {
-        source = &phi->arguments[q * 2];
-        claimed[q] = 1;
-        break;
-      }
-    }
+    const IROperand *source =
+        ir_repair_claim_incoming(phi, claimed, old_pairs, want);
     if (!source && pred < block_count) {
       const size_t base_length = ir_ssa_base_length(phi->dest.name);
       source = ir_ssa_reaching_def(function, blocks, block_count, dom, pred,
                                    phi->dest.name, base_length);
     }
     if (!source) {
-      if (getenv("METTLE_SSA_REPAIR_DEBUG")) {
-        fprintf(stderr,
-                "ssa-repair: block %s preds %zu incomings %zu wants pred %s; "
-                "phi %s has",
-                block->label ? block->label : "?", wanted, old_pairs,
-                want ? want : "?", phi->dest.name ? phi->dest.name : "?");
-        for (size_t q = 0; q * 2 + 1 < phi->argument_count; q++) {
-          const IROperand *label = &phi->arguments[q * 2 + 1];
-          fprintf(stderr, " %s", (label->kind == IR_OPERAND_LABEL && label->name)
-                                     ? label->name
-                                     : "<none>");
-        }
-        fprintf(stderr, " agree=%d\n", agrees);
+      ir_repair_report_missing(block, phi, wanted, old_pairs, want);
+      for (size_t d = 0; d < p * 2; d++) {
+        ir_operand_destroy(&rebuilt[d]);
       }
-      if (1) {
-        for (size_t d = 0; d < p * 2; d++) {
-          ir_operand_destroy(&rebuilt[d]);
-        }
-        free(rebuilt);
-        free(claimed);
-        return 0;
-      }
-      source = &agreed;
+      free(rebuilt);
+      free(claimed);
+      return 0;
     }
     rebuilt[p * 2] = ir_operand_copy(source);
     rebuilt[p * 2 + 1] = want ? ir_operand_label(want) : ir_operand_none();
