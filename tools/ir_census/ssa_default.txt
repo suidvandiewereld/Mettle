@@ -1,0 +1,394 @@
+mettle ir census
+generated 2026-09-10 18:21:24
+commit 8bfe884f
+compiler G:\Projects\Mettle\bin\mettle.exe
+units 129 of 135
+
+compile failures 6
+  gpu_inference/decode_kernels: exit 1 error: 'workgroup/private device storage' in function 'rmsnorm' runs on a GPU and has no CPU translation. Compile the module that defines this kernel with --emit-ptx (NVIDIA) or --emit-spirv (OpenCL), and keep it out of the host program
+  video_player/audio: exit 1   help: for more about this error, run `mettle explain E0003`
+  video_player/h264_bslice: exit 1   help: for more about this error, run `mettle explain E0003`
+  video_player/h264_deblock: exit 1   help: for more about this error, run `mettle explain E0003`
+  video_player/h264_frame: exit 1   help: for more about this error, run `mettle explain E0003`
+  video_player/h264_predict: exit 1   help: for more about this error, run `mettle explain E0003`
+
+value census
+  functions              7809
+  blocks                 94302
+  instructions           577610
+  temps                  228723
+  temps multi-def        3387  1.48%
+  symbols                67936
+  symbols multi-def      22123  32.56%
+  locals declared        86564
+  locals address-taken   7325  8.46%
+  phi instructions       0
+
+multi-def by unit
+  video_player/player      temps  37514 multi   493   symbols  10707 multi  3877
+  video_player/vptool      temps  41645 multi   440   symbols   9962 multi  3685
+  os/kernel                temps  13530 multi   333   symbols   5783 multi  1792
+  video_player/h264_pslice temps  13723 multi   153   symbols   4078 multi  1625
+  video_player/h264_inter  temps  10266 multi   139   symbols   2900 multi  1193
+  video_player/h264_gpu    temps   9468 multi   137   symbols   2546 multi  1044
+  video_player/h264_decode temps   9184 multi   135   symbols   2456 multi  1031
+  ui_demo/ui_demo          temps   5301 multi   166   symbols   2058 multi   413
+  video_player/aac_decode  temps   3966 multi    82   symbols   1316 multi   485
+  raylib/sphere            temps   3489 multi   196   symbols   1440 multi   328
+  orbit_demo/orbits        temps   3904 multi   172   symbols   1569 multi   262
+  awfy/bounce              temps   2052 multi   165   symbols    891 multi   178
+  video_player/paint       temps    635 multi    24   symbols    521 multi   276
+  video_player/source      temps   5174 multi    72   symbols    806 multi   219
+  link_resolve             temps   1212 multi     4   symbols    638 multi   266
+  video_player/h264        temps   1931 multi    72   symbols    515 multi   182
+  interp_ast               temps   2946 multi    24   symbols    688 multi   196
+  video_player/jpeg        temps   1550 multi    16   symbols    469 multi   198
+  json_parse               temps   1592 multi    16   symbols    540 multi   195
+  tracy_demo/tracy_demo    temps   1148 multi    36   symbols    577 multi   162
+  video_player/mp4         temps   3149 multi    22   symbols    564 multi   173
+  regex_match              temps   1133 multi     7   symbols    501 multi   188
+  quicksort                temps    663 multi     2   symbols    375 multi   183
+  bst_insert               temps   1671 multi    48   symbols    376 multi   125
+  life_bits                temps    648 multi     2   symbols    396 multi   164
+  desk/desk                temps   1440 multi    19   symbols    432 multi   129
+  voxel_trace              temps    663 multi     2   symbols    370 multi   143
+  testing/ui_test          temps   2185 multi    39   symbols    648 multi    88
+  llm/gemv_test            temps   1039 multi     7   symbols    352 multi   119
+  diff_lcs                 temps   1144 multi     3   symbols    424 multi   117
+  astar_grid               temps    909 multi     4   symbols    342 multi   114
+  llm/dequant_test         temps   1203 multi     8   symbols    350 multi   109
+  csv_query                temps    948 multi     9   symbols    349 multi   108
+  huffman                  temps   1188 multi     5   symbols    306 multi   102
+  guessing-game/guessing_game temps    848 multi    35   symbols    268 multi    70
+  bignum_mul               temps    864 multi     3   symbols    317 multi   101
+  sudoku_solve             temps    951 multi     2   symbols    322 multi   100
+  engine/engine            temps    979 multi     7   symbols    329 multi    82
+  mark_sweep               temps    827 multi     2   symbols    280 multi    80
+  lz77                     temps    736 multi     2   symbols    276 multi    80
+  video_player/aac         temps    611 multi    14   symbols    214 multi    65
+  inference/inference      temps    445 multi     0   symbols    214 multi    75
+  job_system/job_system    temps    871 multi     9   symbols    199 multi    63
+  merge_sort               temps    600 multi     2   symbols    208 multi    69
+  physics_grid             temps   1008 multi     2   symbols    258 multi    69
+  matrix_mul               temps    306 multi     2   symbols    167 multi    61
+  video_player/avi         temps   1450 multi    29   symbols    197 multi    32
+  quant_matmul/quant_matmul temps    420 multi     2   symbols    175 multi    59
+  abstractions/variants    temps    765 multi     3   symbols    164 multi    55
+  word_freq                temps    754 multi     3   symbols    217 multi    54
+  gpu_inference/decode_host temps   1156 multi    13   symbols    394 multi    43
+  llm/gguf_probe           temps    853 multi     2   symbols    187 multi    50
+  gguf_reader/gguf_reader  temps   1153 multi     4   symbols    204 multi    44
+  btree_index              temps   1000 multi     2   symbols    216 multi    45
+  memcmp_bench             temps    398 multi     5   symbols    146 multi    40
+  heapsort                 temps    562 multi     2   symbols    170 multi    40
+  field_ranges/field_ranges temps    431 multi     5   symbols    104 multi    36
+  gpu_vadd/vadd_host       temps    794 multi    18   symbols    238 multi    23
+  gather_sum               temps    502 multi     2   symbols    158 multi    39
+  mandelbrot               temps    217 multi     3   symbols     91 multi    38
+  rle_encode               temps    466 multi     2   symbols    151 multi    38
+  hello_ui/hello_ui        temps   1539 multi     9   symbols    447 multi    31
+  hexdump/hexdump          temps    228 multi     6   symbols     99 multi    34
+  gpu_minimal/scale_host   temps    738 multi    15   symbols    224 multi    23
+  crc32                    temps    469 multi     3   symbols    160 multi    35
+  radix_sort               temps    513 multi     2   symbols    176 multi    36
+  binary_search            temps    399 multi     5   symbols    126 multi    33
+  linked_list_sum          temps    513 multi     3   symbols    142 multi    30
+  grep                     temps    455 multi     3   symbols    135 multi    29
+  base64_encode            temps    497 multi     2   symbols    136 multi    28
+  byte_hash                temps    434 multi     3   symbols    130 multi    27
+  matvec                   temps    418 multi     2   symbols    126 multi    28
+  awfy/sieve               temps    401 multi     2   symbols    115 multi    27
+  popcount                 temps    380 multi     3   symbols    110 multi    25
+  bytecode_vm              temps    920 multi     2   symbols    262 multi    25
+  sum_squares              temps    281 multi     3   symbols     85 multi    24
+  transpose                temps    378 multi     2   symbols    110 multi    25
+  field_sum                temps    500 multi     3   symbols    140 multi    24
+  switch_vm                temps    376 multi     3   symbols    114 multi    24
+  saxpy                    temps    372 multi     2   symbols    113 multi    25
+  prime_count              temps    274 multi     6   symbols     77 multi    21
+  clamp_i32                temps    365 multi     2   symbols    108 multi    24
+  reverse_i32              temps    362 multi     2   symbols    106 multi    24
+  minmax_scan              temps    371 multi     3   symbols    103 multi    23
+  explain_demo/explain_demo temps    493 multi     2   symbols    132 multi    24
+  prefix_sum               temps    374 multi     2   symbols    108 multi    24
+  scale_i32                temps    362 multi     2   symbols    108 multi    24
+  aos_sum                  temps    385 multi     2   symbols    106 multi    23
+  dot_product              temps    365 multi     3   symbols    102 multi    22
+  word_count               temps    425 multi     3   symbols    120 multi    22
+  sort_insertion           temps    446 multi     2   symbols    137 multi    23
+  collatz                  temps    261 multi     2   symbols     89 multi    22
+  quant_dot/quant_dot      temps    362 multi     3   symbols     97 multi    20
+  memcpy_bench             temps    368 multi     2   symbols    107 multi    21
+  rec_fib                  temps    225 multi     2   symbols     51 multi    20
+  byte_arith               temps    345 multi     2   symbols    100 multi    19
+  memset_bench             temps    368 multi     2   symbols     99 multi    19
+  float_sum                temps    345 multi     3   symbols     97 multi    17
+  exp_bench/exp_bench      temps    341 multi     2   symbols     89 multi    18
+  float32_sum/float32_sum  temps    345 multi     3   symbols     94 multi    17
+  fib                      temps    338 multi     4   symbols    125 multi    15
+  struct_byval             temps    230 multi     2   symbols     66 multi    16
+  video_player/aac_tables  temps    129 multi     0   symbols     49 multi    16
+  int_divmod               temps    194 multi     3   symbols     51 multi    12
+  const_mod                temps    201 multi     3   symbols     47 multi    11
+  fp_div                   temps    193 multi     3   symbols     46 multi    10
+  func_ptr                 temps    191 multi     2   symbols     50 multi    11
+  global_acc               temps    192 multi     3   symbols     42 multi     9
+  leaf_call                temps    200 multi     3   symbols     43 multi     9
+  video_player/video_kernels temps    121 multi     9   symbols     31 multi     1
+  lcg_rng                  temps    183 multi     2   symbols     45 multi     7
+  i2f_conv                 temps    183 multi     3   symbols     39 multi     5
+  abstractions/wire        temps    175 multi     0   symbols     32 multi     3
+  video_player/h264_tables temps     58 multi     0   symbols      5 multi     3
+  abstractions/table       temps    184 multi     0   symbols     23 multi     3
+  distinct/distinct        temps    232 multi     0   symbols     39 multi     3
+  machine/little           temps    151 multi     0   symbols     18 multi     3
+  hello/hello              temps    103 multi     0   symbols     16 multi     3
+  string_interp/string_interp temps    172 multi     0   symbols     29 multi     3
+  raylib/raylib            temps     99 multi     0   symbols     45 multi     0
+  gpu_minimal/scale_kernel temps      9 multi     0   symbols      1 multi     0
+  os/stage2                temps      0 multi     0   symbols      0 multi     0
+  gpu_vadd/vadd_kernel     temps     12 multi     0   symbols      1 multi     0
+  direct_object_smoke/direct_object_smoke temps      0 multi     0   symbols      4 multi     0
+  os/boot                  temps      0 multi     0   symbols      0 multi     0
+
+functions with multi-def temps
+  count 1117
+  video_player/h264_gpu    h264_decode_residual         temps  3169 multi   41
+  video_player/h264_decode h264_decode_residual         temps  3169 multi   41
+  video_player/h264_pslice h264_decode_residual         temps  3169 multi   41
+  video_player/h264_inter  h264_decode_residual         temps  3169 multi   41
+  video_player/vptool      h264_decode_residual         temps  3169 multi   41
+  video_player/player      h264_decode_residual         temps  3169 multi   41
+  ui_demo/ui_demo          format_markdown_for_viewer   temps   489 multi   38
+  video_player/player      h264_read_pred_weight_table  temps   380 multi   24
+  video_player/h264_gpu    h264_read_pred_weight_table  temps   380 multi   24
+  video_player/h264_inter  h264_read_pred_weight_table  temps   380 multi   24
+  video_player/h264_decode h264_read_pred_weight_table  temps   380 multi   24
+  video_player/vptool      h264_read_pred_weight_table  temps   380 multi   24
+  video_player/h264_pslice h264_read_pred_weight_table  temps   380 multi   24
+  video_player/h264        h264_read_pred_weight_table  temps   380 multi   24
+  ui_demo/ui_demo          window_proc                  temps   188 multi   17
+  video_player/h264_pslice h264_parse_sps               temps   373 multi   15
+  video_player/h264_inter  h264_parse_sps               temps   373 multi   15
+  video_player/h264_inter  h264_parse_pps               temps   292 multi   15
+  video_player/player      h264_parse_pps               temps   292 multi   15
+  video_player/h264_decode h264_parse_sps               temps   373 multi   15
+  video_player/h264_decode h264_parse_pps               temps   292 multi   15
+  video_player/h264        h264_parse_sps               temps   373 multi   15
+  video_player/h264        h264_parse_pps               temps   292 multi   15
+  video_player/h264_gpu    h264_parse_sps               temps   373 multi   15
+  video_player/h264_gpu    h264_parse_pps               temps   292 multi   15
+  video_player/player      h264_parse_sps               temps   373 multi   15
+  bst_insert               build_tree                   temps   466 multi   15
+  video_player/vptool      h264_parse_sps               temps   373 multi   15
+  video_player/vptool      h264_parse_pps               temps   292 multi   15
+  video_player/h264_pslice h264_parse_pps               temps   292 multi   15
+  bst_insert               bst_insert                   temps   465 multi   14
+  bst_insert               inorder_sum                  temps   255 multi   14
+  os/kernel                __import_2605ffe48e9972aa_draw_taskbar temps   236 multi   13
+  os/kernel                __import_6b56e13db17d5dad___import_6569bdcc26e56c60___import_709439b892bca9a3_translate temps    41 multi   13
+  os/kernel                __import_6b56e13db17d5dad_cmd_cp temps   203 multi   12
+  orbit_demo/orbits        fmod                         temps    72 multi   11
+  video_player/player      window_proc                  temps   208 multi   11
+  raylib/sphere            fmod                         temps    72 multi   11
+  awfy/bounce              fmod                         temps    72 multi   11
+  video_player/vptool      aac_read_scale_factors       temps   220 multi   10
+
+source burn-down
+  src/ir/optimizer       name reads   2474   operand-field reads  1498   name compares   433   forward scans   48   files 44
+  src/ir                 name reads    781   operand-field reads   123   name compares   215   forward scans    4   files 31
+  src/codegen/binary     name reads    792   operand-field reads   236   name compares   103   forward scans    1   files 19
+  src/codegen            name reads    305   operand-field reads   183   name compares    20   forward scans    1   files 7
+
+source burn-down by file
+  src/codegen/binary     mir_lower.c                                  reads   278  compares   34  scans   1
+  src/ir/optimizer       ir_optimize_simd_float.c                     reads   230  compares   37  scans   5
+  src/ir/optimizer       ir_optimize_scan_search.c                    reads   205  compares   44  scans   8
+  src/ir/optimizer       ir_optimize_load_copy_cleanup.c              reads   187  compares   24  scans   1
+  src/ir                 ir.c                                         reads   182  compares   29  scans   0
+  src/ir/optimizer       ir_optimize_redundancy.c                     reads   182  compares   21  scans   5
+  src/codegen            ptx_emitter.c                                reads   153  compares    9  scans   1
+  src/codegen/binary     arm64_ir_encode.c                            reads   142  compares   18  scans   0
+  src/ir/optimizer       ir_optimize_safety.c                         reads   126  compares   21  scans   2
+  src/ir/optimizer       ir_optimize_scalar_simplify.c                reads   116  compares   25  scans   0
+  src/codegen/binary     abi.c                                        reads   111  compares   18  scans   0
+  src/ir/optimizer       ir_optimize_simd_memory_maps.c               reads   102  compares   22  scans   1
+  src/ir/optimizer       ir_optimize_simd_contract.c                  reads    97  compares   18  scans   2
+  src/codegen            spirv_emitter.c                              reads    95  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_loop_unroll.c                    reads    93  compares   21  scans   3
+  src/ir/optimizer       ir_optimize_popcount_collatz.c               reads    92  compares   14  scans   2
+  src/ir/optimizer       ir_optimize_sroa.c                           reads    85  compares    3  scans   0
+  src/ir                 ir_interp.c                                  reads    83  compares   96  scans   1
+  src/ir/optimizer       ir_optimize_parallel_loop.c                  reads    81  compares   15  scans   0
+  src/codegen/binary     emit.c                                       reads    79  compares    1  scans   0
+  src/ir/optimizer       ir_optimize_simd_fill.c                      reads    78  compares   17  scans   1
+  src/ir/optimizer       ir_optimize_core.c                           reads    75  compares    9  scans   0
+  src/ir/optimizer       ir_optimize_simd_sum_i32.c                   reads    69  compares   20  scans   5
+  src/ir/optimizer       ir_optimize_user_rewrite.c                   reads    65  compares    8  scans   0
+  src/codegen/binary     x86_16.c                                     reads    59  compares    4  scans   0
+  src/ir                 ir_effects.c                                 reads    54  compares   13  scans   0
+  src/ir/optimizer       ir_optimize_layout.c                         reads    52  compares    8  scans   0
+  src/codegen/binary     globals.c                                    reads    50  compares   10  scans   0
+  src/ir                 ir_lower_expr.c                              reads    49  compares    2  scans   0
+  src/ir/optimizer       ir_optimize_inline.c                         reads    49  compares   13  scans   2
+  src/ir/optimizer       ir_optimize_alias.c                          reads    47  compares   10  scans   0
+  src/ir/optimizer       ir_optimize_word_count_and_div_shift.c       reads    45  compares    6  scans   3
+  src/ir                 ir_verify.c                                  reads    43  compares   10  scans   0
+  src/ir/optimizer       ir_optimize_pointer_induction.c              reads    37  compares    6  scans   0
+  src/ir                 ir_lower_address.c                           reads    36  compares    1  scans   0
+  src/ir                 ir_values.c                                  reads    35  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_pass_driver.c                    reads    35  compares    4  scans   0
+  src/ir/optimizer       ir_optimize_tail_recursion.c                 reads    34  compares    5  scans   0
+  src/codegen            binary_emitter.c                             reads    32  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_prefetch.c                       reads    32  compares    2  scans   0
+  src/ir                 ir_lower_stmt.c                              reads    30  compares    4  scans   0
+  src/ir/optimizer       ir_optimize_pure_call_licm.c                 reads    29  compares    7  scans   0
+  src/ir                 ir_twins.c                                   reads    28  compares    4  scans   0
+  src/ir                 ir_lower_switch_match.c                      reads    27  compares    0  scans   0
+  src/ir/optimizer       ir_optimize_value_range.c                    reads    27  compares   12  scans   0
+  src/ir/optimizer       ir_optimize_shift_sort.c                     reads    26  compares    6  scans   1
+  src/ir/optimizer       ir_optimize_explain.c                        reads    26  compares    7  scans   0
+  src/ir                 ir_comptime.c                                reads    24  compares    5  scans   0
+  src/ir                 mtlc_type.c                                  reads    23  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_gpu_staging.c                    reads    23  compares    7  scans   0
+  src/ir                 ir_deadline.c                                reads    22  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_induction_cleanup.c              reads    19  compares    5  scans   0
+  src/codegen/binary     driver.c                                     reads    18  compares    2  scans   0
+  src/ir                 ir_verify_structure.c                        reads    17  compares    1  scans   2
+  src/codegen/binary     support.c                                    reads    17  compares    4  scans   0
+  src/codegen/binary     mir_annotate.c                               reads    15  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_pipeline.c                       reads    15  compares    0  scans   0
+  src/ir                 ir_lower_types.c                             reads    14  compares    4  scans   0
+  src/ir                 ir_pgo.c                                     reads    13  compares    4  scans   0
+  src/ir/optimizer       ir_optimize_readonly_globals.c               reads    13  compares    1  scans   0
+
+binary hashes
+  abstractions/table           815C19E0EC216FA29BB03E3D6156FAE83A857F2C927E07D07994179F32E84D82
+  abstractions/variants        C53FBA75441DC5EFAC354D2ECBA7E92EE0EC080303030D2581CF88C242A7C9E0
+  abstractions/wire            D6823C9D68D3E4B8CDF1D448B8F3DACD0C828BC921E67D98D73991DF2E1A9703
+  aos_sum                      C68D80A41AC1E22CAA549F0BE81A631F4CF2F21E9CE105362B782C3B278DC46C
+  astar_grid                   F240BC8203884EDDA37915EB8BA31B7D6997A58D4390026B9A73BF23FC084DAC
+  awfy/bounce                  92DC9ED83ABC37342C8DB6BCCF7EC051009BADA80149731E0556A994DC5EC2CB
+  awfy/sieve                   088B837DC366962494E11824503F6A25AFFE01CF84554CB04C0F7CA6680DE555
+  base64_encode                CB56F482075307EEB3FBF50199EDBD1CC31062E6B229E979D62DD55717604343
+  bignum_mul                   4DC358F9C3A24EE929E9E56DBFBCB2901D29271D43009D53C5616ADFE3D1F805
+  binary_search                CA71AB1D67B598D549F85FE3C418C4D3AC4A39BE9DEC1EC0041E27E4BD4EE85E
+  bst_insert                   CBBBAD9E56C1F16BF4452554176AFB937C7BB7CAD790542959ACE32033C5338E
+  btree_index                  2A691BB5A20F494DBA3BA9CA72BA12BED5D94D405E1B6E174671B2EB0EE8974E
+  byte_arith                   CFF5137FF0BB2CB212E09D5D52FADB94371CB18DD1D8ED4B017F4E0B98775C80
+  byte_hash                    57687B5CD0E9C4FD0FE918DBF91B631DEBA05F1B4364DEB818A0D51E6D788441
+  bytecode_vm                  DB1AC6B908B3061E9671AF27D8184DE97E6036701CC5C0D0D0A54CB9D7BBA07F
+  clamp_i32                    8F7BDB3D5B1CF0069BC835304E2685E0589426B7514D8E87E005056A0108799B
+  collatz                      B10ECFA992F4BAEAA983A245736AF3DB03FD477EE167B050007C2160FC7E75CD
+  const_mod                    22C85DF5FA32FABB7A7EEBCEEE9E94143EDBD5002B92748D489932585F1951C0
+  crc32                        F35F3A335DEFB5F09E5D4A5858BE1E8B00F8C85AC5EDAF31D5607E73037ACAFF
+  csv_query                    150ACAC4E4FC2DDF27F105760795DD648B14826E2DBB596A82EDFC39E42D1F9B
+  desk/board                   9FA647509A42F96866064F658FDC6AA527E5BCBA054976B9717CF8AAF79C07F3
+  desk/desk                    9A49F241B7AFAE431E5C626979953FAD359F419F1FC77F1965068C1EA06BBF82
+  diff_lcs                     59F60E41374EF2286CB8E295D458204F9F05F9D0355EDEE360672F285C7B1620
+  direct_object_smoke/direct_object_smoke DEE85D358000321BFE8501065A70E97BE1BA3A50F26013ABFBBDDA9765E0EBF7
+  distinct/distinct            502CC35ED19753E28239EB42341DF34D7AE6634FED0BD6C3DC5CACFE2AF286B1
+  dot_product                  3770B3C24732E05044496BF28355D2257AA4EA3CAF8A6683CF5B6E1880F726DE
+  engine/engine                9A644ED0F3A1970CE744DCDE32BDC4D15A3047485F920B3FB62B19B83C8A43EF
+  exp_bench/exp_bench          CF9739471F33E70309A483E258B6848CF8E08F7529A371CEF3297D472CFBDAD1
+  explain_demo/explain_demo    35310D02CA4D32B07E80FCAB70A0BA47BB5CFF27D6F13DE34A04C30C2002C1BB
+  fib                          CAD2919FE9B2230B0C975A7A72737CFCD9B52DC8FAFE4F6DF7CE6D66C8ED3CD4
+  field_ranges/field_ranges    7B6BEE41E383744F8F054E54BDF27722D77B5B510347274C8B267563A6817F32
+  field_sum                    4551D230570011546930E781770422AE57F378D4193F52837F01496E9D006367
+  float_sum                    A691D67A0405B828F380D46CB8575CDDBD55DDB8EDBFAD989CBBD261116CFF27
+  float32_sum/float32_sum      452DDF05A0BFE3D6B9D8DAD24374C4BFF24484DD6E3275D9347D37305C266C5F
+  fp_div                       B534FC75988339226ECA1A828C0E706773EF44EEB57B3047391E55B135BA1673
+  func_ptr                     C5EAD0B8BAD9F81806800596523BD63245A31403042F9679BAEEA3DF9FDA3A3A
+  gather_sum                   F320999601C5B356A7F1746B1372276D96CDC8F740BF1D9BBD06758CDCC94483
+  gguf_reader/gguf_reader      C74017BB45BFBC0AA1F3CA45DBF461DF3703F672E88E98801E602C6D41EAEEC1
+  global_acc                   F79DD699F9AC0821C76C3E28729D2A3A6175D67FDB790E64FD529436958B7382
+  gpu_inference/decode_decls   7E7EF485588C32D10684811946A20E079C05A644572061AA7B42E25949E480D7
+  gpu_inference/decode_host    E19FA4EADA68D2D1701A9ACE4D6C4CCD43954821BB8EB03AB122A209277F46FB
+  gpu_minimal/scale_host       8F6B13EE42B10B204D578EA723C12701E9D9B776A353621B68C47505FFE0BBC4
+  gpu_minimal/scale_kernel     36E0F45D45FFB85EB8C78E9D4803E3F8F442743F67D2D79FA5C8EF9D11AB1EF1
+  gpu_vadd/vadd_decls          7E7EF485588C32D10684811946A20E079C05A644572061AA7B42E25949E480D7
+  gpu_vadd/vadd_host           32DECF7A92ABC8680DA257A3979E4DD53D2FF1DAA12E7E4CD467F1B4A8B4EDCF
+  gpu_vadd/vadd_kernel         D409AC21D509A02C2D044AFB1E7EDE4C1A0FBC48D0C7B0D97300D53092207F57
+  grep                         B24A7B66B3C2190E3E21139BDE4A97FD9A5DBC6CC02529282949292C54FD0414
+  guessing-game/guessing_game  D771CD3FA612630D874F6A26048077E177CF8B1CB8003B49F96CC58BFE9744B1
+  heapsort                     F9529F062C5E889F649ECB46BF6B27A169C86F72F96C9F4AE2454B863642E470
+  hello/hello                  DC28042C51FED653CA9DB6A5CE208FCF89F7F539A84252A19BE8C806284E33C1
+  hello_ui/hello_ui            904BC9616BDCE5367F7708879972FFE94A7782D317DE3174CDD1D27F3AB57211
+  hexdump/hexdump              63B7FB9F73B52285945E44331BF275146B5061F438E8912D73C76BC456AC6328
+  huffman                      893C9261B7DB75A8C19330039E7785624FEACD7D18351E7DF230F5B0D16376D7
+  i2f_conv                     2C218A2EA473A1A2BF2AAD9EE5794963B408F7505D9E927E9CBE8906004B4A24
+  inference/inference          5BBF23C3755B1EE4D658978547C8A22AAA778CB203BD2415547C72EF313A2505
+  int_divmod                   DE0BDE366F01EF40E647C6386F2B09DA8D5418D529AC417ABD01639731F2AEF8
+  interp_ast                   A54EF343DEC313735890BCC3C503B08DEB3B9E2952CC61E0335606589FD3867D
+  job_system/job_system        FB67B17A0051D93E048BDB9D305EBC98B9E93D95C71700C26F184E151D7D194C
+  json_parse                   D28662DC7D117A393498EDC27A6694558DEE2AD93DC8A5D3FCE1B16E3E21CC03
+  lcg_rng                      8403BF4B721A15E2944E6E96A219C08F415E40D03089567539F5C89636CE5452
+  leaf_call                    C8E56FBD34EAC07432C59DF3A773960846852945FD6FD117B5992FE217BF9D6C
+  life_bits                    9A9A40921B391209FA0774332B74416C2E90972024170D56722E382BE5855E49
+  link_resolve                 0CAA072D38E79AFA416D91C4D551756B2501F0091FC531CFF32056C6FD557B3E
+  linked_list_sum              89CF8940F9C31E5850E579148984A012D0D22E9BDB7330FC58098D16E8BDFD08
+  llm/dequant_test             3BA8F4331011727E9C0FB91BEF6D91184AD11AA77797DBC2E6BE9C388BA5C2C0
+  llm/gemv_test                952BCD0FD1EC7208875DFC67DF549C423443E5A801A635A8065C53F4192BD092
+  llm/gguf_probe               40297AD369E5E9498CFAEAE2389E388C74C1CF32FE29590D0FC6288485A7FA45
+  lz77                         CFDE4B5EDCE46AD36DC1BEC4F999F138E319445B530B545CD7340C244138409E
+  machine/little               E2D698B32942D239D71DA0A4A50164DC4A4B8158940121B76513F156E35C6B20
+  mandelbrot                   732E7D8B2A274421A46CE1E3C6AEF10F9A7C6FDED06DF5B06AE966AC5104CDE9
+  mark_sweep                   2FFF01D77B16BDA55A84D790DED2C966EE4DC0111E808C76027E567A0C7F29F0
+  matrix_mul                   3199F8D67199FF76966E4F85FF65994732E1BA3ACC9515EB665DF257D935AEDD
+  matvec                       8499AB285557C9EE919178FF5F400A6E8F3867D9519816E38BEDC535528F292F
+  memcmp_bench                 7BFC8E7FDF7FBEC540E9E223304A42BCE97CDE01DB560C8B32659EA6E7CEDC69
+  memcpy_bench                 0F32E7F9175DBFD0673F75BD9F8D572AC63D7613FD01730CBDE8A99769F1A51E
+  memset_bench                 9022CC5FBA3699B48B6D6C52BA60605E085064A026B0CBD3F86A32B1D48E8574
+  merge_sort                   88FBA89A9D5A77F6C62E1C2C06FA2E02B67CD9E7986A023B01CCFEA4E660F25A
+  minmax_scan                  7F5541D8E7F16F68F56C76FDFBF1DDB99FFC21C03C37972809D7288283E30E8F
+  orbit_demo/orbits            1DE11CC17ECB8228B4AC4A4B7A7E6588A9F4359FF778ECB7762C47434CC3B635
+  os/boot                      D39DA47C40B81AE79658935E2A55CAF848A799D645AED094CDAAF446834BE50F
+  os/kernel                    A2F797770BFD9821D1DF0952000938418094271916CADE975E8CA246BA18CC8F
+  os/stage2                    F1D5BB2A97F3A5009C3C3D2FBECA70306B4FAEA2FBB7AFAD543A345B0362BD13
+  physics_grid                 38F3F0322DC5A47A8406EE7EAE0372CC5962B0B7706773354F60C612E0D6C5F9
+  popcount                     3F81D017F5FA3A17A3FE7A1AA1841EC92D073360553345B756D2B48B202EE3FF
+  prefix_sum                   AC626717E1A8496FA8C7EFB628F33518DD3230C5C23562E33C42E48F0BFD1F51
+  prime_count                  F0D8A23BC5961868FBCE01F8E81900E8AD92F0D05A2ABE5272CFA00AAB9779DE
+  quant_dot/quant_dot          8D30DFEC1161C8FCB96F44CE337600AD42931C93C34AAF5F31CDDAEE32A74F96
+  quant_matmul/quant_matmul    5A3B4B4C0780E86882EA63ECE65597616F757A09048EF979E02ED3F8717D26B5
+  quicksort                    56D742135611930723F15E42CE4A28C7C88B6C2A4182D7DA562985775C819ADD
+  radix_sort                   82B2BE6331D74AC5C02B3499382A9B6CBA27C3013F8FE7BCCF489CD4A7092DAA
+  raylib/raylib                2C3884ED4058E59BFF972C7F8F085AE4FF65E2ADEE1295B15E3C50770B969C9B
+  raylib/sphere                96A25FA99BBEB3D1A0901AF85A175F17A0FE6C4226441E42688B2FD63031947B
+  rec_fib                      25C136FDF420B8DFC09BCE07451B52F1F3475127230E32CAB735554CC7CC46DA
+  regex_match                  851B56EF63FB5E43B8DBA578E3822F74E65AB4D37C5F3110D55BA82236FB0B27
+  reverse_i32                  492D53A4842B331F1E3245BF85577846C980AB62A259617C1981035FF65884E0
+  rle_encode                   547833930F5D53F437B9F9EC6B7C878F10A9BE2B812B9E2F9D6B55316D3B0F83
+  saxpy                        4F7155B3C49FF734A87A8B31112CBFDDB79AB8CC563C815B669C2512AB6A8267
+  scale_i32                    4C27C2E5A155D798B5C1AE47A3098B8001F5B621C81C7FA00E70AC323A8C0F92
+  sort_insertion               A2D1FF0E8FF6E336FA0025A870BA1923C3EE3C339AA7CE04BF68AF2593DE0F7A
+  string_interp/string_interp  908837E492EB7F37C76BB3D59A109DA48803925AB2A522FF9A72CDEAC566A18D
+  struct_byval                 13861CA6495E9517BDC56FE6A010E156353C0C8B7888CFA3CE54993C9FEE3538
+  sudoku_solve                 D18112CEECDF8F64EC4570438DE275125735276AF8710C5A38762B1DB68F1655
+  sum_squares                  3549197DF579EBC22F0FD247886CDFEBDCE447738AFE9258C1238487898F01A0
+  switch_vm                    D9C2DC3ABA18B76FD21AC7BE7C6FC8A3EC1D2B90F10F96172CAB6FFF28CC2F65
+  testing/ui_test              90AF00EA926730651D940CA537A5BCD40CD1726C139855CA35547E8C9CE358A5
+  tracy_demo/tracy_demo        4A1DFC7633D5EF97CC2C8B623A18DB002D7913A8C814ED6A4E7EEDF41C9C2377
+  transpose                    509B697D50F36540B7135B85CC8BDC4ACEF1E528A0DC7E1FCAE48D7F295D5DA0
+  ui_demo/ui_demo              D01E5356A666CF1416F28A12403468435F0E67A196656531FC88E6C9FE4527F2
+  video_player/aac             7C105EA1822B3D6967A54E4D0E326A00EC54221C890691B6F4CA5134D9133124
+  video_player/aac_decode      351585F72EE42FD56919FF8D4185E0B0DC4CD4A4E0B88E0BE5DADB4A4A39AAB7
+  video_player/aac_tables      D3F887BAA15D6878131D2BB369D1C621DC382BA5EB8A408DE55EEC2A247D93A2
+  video_player/avi             674FC38668F33D024EF0650CB35CA23821AE1FECC45E2F5203093438D0A6668C
+  video_player/h264            220E07B0FCBEF3E9631CACBD5AFEB5CB0435E548B7D42991A2868391E44844A0
+  video_player/h264_decode     F449096BE9248642FE57263AEFAED2AECCAE096CB33BE8DEC67B0D139C62A2E8
+  video_player/h264_gpu        6E3F84E31C3ACB25B7673A4D4A6B098E711BDCBE59A1D603350DE55223E4E057
+  video_player/h264_inter      9B8968F585D9C067C2E87C1418D32BD217649D7450A984485197E6DDC351D5B9
+  video_player/h264_pslice     BE32CAD9CFEFC9EDE4C7028ED6E1861A548D00CBE6FC90759B4A32E115227DD6
+  video_player/h264_tables     8863E1A59C1F5738A56E80C56AA19873E2EBF05514E77784FEAFFF1374B2CD2B
+  video_player/jpeg            11F4E162BAEF9C904779140CEEA1D9BECC841A9CDF1FEB77EBFDCE78E62AC50C
+  video_player/mp4             234681337AFA4072343DDDBDA7D5BFD22DD1E5A060A5039262B9EB1D54B795AD
+  video_player/paint           6AB1E3AE72F985E3FE8C254E7234116B64F569C69C171E24CFE763EE46AB2662
+  video_player/player          20976499EB19849F279DBE5F456CA22E3FA9A11AD52E8359AD4A2551F36DEB77
+  video_player/source          5B49C4B1519CF76EBB1EE60E8FC9C5D945D0F42541165920607B3930CC958B41
+  video_player/video_kernel_decls 7E7EF485588C32D10684811946A20E079C05A644572061AA7B42E25949E480D7
+  video_player/video_kernels   42B656C82D506AE792ABBCEAF24A2FD4F699A52CA441C59EA1DE979DB56BCB70
+  video_player/vptool          03E9D8ACE5A985C70E62FDEAE3CEF1EEF7104F12408BB8431F53942C388BA16C
+  voxel_trace                  29C3521F8A5E7E02CB5A2C9BAF9D64AA1E6DD2F9B0B796B371C3F2F2B8CF7C98
+  word_count                   46BE91734E0FD1F85F059E48D1072AAAFEE58CC883BEA242AD3BFEF388678D2F
+  word_freq                    57ED35BEE694E14FD926980733D0ACAEEE7AC83174EDB3F3C2F9DAC39303C591

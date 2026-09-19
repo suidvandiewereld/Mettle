@@ -1,0 +1,69 @@
+regalloc census  compiler=C:/Users/Marquis/AppData/Local/Temp/claude/G--Projects-Mettle/2464d9bf-d884-4a20-803f-d9d314930fe6/scratchpad/bin_p2/mettle.exe
+sources=67  arms=base,ssa
+
+arm base: functions=173 kept=23807 spilled=338 (1,4%) copies=2866 coalesced=1894 spill_side=225
+  suite 3: kept=13520 spilled=238 copies=1283 coalesced=967
+  suite 2: kept=5021 spilled=60 copies=817 coalesced=507
+  suite 1: kept=5266 spilled=40 copies=766 coalesced=420
+  worst by spills:
+    huffman                      assign_codes             kept=120   spilled=44    copies=46    coalesced=33
+    voxel_trace                  render                   kept=75    spilled=20    copies=15    coalesced=4
+    huffman                      roundtrip                kept=116   spilled=20    copies=28    coalesced=21
+    sudoku_solve                 main                     kept=368   spilled=18    copies=27    coalesced=26
+    life_bits                    step                     kept=96    spilled=15    copies=9     coalesced=9
+    rec_fib                      fib                      kept=36    spilled=14    copies=10    coalesced=10
+    quicksort                    main                     kept=274   spilled=12    copies=58    coalesced=41
+    diff_lcs                     round_trip               kept=33    spilled=9     copies=7     coalesced=7
+    link_resolve                 generate_stream          kept=187   spilled=9     copies=42    coalesced=12
+    merge_sort                   merge_sort               kept=109   spilled=8     copies=0     coalesced=0
+  worst by surviving copies:
+    bst_insert                   build_tree               copies=139   coalesced=45    spill_side=12    spilled=3
+    bst_insert                   bst_insert               copies=148   coalesced=59    spill_side=0     spilled=0
+    fib                          main                     copies=93    coalesced=23    spill_side=0     spilled=3
+    fib                          bench_unrolled           copies=68    coalesced=0     spill_side=0     spilled=0
+    fib                          bench_looped             copies=68    coalesced=0     spill_side=0     spilled=0
+    interp_ast                   gen_source               copies=90    coalesced=51    spill_side=5     spilled=8
+    link_resolve                 generate_stream          copies=42    coalesced=12    spill_side=16    spilled=9
+    bst_insert                   inorder_sum              copies=88    coalesced=58    spill_side=0     spilled=4
+    sort_insertion               main                     copies=49    coalesced=27    spill_side=20    spilled=0
+    regex_match                  gen_corpus               copies=41    coalesced=20    spill_side=0     spilled=6
+
+arm ssa: functions=173 kept=26049 spilled=389 (1,47%) copies=4831 coalesced=3843 spill_side=245
+  suite 3: kept=14945 spilled=285 copies=2542 coalesced=2232
+  suite 2: kept=5425 spilled=63 copies=1208 coalesced=886
+  suite 1: kept=5679 spilled=41 copies=1081 coalesced=725
+  worst by spills:
+    huffman                      assign_codes             kept=120   spilled=44    copies=46    coalesced=33
+    sudoku_solve                 main                     kept=402   spilled=26    copies=62    coalesced=59
+    voxel_trace                  render                   kept=110   spilled=20    copies=51    coalesced=40
+    huffman                      roundtrip                kept=143   spilled=20    copies=52    coalesced=43
+    life_bits                    step                     kept=124   spilled=19    copies=41    coalesced=38
+    quicksort                    main                     kept=304   spilled=17    copies=98    coalesced=78
+    rec_fib                      fib                      kept=36    spilled=14    copies=10    coalesced=10
+    link_resolve                 generate_stream          kept=242   spilled=13    copies=82    coalesced=55
+    regex_match                  run_patterns             kept=36    spilled=10    copies=24    coalesced=20
+    diff_lcs                     round_trip               kept=44    spilled=10    copies=15    coalesced=14
+  worst by surviving copies:
+    bst_insert                   build_tree               copies=145   coalesced=52    spill_side=1     spilled=2
+    bst_insert                   bst_insert               copies=148   coalesced=59    spill_side=0     spilled=0
+    fib                          main                     copies=95    coalesced=25    spill_side=0     spilled=3
+    fib                          bench_unrolled           copies=72    coalesced=4     spill_side=0     spilled=0
+    fib                          bench_looped             copies=72    coalesced=4     spill_side=0     spilled=0
+    bst_insert                   inorder_sum              copies=88    coalesced=58    spill_side=0     spilled=4
+    link_resolve                 generate_stream          copies=82    coalesced=55    spill_side=17    spilled=13
+    interp_ast                   gen_source               copies=187   coalesced=161   spill_side=5     spilled=8
+    sort_insertion               main                     copies=55    coalesced=33    spill_side=20    spilled=0
+    quicksort                    main                     copies=98    coalesced=78    spill_side=11    spilled=17
+
+ssa minus base, per function (spilled delta, worst first):
+    sudoku_solve::main                                   spilled    8 surviving_copies    2
+    word_freq::gen_doc                                   spilled    6 surviving_copies    0
+    regex_match::run_patterns                            spilled    5 surviving_copies    3
+    quicksort::main                                      spilled    5 surviving_copies    3
+    physics_grid::collide                                spilled    4 surviving_copies    0
+    csv_query::generate_csv                              spilled    4 surviving_copies   -4
+    link_resolve::generate_stream                        spilled    4 surviving_copies   -3
+    life_bits::step                                      spilled    4 surviving_copies    3
+    regex_match::main                                    spilled    3 surviving_copies    3
+    diff_lcs::backtrack                                  spilled    3 surviving_copies    3
+
