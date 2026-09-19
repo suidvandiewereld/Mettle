@@ -861,6 +861,8 @@ static int mir_call_is_runtime_hook(const IRInstruction *in);
 static int mir_runtime_hook_is_supported(const IRInstruction *in);
 static int mir_call_sysv_arg_class(CodeGenerator *g, const IRInstruction *in,
                                    size_t a, BinarySysvAggregate *agg);
+static int mir_sysv_arg_is_packed_value(CodeGenerator *g,
+                                        const IRInstruction *in, size_t a);
 static int mir_untyped_float_bits(CodeGenerator *g, const IRFunction *irf,
                                   const IROperand *op);
 
@@ -1409,8 +1411,9 @@ static int mir_sysv_extern_call_is_supported(CodeGenerator *g,
   for (size_t a = 0; a < in->argument_count; a++) {
     BinarySysvAggregate agg;
     if (mir_call_sysv_arg_class(g, in, a, &agg) &&
-        !mir_indirect_source_is_supported(g, ir_function, &in->arguments[a])) {
-      mir_call_trace("sysv_extern_aggregate_arg");
+        !mir_indirect_source_is_supported(g, ir_function, &in->arguments[a]) &&
+        !mir_sysv_arg_is_packed_value(g, in, a)) {
+      mir_call_trace_named("sysv_extern_aggregate_arg", in->text);
       return 0;
     }
   }
@@ -5151,6 +5154,21 @@ typedef struct {
   const MirVregId *agg_base;
 } MirCallArgs;
 
+static int mir_sysv_arg_is_packed_value(CodeGenerator *g,
+                                        const IRInstruction *in, size_t a) {
+  const CgSym *callee =
+      g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
+  MtlcType *pt = (callee && callee->kind == CG_SYM_FUNCTION &&
+                  callee->data.function.parameter_types &&
+                  a < callee->data.function.parameter_count)
+                     ? callee->data.function.parameter_types[a]
+                     : NULL;
+  return pt && code_generator_type_is_aggregate(pt) &&
+         code_generator_abi_classify(pt) != ABI_PASS_INDIRECT &&
+         code_generator_abi_type_size(pt) <= 8 &&
+         mir_arg_kind_is_value(&in->arguments[a], 0, 0);
+}
+
 static int mir_call_sysv_arg_class(CodeGenerator *g, const IRInstruction *in,
                                    size_t a, BinarySysvAggregate *agg) {
   const CgSym *callee =
@@ -5901,6 +5919,30 @@ static int mir_call_plan_arguments(MirFunction *fn, CodeGenerator *g,
   return 1;
 }
 
+static MirVregId mir_emit_packed_value_addr(MirFunction *fn, CodeGenerator *g,
+                                            BinaryFunctionContext *ctx,
+                                            MirNameMap *map,
+                                            const IROperand *op) {
+  MirOperand v = mir_value_operand(fn, g, ctx, map, op);
+  MirVregId home = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId base = mir_new_vreg(fn, MIR_RC_GP, 8);
+  if (v.kind == MIR_OPK_NONE || home == MIR_VREG_NONE ||
+      base == MIR_VREG_NONE) {
+    fn->has_error = 1;
+    return MIR_VREG_NONE;
+  }
+  fn->vregs[home].address_taken = 1;
+  if (fn->vregs[home].home_bytes < 8) {
+    fn->vregs[home].home_bytes = 8;
+  }
+  if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(home), v, mir_op_none(), 8, 0, 0) ||
+      !mir_emit1(fn, MIR_LEA_LOCAL, mir_op_vreg(base), mir_op_vreg(home),
+                 mir_op_none(), 8, 0, 0)) {
+    return MIR_VREG_NONE;
+  }
+  return base;
+}
+
 static int mir_call_aggregate_bases(MirFunction *fn, CodeGenerator *g,
                                     BinaryFunctionContext *ctx,
                                     MirNameMap *map, const IRInstruction *in,
@@ -5909,9 +5951,16 @@ static int mir_call_aggregate_bases(MirFunction *fn, CodeGenerator *g,
     if (layout->sysv[a].size == 0) {
       continue;
     }
-    layout->agg_base[a] = mir_emit_indirect_source_addr(
-        fn, g, ctx, map, fn->ir_function, &in->arguments[a],
-        (int)layout->sysv[a].size);
+    if (!mir_indirect_source_is_supported(g, fn->ir_function,
+                                          &in->arguments[a]) &&
+        mir_sysv_arg_is_packed_value(g, in, a)) {
+      layout->agg_base[a] =
+          mir_emit_packed_value_addr(fn, g, ctx, map, &in->arguments[a]);
+    } else {
+      layout->agg_base[a] = mir_emit_indirect_source_addr(
+          fn, g, ctx, map, fn->ir_function, &in->arguments[a],
+          (int)layout->sysv[a].size);
+    }
     if (layout->agg_base[a] == MIR_VREG_NONE) {
       return 0;
     }

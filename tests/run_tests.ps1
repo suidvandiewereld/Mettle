@@ -11858,7 +11858,15 @@ $structAbiExternExpected = @(
   "c_make_odd3_sum 24",
   "c_sum_big32 36",
   "c_sum_two_f64 32",
-  "c_sum_mixed 107"
+  "c_sum_mixed 107",
+  "c_sum_rgba_local 4321",
+  "c_sum_rgba_call 8765",
+  "c_sum_rgba_extern 6789",
+  "c_sum_pair_local 73",
+  "c_sum_pair_call 113",
+  "c_sum_two_f32_call 240",
+  "c_sum_spilled 1151",
+  "locals_intact 9"
 ) -join "`n"
 
 foreach ($mode in @("binary")) {

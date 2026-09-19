@@ -44,6 +44,26 @@ extern fn c_sum_big32(v: Big32) -> int32 = "mettle_struct_abi_c_sum_big32";
 extern fn c_sum_two_f64(v: TwoF64) -> int32 = "mettle_struct_abi_c_sum_two_f64";
 extern fn c_sum_mixed(v: MixedI64F64) -> int32 = "mettle_struct_abi_c_sum_mixed";
 
+struct Rgba {
+  r: uint8; g: uint8; b: uint8; a: uint8;
+}
+
+struct PairI32 {
+  a: int32;
+  b: int32;
+}
+
+struct TwoF32 {
+  x: float32;
+  y: float32;
+}
+
+extern fn c_sum_rgba(c: Rgba) -> int32 = "mettle_struct_abi_c_sum_rgba";
+extern fn c_make_rgba(r: uint8, g: uint8, b: uint8, a: uint8) -> Rgba = "mettle_struct_abi_c_make_rgba";
+extern fn c_sum_pair(p: PairI32) -> int32 = "mettle_struct_abi_c_sum_pair";
+extern fn c_sum_two_f32(v: TwoF32) -> int32 = "mettle_struct_abi_c_sum_two_f32";
+extern fn c_sum_spilled(a: int32, b: int32, c: int32, d: int32, e: int32, f: int32, p: PairI32, v: TwoF32, k: Rgba) -> int32 = "mettle_struct_abi_c_sum_spilled";
+
 fn write_s(s: cstring) {
   if (s != 0) {
     fputs(s, get_stdout());
@@ -69,6 +89,29 @@ fn make_three(a: int32, b: int32, c: int32) -> ThreeI32 {
   t.b = b;
   t.c = c;
   return t;
+}
+
+fn make_rgba(r: int32, g: int32, b: int32, a: int32) -> Rgba {
+  var c: Rgba;
+  c.r = (uint8)r;
+  c.g = (uint8)g;
+  c.b = (uint8)b;
+  c.a = (uint8)a;
+  return c;
+}
+
+fn make_pair(a: int32, b: int32) -> PairI32 {
+  var p: PairI32;
+  p.a = a;
+  p.b = b;
+  return p;
+}
+
+fn make_two_f32(x: float32, y: float32) -> TwoF32 {
+  var v: TwoF32;
+  v.x = x;
+  v.y = y;
+  return v;
 }
 
 fn main() -> int32 {
@@ -97,6 +140,17 @@ fn main() -> int32 {
   mixed.i = 100;
   mixed.d = 7.0;
   line_i64("c_sum_mixed", (int64)c_sum_mixed(mixed));
+
+  var rgba: Rgba = make_rgba(1, 2, 3, 4);
+  line_i64("c_sum_rgba_local", (int64)c_sum_rgba(rgba));
+  line_i64("c_sum_rgba_call", (int64)c_sum_rgba(make_rgba(5, 6, 7, 8)));
+  line_i64("c_sum_rgba_extern", (int64)c_sum_rgba(c_make_rgba(9, 8, 7, 6)));
+  var pr: PairI32 = make_pair(3, 4);
+  line_i64("c_sum_pair_local", (int64)c_sum_pair(pr));
+  line_i64("c_sum_pair_call", (int64)c_sum_pair(make_pair(5, 6)));
+  line_i64("c_sum_two_f32_call", (int64)c_sum_two_f32(make_two_f32(1.5, 2.25)));
+  line_i64("c_sum_spilled", (int64)c_sum_spilled(1, 2, 3, 4, 5, 6, make_pair(1, 1), make_two_f32(1.0, 1.0), make_rgba(0, 0, 0, 1)));
+  line_i64("locals_intact", (int64)((int32)rgba.r + (int32)rgba.a + pr.b));
 
   return 0;
 }
