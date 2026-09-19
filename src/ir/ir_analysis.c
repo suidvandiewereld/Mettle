@@ -91,15 +91,7 @@ void ir_function_release_analysis(IRFunction *function) {
   function->analysis = NULL;
 }
 
-static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
-                        size_t block_count, size_t entry) {
-  memset(dom, 0, sizeof(*dom));
-  if (block_count == 0 || entry >= block_count) {
-    return 0;
-  }
-
-  dom->block_count = block_count;
-  dom->entry = entry;
+static int ir_dom_allocate(IRDomTree *dom, size_t block_count) {
   dom->idom = (size_t *)malloc(block_count * sizeof(size_t));
   dom->rpo_index = (size_t *)malloc(block_count * sizeof(size_t));
   dom->order = (size_t *)malloc(block_count * sizeof(size_t));
@@ -107,22 +99,10 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
   dom->child_next = (size_t *)malloc(block_count * sizeof(size_t));
   dom->enter = (size_t *)malloc(block_count * sizeof(size_t));
   dom->leave = (size_t *)malloc(block_count * sizeof(size_t));
-  size_t *stack = (size_t *)malloc(block_count * sizeof(size_t));
-  size_t *next_succ = (size_t *)malloc(block_count * sizeof(size_t));
-  unsigned char *seen = (unsigned char *)calloc(block_count, 1);
-  size_t *postorder = (size_t *)malloc(block_count * sizeof(size_t));
-
   if (!dom->idom || !dom->rpo_index || !dom->order || !dom->child_head ||
-      !dom->child_next || !dom->enter || !dom->leave || !stack || !next_succ ||
-      !seen || !postorder) {
-    free(stack);
-    free(next_succ);
-    free(seen);
-    free(postorder);
-    ir_dom_destroy(dom);
+      !dom->child_next || !dom->enter || !dom->leave) {
     return 0;
   }
-
   for (size_t i = 0; i < block_count; i++) {
     dom->idom[i] = IR_BLOCK_NONE;
     dom->rpo_index[i] = IR_BLOCK_NONE;
@@ -131,13 +111,17 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
     dom->enter[i] = 0;
     dom->leave[i] = 0;
   }
+  return 1;
+}
 
+static size_t ir_dom_postorder(const IRBasicBlock *blocks, size_t block_count,
+                               size_t entry, size_t *stack, size_t *next_succ,
+                               unsigned char *seen, size_t *postorder) {
   size_t post_count = 0;
-  size_t depth = 0;
+  size_t depth = 1;
   stack[0] = entry;
   next_succ[0] = 0;
   seen[entry] = 1;
-  depth = 1;
   while (depth > 0) {
     const size_t block = stack[depth - 1];
     if (next_succ[depth - 1] < blocks[block].successor_count) {
@@ -153,16 +137,66 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
     postorder[post_count++] = block;
     depth--;
   }
+  return post_count;
+}
 
+static int ir_dom_order_blocks(IRDomTree *dom, const IRBasicBlock *blocks,
+                               size_t block_count, size_t entry,
+                               size_t *stack) {
+  size_t *next_succ = (size_t *)malloc(block_count * sizeof(size_t));
+  unsigned char *seen = (unsigned char *)calloc(block_count, 1);
+  size_t *postorder = (size_t *)malloc(block_count * sizeof(size_t));
+  if (!next_succ || !seen || !postorder) {
+    free(next_succ);
+    free(seen);
+    free(postorder);
+    return 0;
+  }
+
+  const size_t post_count = ir_dom_postorder(blocks, block_count, entry, stack,
+                                             next_succ, seen, postorder);
   dom->order_count = post_count;
   for (size_t i = 0; i < post_count; i++) {
     dom->order[i] = postorder[post_count - 1 - i];
     dom->rpo_index[dom->order[i]] = i;
   }
+
   free(postorder);
   free(next_succ);
   free(seen);
+  return 1;
+}
 
+static size_t ir_dom_intersect(const IRDomTree *dom, size_t a, size_t b) {
+  while (a != b) {
+    while (dom->rpo_index[a] > dom->rpo_index[b]) {
+      a = dom->idom[a];
+    }
+    while (dom->rpo_index[b] > dom->rpo_index[a]) {
+      b = dom->idom[b];
+    }
+  }
+  return a;
+}
+
+static size_t ir_dom_candidate_idom(const IRDomTree *dom,
+                                    const IRBasicBlock *blocks,
+                                    size_t block_count, size_t block) {
+  size_t candidate = IR_BLOCK_NONE;
+  for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
+    const size_t pred = blocks[block].predecessors[p];
+    if (pred >= block_count || dom->idom[pred] == IR_BLOCK_NONE) {
+      continue;
+    }
+    candidate = (candidate == IR_BLOCK_NONE)
+                    ? pred
+                    : ir_dom_intersect(dom, pred, candidate);
+  }
+  return candidate;
+}
+
+static void ir_dom_compute_idoms(IRDomTree *dom, const IRBasicBlock *blocks,
+                                 size_t block_count, size_t entry) {
   dom->idom[entry] = entry;
   int changed = 1;
   while (changed) {
@@ -172,35 +206,17 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
       if (block == entry) {
         continue;
       }
-      size_t candidate = IR_BLOCK_NONE;
-      for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
-        const size_t pred = blocks[block].predecessors[p];
-        if (pred >= block_count || dom->idom[pred] == IR_BLOCK_NONE) {
-          continue;
-        }
-        if (candidate == IR_BLOCK_NONE) {
-          candidate = pred;
-          continue;
-        }
-        size_t a = pred;
-        size_t b = candidate;
-        while (a != b) {
-          while (dom->rpo_index[a] > dom->rpo_index[b]) {
-            a = dom->idom[a];
-          }
-          while (dom->rpo_index[b] > dom->rpo_index[a]) {
-            b = dom->idom[b];
-          }
-        }
-        candidate = a;
-      }
+      const size_t candidate =
+          ir_dom_candidate_idom(dom, blocks, block_count, block);
       if (candidate != IR_BLOCK_NONE && dom->idom[block] != candidate) {
         dom->idom[block] = candidate;
         changed = 1;
       }
     }
   }
+}
 
+static void ir_dom_build_child_lists(IRDomTree *dom, size_t entry) {
   for (size_t k = dom->order_count; k-- > 0;) {
     const size_t block = dom->order[k];
     if (block == entry || dom->idom[block] == IR_BLOCK_NONE) {
@@ -210,21 +226,22 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
     dom->child_next[block] = dom->child_head[parent];
     dom->child_head[parent] = block;
   }
+}
 
-  size_t clock = 0;
-  size_t sp = 0;
-  stack[sp] = entry;
+static int ir_dom_number_tree(IRDomTree *dom, size_t block_count, size_t entry,
+                              size_t *stack) {
   size_t *child_cursor = (size_t *)malloc(block_count * sizeof(size_t));
   if (!child_cursor) {
-    free(stack);
-    ir_dom_destroy(dom);
     return 0;
   }
   for (size_t i = 0; i < block_count; i++) {
     child_cursor[i] = dom->child_head[i];
   }
+
+  size_t clock = 0;
+  size_t sp = 1;
+  stack[0] = entry;
   dom->enter[entry] = clock++;
-  sp = 1;
   while (sp > 0) {
     const size_t block = stack[sp - 1];
     if (child_cursor[block] != IR_BLOCK_NONE) {
@@ -237,14 +254,24 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
     dom->leave[block] = clock++;
     sp--;
   }
-  free(child_cursor);
-  free(stack);
 
-  size_t *counts = (size_t *)calloc(block_count, sizeof(size_t));
-  if (!counts) {
-    ir_dom_destroy(dom);
-    return 0;
+  free(child_cursor);
+  return 1;
+}
+
+static void ir_dom_frontier_add(IRDomTree *dom, size_t runner, size_t block) {
+  const size_t start = dom->frontier_start[runner];
+  for (size_t k = 0; k < dom->frontier_count[runner]; k++) {
+    if (dom->frontier[start + k] == block) {
+      return;
+    }
   }
+  dom->frontier[start + dom->frontier_count[runner]] = block;
+  dom->frontier_count[runner]++;
+}
+
+static void ir_dom_frontier_pass(IRDomTree *dom, const IRBasicBlock *blocks,
+                                 size_t block_count, size_t *counts) {
   for (size_t block = 0; block < block_count; block++) {
     if (blocks[block].predecessor_count < 2) {
       continue;
@@ -256,7 +283,11 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
         continue;
       }
       while (runner != stop && runner != IR_BLOCK_NONE) {
-        counts[runner]++;
+        if (counts) {
+          counts[runner]++;
+        } else {
+          ir_dom_frontier_add(dom, runner, block);
+        }
         if (runner == dom->idom[runner]) {
           break;
         }
@@ -264,12 +295,20 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
       }
     }
   }
+}
+
+static int ir_dom_build_frontiers(IRDomTree *dom, const IRBasicBlock *blocks,
+                                  size_t block_count) {
+  size_t *counts = (size_t *)calloc(block_count, sizeof(size_t));
+  if (!counts) {
+    return 0;
+  }
+  ir_dom_frontier_pass(dom, blocks, block_count, counts);
 
   dom->frontier_start = (size_t *)malloc(block_count * sizeof(size_t));
   dom->frontier_count = (size_t *)calloc(block_count, sizeof(size_t));
   if (!dom->frontier_start || !dom->frontier_count) {
     free(counts);
-    ir_dom_destroy(dom);
     return 0;
   }
   size_t total = 0;
@@ -277,46 +316,49 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
     dom->frontier_start[i] = total;
     total += counts[i];
   }
+  free(counts);
+
   dom->frontier_total = total;
   dom->frontier = total ? (size_t *)malloc(total * sizeof(size_t)) : NULL;
   if (total && !dom->frontier) {
-    free(counts);
+    return 0;
+  }
+
+  ir_dom_frontier_pass(dom, blocks, block_count, NULL);
+  return 1;
+}
+
+static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
+                        size_t block_count, size_t entry) {
+  memset(dom, 0, sizeof(*dom));
+  if (block_count == 0 || entry >= block_count) {
+    return 0;
+  }
+
+  dom->block_count = block_count;
+  dom->entry = entry;
+  if (!ir_dom_allocate(dom, block_count)) {
     ir_dom_destroy(dom);
     return 0;
   }
 
-  for (size_t block = 0; block < block_count; block++) {
-    if (blocks[block].predecessor_count < 2) {
-      continue;
-    }
-    const size_t stop = dom->idom[block];
-    for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
-      size_t runner = blocks[block].predecessors[p];
-      if (runner >= block_count || dom->idom[runner] == IR_BLOCK_NONE) {
-        continue;
-      }
-      while (runner != stop && runner != IR_BLOCK_NONE) {
-        int present = 0;
-        const size_t start = dom->frontier_start[runner];
-        for (size_t k = 0; k < dom->frontier_count[runner]; k++) {
-          if (dom->frontier[start + k] == block) {
-            present = 1;
-            break;
-          }
-        }
-        if (!present) {
-          dom->frontier[start + dom->frontier_count[runner]] = block;
-          dom->frontier_count[runner]++;
-        }
-        if (runner == dom->idom[runner]) {
-          break;
-        }
-        runner = dom->idom[runner];
-      }
-    }
+  size_t *stack = (size_t *)malloc(block_count * sizeof(size_t));
+  if (!stack || !ir_dom_order_blocks(dom, blocks, block_count, entry, stack)) {
+    free(stack);
+    ir_dom_destroy(dom);
+    return 0;
   }
 
-  free(counts);
+  ir_dom_compute_idoms(dom, blocks, block_count, entry);
+  ir_dom_build_child_lists(dom, entry);
+
+  const int numbered = ir_dom_number_tree(dom, block_count, entry, stack);
+  free(stack);
+  if (!numbered || !ir_dom_build_frontiers(dom, blocks, block_count)) {
+    ir_dom_destroy(dom);
+    return 0;
+  }
+
   dom->built = 1;
   return 1;
 }
@@ -340,45 +382,112 @@ static const IROperand *ir_analysis_operand_at(const IRInstruction *instruction,
   return &instruction->arguments[argument];
 }
 
-static int ir_use_defs_build(IRUseDefs *ud, const IRFunction *function) {
-  memset(ud, 0, sizeof(*ud));
-  const size_t value_count = ir_value_table_count(&function->values) + 1;
-  ud->value_count = value_count;
+static const IROperand *ir_use_defs_value_at(const IRInstruction *instruction,
+                                             size_t index,
+                                             size_t value_count) {
+  const IROperand *operand = ir_analysis_operand_at(instruction, index);
+  if (!operand || !ir_operand_is_value(operand) ||
+      operand->value_id == IR_VALUE_ID_NONE ||
+      operand->value_id >= value_count) {
+    return NULL;
+  }
+  return operand;
+}
+
+static uint32_t ir_use_defs_written_value(const IRInstruction *instruction,
+                                          int writes, size_t value_count) {
+  if (!writes || !ir_operand_is_value(&instruction->dest) ||
+      instruction->dest.value_id == IR_VALUE_ID_NONE ||
+      instruction->dest.value_id >= value_count) {
+    return IR_VALUE_ID_NONE;
+  }
+  return instruction->dest.value_id;
+}
+
+static int ir_use_defs_allocate(IRUseDefs *ud, size_t value_count) {
   ud->def_first = (uint32_t *)malloc(value_count * sizeof(uint32_t));
   ud->def_count = (size_t *)calloc(value_count, sizeof(size_t));
   ud->use_start = (size_t *)calloc(value_count, sizeof(size_t));
   ud->use_count = (size_t *)calloc(value_count, sizeof(size_t));
   if (!ud->def_first || !ud->def_count || !ud->use_start || !ud->use_count) {
-    ir_use_defs_destroy(ud);
     return 0;
   }
   for (size_t i = 0; i < value_count; i++) {
     ud->def_first[i] = IR_INSTRUCTION_NONE;
   }
+  return 1;
+}
 
-  size_t def_total = 0;
-  size_t use_total = 0;
+static void ir_use_defs_count(IRUseDefs *ud, const IRFunction *function,
+                              size_t value_count, size_t *def_total,
+                              size_t *use_total) {
+  *def_total = 0;
+  *use_total = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
     const int writes = ir_instruction_writes_destination(instruction);
-    if (writes && ir_operand_is_value(&instruction->dest) &&
-        instruction->dest.value_id != IR_VALUE_ID_NONE &&
-        instruction->dest.value_id < value_count) {
-      ud->def_count[instruction->dest.value_id]++;
-      def_total++;
+    const uint32_t written =
+        ir_use_defs_written_value(instruction, writes, value_count);
+    if (written != IR_VALUE_ID_NONE) {
+      ud->def_count[written]++;
+      (*def_total)++;
     }
     const size_t operands = 3 + instruction->argument_count;
     for (size_t j = writes ? 1 : 0; j < operands; j++) {
-      const IROperand *operand = ir_analysis_operand_at(instruction, j);
-      if (!operand || !ir_operand_is_value(operand) ||
-          operand->value_id == IR_VALUE_ID_NONE ||
-          operand->value_id >= value_count) {
+      const IROperand *operand =
+          ir_use_defs_value_at(instruction, j, value_count);
+      if (!operand) {
         continue;
       }
       ud->use_count[operand->value_id]++;
-      use_total++;
+      (*use_total)++;
     }
   }
+}
+
+static void ir_use_defs_fill(IRUseDefs *ud, const IRFunction *function,
+                             size_t value_count, const size_t *def_start,
+                             size_t *def_fill, size_t *use_fill) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    const int writes = ir_instruction_writes_destination(instruction);
+    const uint32_t written =
+        ir_use_defs_written_value(instruction, writes, value_count);
+    if (written != IR_VALUE_ID_NONE) {
+      ud->defs[def_start[written] + def_fill[written]] = (uint32_t)i;
+      if (def_fill[written] == 0) {
+        ud->def_first[written] = (uint32_t)i;
+      }
+      def_fill[written]++;
+    }
+    const size_t operands = 3 + instruction->argument_count;
+    for (size_t j = writes ? 1 : 0; j < operands; j++) {
+      const IROperand *operand =
+          ir_use_defs_value_at(instruction, j, value_count);
+      if (!operand) {
+        continue;
+      }
+      const uint32_t id = operand->value_id;
+      IRValueUse *slot = &ud->uses[ud->use_start[id] + use_fill[id]];
+      slot->instruction = (uint32_t)i;
+      slot->operand = (uint32_t)j;
+      use_fill[id]++;
+    }
+  }
+}
+
+static int ir_use_defs_build(IRUseDefs *ud, const IRFunction *function) {
+  memset(ud, 0, sizeof(*ud));
+  const size_t value_count = ir_value_table_count(&function->values) + 1;
+  ud->value_count = value_count;
+  if (!ir_use_defs_allocate(ud, value_count)) {
+    ir_use_defs_destroy(ud);
+    return 0;
+  }
+
+  size_t def_total = 0;
+  size_t use_total = 0;
+  ir_use_defs_count(ud, function, value_count, &def_total, &use_total);
 
   ud->def_total = def_total;
   ud->use_total = use_total;
@@ -416,34 +525,7 @@ static int ir_use_defs_build(IRUseDefs *ud, const IRFunction *function) {
     return 0;
   }
 
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *instruction = &function->instructions[i];
-    const int writes = ir_instruction_writes_destination(instruction);
-    if (writes && ir_operand_is_value(&instruction->dest) &&
-        instruction->dest.value_id != IR_VALUE_ID_NONE &&
-        instruction->dest.value_id < value_count) {
-      const uint32_t id = instruction->dest.value_id;
-      ud->defs[def_start[id] + def_fill[id]] = (uint32_t)i;
-      if (def_fill[id] == 0) {
-        ud->def_first[id] = (uint32_t)i;
-      }
-      def_fill[id]++;
-    }
-    const size_t operands = 3 + instruction->argument_count;
-    for (size_t j = writes ? 1 : 0; j < operands; j++) {
-      const IROperand *operand = ir_analysis_operand_at(instruction, j);
-      if (!operand || !ir_operand_is_value(operand) ||
-          operand->value_id == IR_VALUE_ID_NONE ||
-          operand->value_id >= value_count) {
-        continue;
-      }
-      const uint32_t id = operand->value_id;
-      IRValueUse *slot = &ud->uses[ud->use_start[id] + use_fill[id]];
-      slot->instruction = (uint32_t)i;
-      slot->operand = (uint32_t)j;
-      use_fill[id]++;
-    }
-  }
+  ir_use_defs_fill(ud, function, value_count, def_start, def_fill, use_fill);
 
   for (size_t i = 0; i < value_count; i++) {
     ud->def_count[i] = def_fill[i];

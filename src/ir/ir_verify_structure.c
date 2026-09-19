@@ -4,6 +4,7 @@
 #include "../compiler/compiler_crash.h"
 #include "ir.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,110 @@ static const IROperand *ir_structure_operand_at(const IRInstruction *instruction
   return &instruction->arguments[argument];
 }
 
+static void ir_structure_first_reason(char *why, size_t why_capacity, int ok,
+                                      const char *format, ...) {
+  if (!ok || !why || !why_capacity) {
+    return;
+  }
+  va_list args;
+  va_start(args, format);
+  vsnprintf(why, why_capacity, format, args);
+  va_end(args);
+}
+
+static int ir_structure_collect_labels(const IRFunction *function,
+                                       IRValueTable *labels,
+                                       IRStructureReport *report, char *why,
+                                       size_t why_capacity) {
+  int ok = 1;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    if (instruction->op != IR_OP_LABEL) {
+      continue;
+    }
+    if (!instruction->text) {
+      ir_structure_first_reason(why, why_capacity, ok,
+                                "instruction %zu is a label with no name", i);
+      ok = 0;
+      if (report) {
+        report->duplicate_labels++;
+      }
+      continue;
+    }
+    if (ir_value_table_lookup(labels, (unsigned char)IR_OPERAND_LABEL,
+                              instruction->text) != IR_VALUE_ID_NONE) {
+      ir_structure_first_reason(
+          why, why_capacity, ok,
+          "label '%s' is defined more than once, again at instruction %zu",
+          instruction->text, i);
+      ok = 0;
+      if (report) {
+        report->duplicate_labels++;
+      }
+      continue;
+    }
+    ir_value_table_intern(labels, (unsigned char)IR_OPERAND_LABEL,
+                          instruction->text);
+  }
+  return ok;
+}
+
+static int ir_structure_check_branch(const IRInstruction *instruction,
+                                     size_t index, IRValueTable *labels,
+                                     IRStructureReport *report, char *why,
+                                     size_t why_capacity, int ok) {
+  if (!instruction->text) {
+    ir_structure_first_reason(why, why_capacity, ok,
+                              "instruction %zu branches to no target", index);
+  } else if (ir_value_table_lookup(labels, (unsigned char)IR_OPERAND_LABEL,
+                                   instruction->text) == IR_VALUE_ID_NONE) {
+    ir_structure_first_reason(
+        why, why_capacity, ok,
+        "instruction %zu branches to '%s' which no label defines", index,
+        instruction->text);
+  } else {
+    return 1;
+  }
+  if (report) {
+    report->unresolved_targets++;
+  }
+  return 0;
+}
+
+static void ir_structure_count_unnumbered(const IRInstruction *instruction,
+                                          IRStructureReport *report) {
+  const size_t operands = 3 + instruction->argument_count;
+  for (size_t j = 0; j < operands; j++) {
+    const IROperand *operand = ir_structure_operand_at(instruction, j);
+    if (operand && ir_operand_is_value(operand) &&
+        operand->value_id == IR_VALUE_ID_NONE) {
+      report->unnumbered_values++;
+    }
+  }
+}
+
+static void ir_structure_tally_defs(const IRFunction *function,
+                                    IRStructureReport *report,
+                                    const size_t *defs,
+                                    size_t value_capacity) {
+  for (uint32_t id = 1; id < (uint32_t)value_capacity; id++) {
+    if (defs[id] == 0) {
+      continue;
+    }
+    if (ir_value_table_kind(&function->values, id) == IR_OPERAND_TEMP) {
+      report->temps++;
+      if (defs[id] > 1) {
+        report->temps_multi_def++;
+      }
+    } else {
+      report->symbols++;
+      if (defs[id] > 1) {
+        report->symbols_multi_def++;
+      }
+    }
+  }
+}
+
 int ir_function_check_structure(const IRFunction *function,
                                 IRStructureReport *report, char *why,
                                 size_t why_capacity) {
@@ -82,43 +187,10 @@ int ir_function_check_structure(const IRFunction *function,
     why[0] = '\0';
   }
 
-  int ok = 1;
   IRValueTable labels;
   ir_value_table_init(&labels);
-
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *instruction = &function->instructions[i];
-    if (instruction->op != IR_OP_LABEL) {
-      continue;
-    }
-    if (!instruction->text) {
-      if (ok && why && why_capacity) {
-        snprintf(why, why_capacity, "instruction %zu is a label with no name",
-                 i);
-      }
-      ok = 0;
-      if (report) {
-        report->duplicate_labels++;
-      }
-      continue;
-    }
-    if (ir_value_table_lookup(&labels, (unsigned char)IR_OPERAND_LABEL,
-                              instruction->text) != IR_VALUE_ID_NONE) {
-      if (ok && why && why_capacity) {
-        snprintf(why, why_capacity,
-                 "label '%s' is defined more than once, again at instruction "
-                 "%zu",
-                 instruction->text, i);
-      }
-      ok = 0;
-      if (report) {
-        report->duplicate_labels++;
-      }
-      continue;
-    }
-    ir_value_table_intern(&labels, (unsigned char)IR_OPERAND_LABEL,
-                          instruction->text);
-  }
+  int ok =
+      ir_structure_collect_labels(function, &labels, report, why, why_capacity);
 
   const size_t value_capacity = ir_value_table_count(&function->values) + 1;
   size_t *defs = (size_t *)calloc(value_capacity, sizeof(size_t));
@@ -126,29 +198,10 @@ int ir_function_check_structure(const IRFunction *function,
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
 
-    if (ir_structure_is_branch(instruction)) {
-      if (!instruction->text) {
-        if (ok && why && why_capacity) {
-          snprintf(why, why_capacity, "instruction %zu branches to no target",
-                   i);
-        }
-        ok = 0;
-        if (report) {
-          report->unresolved_targets++;
-        }
-      } else if (ir_value_table_lookup(&labels, (unsigned char)IR_OPERAND_LABEL,
-                                       instruction->text) ==
-                 IR_VALUE_ID_NONE) {
-        if (ok && why && why_capacity) {
-          snprintf(why, why_capacity,
-                   "instruction %zu branches to '%s' which no label defines", i,
-                   instruction->text);
-        }
-        ok = 0;
-        if (report) {
-          report->unresolved_targets++;
-        }
-      }
+    if (ir_structure_is_branch(instruction) &&
+        !ir_structure_check_branch(instruction, i, &labels, report, why,
+                                   why_capacity, ok)) {
+      ok = 0;
     }
 
     if (defs && ir_instruction_writes_destination(instruction) &&
@@ -160,34 +213,12 @@ int ir_function_check_structure(const IRFunction *function,
     }
 
     if (report) {
-      const size_t operands = 3 + instruction->argument_count;
-      for (size_t j = 0; j < operands; j++) {
-        const IROperand *operand = ir_structure_operand_at(instruction, j);
-        if (operand && ir_operand_is_value(operand) &&
-            operand->value_id == IR_VALUE_ID_NONE) {
-          report->unnumbered_values++;
-        }
-      }
+      ir_structure_count_unnumbered(instruction, report);
     }
   }
 
   if (report && defs) {
-    for (uint32_t id = 1; id < (uint32_t)value_capacity; id++) {
-      if (defs[id] == 0) {
-        continue;
-      }
-      if (ir_value_table_kind(&function->values, id) == IR_OPERAND_TEMP) {
-        report->temps++;
-        if (defs[id] > 1) {
-          report->temps_multi_def++;
-        }
-      } else {
-        report->symbols++;
-        if (defs[id] > 1) {
-          report->symbols_multi_def++;
-        }
-      }
-    }
+    ir_structure_tally_defs(function, report, defs, value_capacity);
   }
 
   free(defs);
