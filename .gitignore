@@ -62,3 +62,4 @@ pondering/
 tests/test-failures.txt
 tests/*-failures.txt
 DS/
+.perf*/
