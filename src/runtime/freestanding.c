@@ -1609,28 +1609,38 @@ static char *mt_windows_quote(char *out, const char *text) {
   return out;
 }
 
+#define MT_PATH_BYTES 32768
+
 int mettle_find_executable(const char *program) {
-  char resolved[32768];
   const char *extension;
   mt_u32 length;
+  char *resolved;
   if (!program || !program[0]) return 0;
+  resolved = (char *)malloc(MT_PATH_BYTES);
+  if (!resolved) return 0;
   extension = strchr(program, '.') ? MT_NULL : ".exe";
-  length = SearchPathA(MT_NULL, program, extension, sizeof(resolved), resolved,
+  length = SearchPathA(MT_NULL, program, extension, MT_PATH_BYTES, resolved,
                        MT_NULL);
-  return length > 0 && length < sizeof(resolved);
+  free(resolved);
+  return length > 0 && length < MT_PATH_BYTES;
 }
 
 int mettle_run_process(const char *program, const char *const *arguments) {
   mt_size command_size = 1;
   mt_size count = 0;
-  char resolved_program[32768];
+  char *resolved_program;
   const char *application = program;
   while (arguments[count]) {
     command_size += mt_windows_quoted_size(arguments[count]) + 1;
     count++;
   }
   char *command = (char *)malloc(command_size);
-  if (!command) return 127;
+  resolved_program = (char *)malloc(MT_PATH_BYTES);
+  if (!command || !resolved_program) {
+    free(command);
+    free(resolved_program);
+    return 127;
+  }
   char *out = command;
   for (mt_size i = 0; i < count; i++) {
     if (i) *out++ = ' ';
@@ -1645,16 +1655,16 @@ int mettle_run_process(const char *program, const char *const *arguments) {
   startup.size = sizeof(startup);
   {
     const char *extension = strchr(program, '.') ? MT_NULL : ".exe";
-    mt_u32 length = SearchPathA(MT_NULL, program, extension,
-                                sizeof(resolved_program), resolved_program,
-                                MT_NULL);
-    if (length > 0 && length < sizeof(resolved_program)) {
+    mt_u32 length = SearchPathA(MT_NULL, program, extension, MT_PATH_BYTES,
+                                resolved_program, MT_NULL);
+    if (length > 0 && length < MT_PATH_BYTES) {
       application = resolved_program;
     }
   }
   int created = CreateProcessA(application, command, MT_NULL, MT_NULL, 0, 0,
                                MT_NULL, MT_NULL, &startup, &process);
   free(command);
+  free(resolved_program);
   if (!created) return 127;
   (void)WaitForSingleObject(process.process, 0xffffffffu);
   mt_u32 status = 127;
@@ -3456,8 +3466,32 @@ int pclose(void *stream) {
 int system(const char *command) {
   if (!command) return 1;
 #if defined(_WIN32)
-  const char *arguments[] = {"cmd.exe", "/S", "/C", command, MT_NULL};
-  return mettle_run_process("cmd.exe", arguments);
+  {
+    const char prefix[] = "cmd.exe /S /C ";
+    char shell[512];
+    MtStartupInfo startup;
+    MtProcessInfo process;
+    char *command_line;
+    int created;
+    mt_u32 status = 127;
+    if (!mt_resolve_command_shell(shell, sizeof(shell))) return 127;
+    command_line = (char *)malloc(sizeof(prefix) + strlen(command));
+    if (!command_line) return 127;
+    strcpy(command_line, prefix);
+    strcat(command_line, command);
+    memset(&startup, 0, sizeof(startup));
+    memset(&process, 0, sizeof(process));
+    startup.size = sizeof(startup);
+    created = CreateProcessA(shell, command_line, MT_NULL, MT_NULL, 1, 0,
+                             MT_NULL, MT_NULL, &startup, &process);
+    free(command_line);
+    if (!created) return 127;
+    (void)WaitForSingleObject(process.process, 0xffffffffu);
+    (void)GetExitCodeProcess(process.process, &status);
+    CloseHandle(process.thread);
+    CloseHandle(process.process);
+    return (int)status;
+  }
 #else
   const char *arguments[] = {"sh", "-c", command, MT_NULL};
   return mettle_run_process("/bin/sh", arguments);

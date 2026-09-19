@@ -11911,6 +11911,45 @@ foreach ($mode in @("binary")) {
   }
 }
 
+# A string reaching a cstring parameter has to arrive as the text pointer, and
+# every way of producing one is a different operand: a named local is an
+# address the backend can load from, while interpolation, concatenation and a
+# returned string are values in temps. Passing a temp used to load through the
+# text pointer instead of reading it, so the callee got the first eight bytes
+# of the text as its address. std/system rides along because it is the only
+# caller of the runtime shell spawn.
+$stringCstringExpected = @(
+  "literal true",
+  "variable true",
+  "interpolated true",
+  "initialised true",
+  "returned true",
+  "concatenated true",
+  "system ok 0 code 7"
+) -join "`n"
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exePath = Join-Path $tmpDir "string_cstring_coercion.exe"
+  $buildOut = & $CompilerPath --build tests/test_string_cstring_coercion.mettle `
+    -o $exePath 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "build failed: $buildOut" }
+  $runOut = ((& $exePath 2>&1 | Out-String) -replace "`r`n", "`n").TrimEnd()
+  if ($LASTEXITCODE -ne 0) {
+    throw "executable exited with $LASTEXITCODE`n$runOut"
+  }
+  if ($runOut -ne $stringCstringExpected) {
+    throw ("output mismatch:`n--- expected ---`n$stringCstringExpected" +
+           "`n--- got ---`n$runOut")
+  }
+  Write-CaseResult -Name "string_cstring_coercion" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "string_cstring_coercion" -Passed $false -Reason $_.Exception.Message
+}
+
 # Companion repro: large structs containing float64 fields and engine-style
 # layouts (float64-first, trailing int32) plus heap allocation. Just verify the
 # repro builds and runs cleanly under both link modes; full byte-level scrutiny

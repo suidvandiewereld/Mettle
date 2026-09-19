@@ -197,11 +197,47 @@ int ir_decay_array_operand_to_address(IRLoweringContext *context,
   return 1;
 }
 
+static int ir_spill_string_temp_to_local(IRLoweringContext *context,
+                                         IRFunction *function,
+                                         IROperand *value,
+                                         SourceLocation location) {
+  char *name = ir_new_label_name(context, "strtmp");
+  if (!name) {
+    return 0;
+  }
+  if (!ir_emit_local_declaration(context, function, name, "string", location)) {
+    free(name);
+    return 0;
+  }
+
+  IRInstruction store = {0};
+  store.op = IR_OP_ASSIGN;
+  store.location = location;
+  store.dest = ir_operand_symbol(name);
+  store.lhs = *value;
+  if (!store.dest.name || !ir_emit(context, function, &store)) {
+    ir_operand_destroy(&store.dest);
+    free(name);
+    return 0;
+  }
+
+  ir_operand_destroy(&store.dest);
+  ir_operand_destroy(value);
+  *value = ir_operand_symbol(name);
+  free(name);
+  return value->name != NULL;
+}
+
 int ir_coerce_string_operand_to_cstring(IRLoweringContext *context,
                                                IRFunction *function,
                                                IROperand *value,
                                                SourceLocation location) {
   if (!context || !function || !value || value->kind == IR_OPERAND_NONE) {
+    return 0;
+  }
+
+  if (value->kind == IR_OPERAND_TEMP &&
+      !ir_spill_string_temp_to_local(context, function, value, location)) {
     return 0;
   }
 

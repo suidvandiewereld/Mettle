@@ -1,0 +1,36 @@
+import "std/io"
+import "std/system"
+
+extern fn strcmp(a: cstring, b: cstring) -> int32 = "strcmp";
+
+fn same(got: cstring, want: cstring) -> bool {
+  return strcmp(got, want) == 0;
+}
+
+fn make(n: int32) -> string {
+  return "made {n}";
+}
+
+fn main() -> int32 {
+  var n: int32 = 7;
+
+  println("literal {same("plain text", "plain text")}");
+
+  var held: string = "held {n}";
+  println("variable {same(held, "held 7")}");
+
+  println("interpolated {same("count {n}", "count 7")}");
+
+  var initialised: cstring = "initialised {n}";
+  println("initialised {same(initialised, "initialised 7")}");
+
+  println("returned {same(make(n), "made 7")}");
+
+  println("concatenated {same("a" + "b", "ab")}");
+
+  var ok: int32 = system("exit 0");
+  var code: int32 = system("exit 7");
+  println("system ok {ok} code {code}");
+
+  return 0;
+}
