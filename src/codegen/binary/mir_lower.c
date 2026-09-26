@@ -10784,27 +10784,6 @@ static size_t mir_succ_count(const MirFunction *fn, size_t at) {
   return fall;
 }
 
-static size_t mir_succ_at(const MirFunction *fn, size_t at, size_t k) {
-  const MirInst *in = &fn->insns[at];
-  const char *label = NULL;
-  if (in->op == MIR_JMP_TABLE) {
-    const MirJumpTable *tbl = (const MirJumpTable *)in->aux;
-    label = (tbl && k < tbl->count) ? tbl->labels[k] : NULL;
-  } else if (in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR) {
-    if (k == 0) {
-      label = (in->dst.kind == MIR_OPK_LABEL) ? in->dst.sym : NULL;
-    } else {
-      return at + 1;
-    }
-  } else {
-    return at + 1;
-  }
-  if (!label) {
-    return (size_t)-1;
-  }
-  return mir_label_index(fn, label);
-}
-
 /* Everything that can reach one of the back edges without passing through the
    header, which is the loop's body. A header test whose target lands in there
    does not leave the loop, and rotating on it would drop the rest of the
@@ -10833,6 +10812,34 @@ typedef struct {
   int stale;
 } MirRotateRefs;
 
+static size_t mir_rotate_label_def(const MirFunction *fn,
+                                   const MirRotateRefs *refs,
+                                   const char *name);
+
+static size_t mir_rotate_succ_at(const MirFunction *fn,
+                                 const MirRotateRefs *refs, size_t at,
+                                 size_t k) {
+  const MirInst *in = &fn->insns[at];
+  const char *label = NULL;
+  size_t found;
+  if (in->op == MIR_JMP_TABLE) {
+    const MirJumpTable *tbl = (const MirJumpTable *)in->aux;
+    label = (tbl && k < tbl->count) ? tbl->labels[k] : NULL;
+  } else if (in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR) {
+    if (k != 0) {
+      return at + 1;
+    }
+    label = (in->dst.kind == MIR_OPK_LABEL) ? in->dst.sym : NULL;
+  } else {
+    return at + 1;
+  }
+  if (!label) {
+    return (size_t)-1;
+  }
+  found = mir_rotate_label_def(fn, refs, label);
+  return found;
+}
+
 static void mir_rotate_cfg_destroy(MirRotateCfg *cfg) {
   free(cfg->start);
   free(cfg->edge);
@@ -10841,7 +10848,8 @@ static void mir_rotate_cfg_destroy(MirRotateCfg *cfg) {
   memset(cfg, 0, sizeof(*cfg));
 }
 
-static int mir_rotate_cfg_build(const MirFunction *fn, MirRotateCfg *cfg) {
+static int mir_rotate_cfg_build(const MirFunction *fn, MirRotateCfg *cfg,
+                                const MirRotateRefs *refs) {
   size_t n = fn->insn_count;
   size_t total = 0;
   mir_rotate_cfg_destroy(cfg);
@@ -10859,7 +10867,7 @@ static int mir_rotate_cfg_build(const MirFunction *fn, MirRotateCfg *cfg) {
       return 0;
     }
     for (size_t s = 0; s < count; s++) {
-      size_t t = mir_succ_at(fn, i, s);
+      size_t t = mir_rotate_succ_at(fn, refs, i, s);
       if (t == (size_t)-1 || t >= n) {
         mir_rotate_cfg_destroy(cfg);
         return 0;
@@ -10879,7 +10887,7 @@ static int mir_rotate_cfg_build(const MirFunction *fn, MirRotateCfg *cfg) {
   for (size_t i = 0; i < n; i++) {
     size_t count = mir_succ_count(fn, i);
     for (size_t s = 0; s < count; s++) {
-      cfg->edge[cfg->start[mir_succ_at(fn, i, s) + 1u]++] = i;
+      cfg->edge[cfg->start[mir_rotate_succ_at(fn, refs, i, s) + 1u]++] = i;
     }
   }
   cfg->insns = n;
@@ -11110,7 +11118,7 @@ static int mir_rotate_test_leaves_loop(MirFunction *fn, MirRotateCfg *cfg,
   if (elabel == (size_t)-1 || elabel == j) {
     return 0;
   }
-  if (cfg->insns != fn->insn_count && !mir_rotate_cfg_build(fn, cfg)) {
+  if (cfg->insns != fn->insn_count && !mir_rotate_cfg_build(fn, cfg, refs)) {
     *fatal = 1;
     return 0;
   }
@@ -11178,11 +11186,11 @@ static void mir_rotate_loops(MirFunction *fn) {
   if (!fn || fn->insn_count < 3) {
     return;
   }
-  if (!mir_rotate_cfg_build(fn, &cfg)) {
+  if (!mir_rotate_refs_build(fn, &refs)) {
     return;
   }
-  if (!mir_rotate_refs_build(fn, &refs)) {
-    mir_rotate_cfg_destroy(&cfg);
+  if (!mir_rotate_cfg_build(fn, &cfg, &refs)) {
+    mir_rotate_refs_destroy(&refs);
     return;
   }
   for (size_t j = 0; j + 1 < fn->insn_count; j++) {
