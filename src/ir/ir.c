@@ -1768,7 +1768,13 @@ int ir_program_global_address_taken(IRProgram *program, const char *name) {
           return 1;
         }
         program->alias_globals = grown;
-        program->alias_globals[program->alias_global_count++] = in->lhs.name;
+        {
+          char *owned = mettle_strdup(in->lhs.name);
+          if (!owned) {
+            return 1;
+          }
+          program->alias_globals[program->alias_global_count++] = owned;
+        }
       }
     }
   }
@@ -1839,6 +1845,9 @@ void ir_program_destroy(IRProgram *program) {
   }
   ir_symbol_index_invalidate(program);
   ir_type_index_invalidate(program);
+  for (size_t k = 0; k < program->alias_global_count; k++) {
+    free((void *)program->alias_globals[k]);
+  }
   free(program->alias_globals);
   program->alias_globals = NULL;
   program->alias_global_count = 0;

@@ -589,6 +589,10 @@ int mir_cfg_build(MirCfg *cfg, const MirFunction *fn) {
   mir_cfg_local_sets(cfg);
   mir_cfg_liveness(cfg);
   mir_cfg_definedness(cfg);
+  free(cfg->use);
+  free(cfg->def);
+  cfg->use = NULL;
+  cfg->def = NULL;
   return 1;
 }
 
