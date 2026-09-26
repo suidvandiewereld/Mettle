@@ -1,0 +1,20 @@
+export fn narrow_u16(a: uint64, b: uint64, c: uint64, d: uint64, e: uint64,
+                     f: uint64, g: uint64, h: uint16) -> uint64 {
+  var s: uint64 = a * (uint64)1000003 + b + c + d + e + f + g;
+  return s + (uint64)((uint16)h);
+}
+
+export fn narrow_i8(a: uint64, b: uint64, c: uint64, d: uint64, e: uint64,
+                    f: uint64, g: uint64, h: int8) -> int64 {
+  var s: int64 = (int64)(a + b + c + d + e + f + g);
+  return s + (int64)((int8)h);
+}
+
+extern fn drive_u16() -> uint64 = "mettle_abi_drive_u16";
+extern fn drive_i8() -> int64 = "mettle_abi_drive_i8";
+
+fn main() -> int32 {
+  if (drive_u16() != (uint64)(1000003 + 59999)) { return 1; }
+  if (drive_i8() != (int64)(-2)) { return 2; }
+  return 0;
+}

@@ -11879,6 +11879,42 @@ foreach ($mode in @("binary")) {
 # Struct ABI C boundary: MinGW C and Mettle agree on indirect pass/return for
 # >8-byte and odd-size structs. GCC is used only to compile the small C shim;
 # linking stays on Mettle's internal linker.
+foreach ($variant in @("debug", "opt", "release")) {
+  $caseName = "abi_narrow_stack_param_$variant"
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $gccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+    if (-not $gccCmd) {
+      Write-CaseResult -Name $caseName -Passed $true -Reason "skipped: gcc not on PATH"
+      continue
+    }
+    $cObjPath = Join-Path $tmpDir "$caseName.c.o"
+    $cOut = & gcc -c tests/abi_narrow_stack_param_shim.c -o $cObjPath 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "narrow stack parameter shim compile failed: $cOut"
+    }
+    $exePath = Join-Path $tmpDir "$caseName.exe"
+    $buildArgs = @("--build", "--linker", "internal")
+    if ($variant -eq "opt") { $buildArgs += "-O" }
+    if ($variant -eq "release") { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_abi_narrow_stack_param.mettle", "-o", $exePath, "--link-arg", $cObjPath)
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "narrow stack parameter build ($variant) failed: $buildOut"
+    }
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "narrow stack parameter ($variant) read the caller's high bits (exit $LASTEXITCODE)"
+    }
+    Write-CaseResult -Name $caseName -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name $caseName -Passed $false -Reason $_.Exception.Message
+  }
+}
+
 $structAbiExternExpected = @(
   "struct abi extern c",
   "c_sum_three 66",

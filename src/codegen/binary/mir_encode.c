@@ -1664,6 +1664,9 @@ static int mir_home_gp_param(MirFunction *fn, const MirParam *p,
   return 1;
 }
 
+static int mir_emit_gp_widen(MirFunction *fn, BinaryGpRegister dst,
+                             BinaryGpRegister src, int width, int is_signed);
+
 static int mir_home_gp_stack_param(MirFunction *fn, const MirParam *p,
                                    int rbp_offset) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -1671,12 +1674,14 @@ static int mir_home_gp_stack_param(MirFunction *fn, const MirParam *p,
   BinaryGpRegister D;
   if (dst_is_reg(fn, &dst, &D)) {
     return binary_emit_mov_reg_mem(code, D, frame_base(fn),
-                                   frame_disp(fn, rbp_offset))
+                                   frame_disp(fn, rbp_offset)) &&
+                   mir_emit_gp_widen(fn, D, D, p->width, p->is_signed)
                ? 1
                : enc_err(fn, "out of memory homing stack parameter");
   }
   if (!binary_emit_mov_reg_mem(code, SCRATCH_A, frame_base(fn),
-                               frame_disp(fn, rbp_offset))) {
+                               frame_disp(fn, rbp_offset)) ||
+      !mir_emit_gp_widen(fn, SCRATCH_A, SCRATCH_A, p->width, p->is_signed)) {
     return enc_err(fn, "out of memory homing stack parameter");
   }
   return store_from(fn, &dst, SCRATCH_A);
