@@ -265,19 +265,13 @@ static int ir_symbol_used_in_range(const IRFunction *function, size_t start,
     }
 
     const IRInstruction *instruction = &function->instructions[i];
-    const IROperand *operands[4];
-    size_t operand_count = 0;
-    operands[operand_count++] = &instruction->dest;
-    operands[operand_count++] = &instruction->lhs;
-    operands[operand_count++] = &instruction->rhs;
-    for (size_t a = 0; a < instruction->argument_count; a++) {
-      if (operand_count < 4) {
-        operands[operand_count++] = &instruction->arguments[a];
-      }
-    }
+    const IROperand *operands[3] = {&instruction->dest, &instruction->lhs,
+                                    &instruction->rhs};
+    size_t operand_count = 3 + instruction->argument_count;
 
     for (size_t o = 0; o < operand_count; o++) {
-      const IROperand *operand = operands[o];
+      const IROperand *operand =
+          o < 3 ? operands[o] : &instruction->arguments[o - 3];
       if (operand->kind == IR_OPERAND_SYMBOL && operand->name &&
           strcmp(operand->name, symbol_name) == 0) {
         return 1;
@@ -539,6 +533,20 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
     }
   }
   ir_unroll_temp_set_destroy(&private_temps);
+
+  if (!counter_used_in_body) {
+    IRInstruction final_value = {0};
+    final_value.op = IR_OP_ASSIGN;
+    final_value.dest = ir_operand_symbol(counter_symbol);
+    final_value.lhs = ir_operand_int(start_value + trips * step);
+    if (!final_value.dest.name ||
+        !ir_instruction_vector_append_move(&vector, &final_value)) {
+      ir_instruction_destroy_storage(&final_value);
+      ir_instruction_vector_destroy(&vector);
+      ir_temp_value_map_destroy(&symbol_map);
+      return 0;
+    }
+  }
 
   {
     const IRInstruction *branch = &function->instructions[branch_index];

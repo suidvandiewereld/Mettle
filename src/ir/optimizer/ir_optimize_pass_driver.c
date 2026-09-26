@@ -149,6 +149,40 @@ static int ir_pass_trace_enabled(void) {
   return cached;
 }
 
+static const char *ir_dump_passes_function(void) {
+  static int fetched = 0;
+  static const char *spec = NULL;
+  if (!fetched) {
+    const char *raw = getenv("METTLE_DUMP_IR_PASSES");
+    spec = (raw && raw[0] != '\0') ? raw : NULL;
+    fetched = 1;
+  }
+  return spec;
+}
+
+static void ir_dump_pass_result(const IRFunction *function,
+                                const char *pass_name) {
+  const char *spec = ir_dump_passes_function();
+  if (!spec || !function || !function->name) {
+    return;
+  }
+  if (strcmp(spec, "*") != 0 && strcmp(spec, function->name) != 0) {
+    return;
+  }
+  fprintf(stderr, "[ir-dump] function=%s after pass=%s\n", function->name,
+          pass_name ? pass_name : "<unnamed>");
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    char buffer[1024];
+    if (instruction->op == IR_OP_NOP) {
+      continue;
+    }
+    ir_instruction_dump(instruction, buffer, sizeof(buffer));
+    fprintf(stderr, "  %4zu: %s\n", i, buffer);
+  }
+  fflush(stderr);
+}
+
 static void ir_trace_pass_event(const char *pass_name, const char *event,
                                 const unsigned long long *version,
                                 int changed) {
@@ -373,6 +407,9 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
 
   ir_trace_pass_event(pass->name, changed ? "changed" : "clean", NULL,
                       changed);
+  if (changed) {
+    ir_dump_pass_result(function, pass->name);
+  }
   if (changed_out) {
     *changed_out = changed;
   }
@@ -551,5 +588,8 @@ int ir_run_fixpoint_pass(IRFunction *function, IROptPassId pass_id,
 
   ir_trace_pass_event(pass_name, pass_changed ? "changed" : "clean", version,
                       pass_changed);
+  if (pass_changed) {
+    ir_dump_pass_result(function, pass_name);
+  }
   return 1;
 }

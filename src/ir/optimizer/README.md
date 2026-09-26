@@ -88,3 +88,6 @@ Diagnostics:
   pass IDs still work for older bisection notes.
 - `METTLE_TRACE_IR_PASSES=1` prints pass decisions (`changed`, `clean`,
   `disabled`, `already_clean`) with function, version, and fixpoint iteration.
+- `METTLE_DUMP_IR_PASSES=main` prints that function's IR to stderr after
+  every pass that changed it (`*` for every function). Read it top down to
+  find the first pass whose output is wrong.

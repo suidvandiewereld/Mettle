@@ -79,6 +79,7 @@ static int ir_try_compose_single_use_cast(IRFunction *function,
   int producer_size = 0;
   int producer_unsigned = 0;
   int cast_size = 0;
+  int cast_unsigned = 0;
   const char *composed_type = NULL;
   char *type_copy = NULL;
   IROperand source = ir_operand_none();
@@ -91,7 +92,7 @@ static int ir_try_compose_single_use_cast(IRFunction *function,
   if (cast->op != IR_OP_CAST || cast->is_float || !cast->text ||
       cast->lhs.kind != IR_OPERAND_TEMP || !cast->lhs.name ||
       ir_temp_use_map_get(uses, cast->lhs.name) != 1 ||
-      !ir_builtin_integer_type_info(cast->text, &cast_size, NULL) ||
+      !ir_builtin_integer_type_info(cast->text, &cast_size, &cast_unsigned) ||
       !ir_find_temp_producer_index_in_current_block(function, cast_index,
                                                     cast->lhs.name,
                                                     &producer_index)) {
@@ -106,6 +107,9 @@ static int ir_try_compose_single_use_cast(IRFunction *function,
   }
 
   if (cast_size > producer_size && producer_size == 4 && !producer_unsigned) {
+    return 1;
+  }
+  if (cast_size > producer_size && cast_unsigned != producer_unsigned) {
     return 1;
   }
 

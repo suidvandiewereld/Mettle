@@ -906,6 +906,36 @@ static int vr_oracle_bounds_fit(long long lo, long long hi, int bits,
 /* A cast that re-canonicalizes a value already inside the target type is the
    identity, and in a scanner it sits in the loop's recurrence: the address of
    the next byte waits on it. */
+static int vr_operand_is_unsigned(IRValueRangeCtx *ctx,
+                                  const IROperand *operand) {
+  int bits = 0;
+  int uns = 0;
+  if (operand->kind == IR_OPERAND_SYMBOL && operand->name) {
+    const IROperand *enc =
+        ir_temp_value_map_lookup(&ctx->decl_types, operand->name);
+    if (!enc || enc->kind != IR_OPERAND_INT) {
+      return -1;
+    }
+    return VR_TYPE_UNSIGNED(enc->int_value) ? 1 : 0;
+  }
+  if (operand->kind == IR_OPERAND_TEMP && operand->name) {
+    const IROperand *only =
+        ir_temp_value_map_lookup(&ctx->unique_def, operand->name);
+    if (!only || only->kind != IR_OPERAND_INT || only->int_value <= 0 ||
+        (size_t)(only->int_value - 1) >= ctx->function->instruction_count) {
+      return -1;
+    }
+    const IRInstruction *def =
+        &ctx->function->instructions[only->int_value - 1];
+    if (!def->value_type ||
+        !ir_int_type_name_info(def->value_type->name, &bits, &uns)) {
+      return -1;
+    }
+    return uns;
+  }
+  return -1;
+}
+
 static int vr_cast_is_identity(IRValueRangeCtx *ctx, size_t at,
                                const IRInstruction *in) {
   int bits = 0;
@@ -920,7 +950,10 @@ static int vr_cast_is_identity(IRValueRangeCtx *ctx, size_t at,
     return 0;
   }
   ir_value_range_of(ctx, at, &in->lhs, &a);
-  return vr_oracle_bounds_fit(a.lo, a.hi, bits, uns);
+  if (!vr_oracle_bounds_fit(a.lo, a.hi, bits, uns)) {
+    return 0;
+  }
+  return vr_operand_is_unsigned(ctx, &in->lhs) == uns;
 }
 
 int ir_drop_redundant_int_casts_pass(IRFunction *function, int *changed) {

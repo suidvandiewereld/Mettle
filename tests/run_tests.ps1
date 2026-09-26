@@ -10419,6 +10419,34 @@ foreach ($variant in @("release", "debug")) {
   }
 }
 
+foreach ($variant in @("debug", "opt", "release")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "test_opt_fuzz_regressions_$variant.exe"
+    $buildArgs = @("--build", "--emit-obj", "--linker", "internal")
+    if ($variant -eq "opt") { $buildArgs += "-O" }
+    if ($variant -eq "release") { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_opt_fuzz_regressions.mettle", "-o", $exePath)
+
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "opt-fuzz-regressions build ($variant) failed: $buildOut"
+    }
+
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "opt-fuzz-regressions ($variant) miscompiled (exit $LASTEXITCODE)"
+    }
+
+    Write-CaseResult -Name "opt_fuzz_regressions_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "opt_fuzz_regressions_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
+
 # MIR float call arguments: a call passing float args now uses the
 # register-allocating backend (XMM0-3 homing) instead of bailing the caller to
 # spill-everything codegen. Also covers the allocator entry-live interference
