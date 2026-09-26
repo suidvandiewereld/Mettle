@@ -1822,9 +1822,7 @@ static void mir_color_add_exact_edges(MirColorState *st) {
       mir_cfg_cursor_step_back(&cur);
     }
   }
-  for (size_t w = 0; w < st->words; w++) {
-    both[w] = facts->cfg.live_in[w] & facts->cfg.defd_in[w];
-  }
+  mir_cfg_entry_live_defined(&facts->cfg, both, st->words);
   for (size_t a = 0; a < st->count; a++) {
     if (st->colorable[a] && mir_cfg_set_get(both, a)) {
       mir_color_add_live_edges(st, a, both);

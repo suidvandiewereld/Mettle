@@ -17,6 +17,13 @@ typedef struct {
 } MirCfgBlock;
 
 typedef struct {
+  unsigned *idx;
+  unsigned long long *bits;
+  unsigned count;
+  unsigned capacity;
+} MirCfgSparse;
+
+typedef struct {
   const MirFunction *fn;
   MirCfgBlock *blocks;
   size_t block_count;
@@ -29,12 +36,14 @@ typedef struct {
   size_t rpo_count;
   int *order;
   size_t words;
-  unsigned long long *use;
-  unsigned long long *def;
-  unsigned long long *live_in;
-  unsigned long long *live_out;
-  unsigned long long *defd_in;
-  unsigned long long *defd_out;
+  MirCfgSparse *use;
+  MirCfgSparse *def;
+  MirCfgSparse *live_in;
+  MirCfgSparse *live_out;
+  MirCfgSparse *defd_in;
+  MirCfgSparse *defd_out;
+  unsigned *scratch_idx;
+  unsigned long long *scratch_bits;
   unsigned char *insn_depth;
 } MirCfg;
 
@@ -58,6 +67,8 @@ int mir_cfg_cursor_init(MirCfgCursor *cur, const MirCfg *cfg);
 void mir_cfg_cursor_free(MirCfgCursor *cur);
 void mir_cfg_cursor_start_block(MirCfgCursor *cur, size_t block);
 void mir_cfg_cursor_step_back(MirCfgCursor *cur);
+void mir_cfg_entry_live_defined(const MirCfg *cfg, unsigned long long *out,
+                                size_t words);
 
 static inline int mir_cfg_set_get(const unsigned long long *set, size_t v) {
   return (set[v >> 6] >> (v & 63)) & 1ull;
