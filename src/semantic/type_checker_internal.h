@@ -61,6 +61,8 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
 size_t type_checker_expression_multiple_of(TypeChecker *checker,
                                            ASTNode *expression, int depth);
 
+int type_checker_expression_surely_varies(TypeChecker *checker,
+                                          ASTNode *expression, int depth);
 int type_checker_expression_is_uniform(TypeChecker *checker,
                                        ASTNode *expression, const char **why);
 int type_checker_predicate_is_uniform(ASTNode *predicate, const char *binding);

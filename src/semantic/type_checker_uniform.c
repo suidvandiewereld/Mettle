@@ -269,6 +269,72 @@ static int uniform_expression(UniformContext *context, ASTNode *expression) {
   }
 }
 
+int type_checker_expression_surely_varies(TypeChecker *checker,
+                                          ASTNode *expression, int depth) {
+  if (!checker || !expression || depth > 64) {
+    return 0;
+  }
+  switch (expression->type) {
+  case AST_IDENTIFIER: {
+    Identifier *identifier = (Identifier *)expression->data;
+    Symbol *symbol = identifier && identifier->name
+                         ? symbol_table_lookup(checker->symbol_table,
+                                               identifier->name)
+                         : NULL;
+    ASTNode *owner_node = checker->current_function_decl;
+    FunctionDeclaration *owner =
+        owner_node && owner_node->type == AST_FUNCTION_DECLARATION
+            ? (FunctionDeclaration *)owner_node->data
+            : NULL;
+    if (!symbol) {
+      return 1;
+    }
+    if (symbol->type && symbol->type->refine_uniform) {
+      return 0;
+    }
+    if (symbol->kind == SYMBOL_PARAMETER) {
+      return !(owner && owner->is_kernel);
+    }
+    if (symbol->kind == SYMBOL_CONSTANT) {
+      return 0;
+    }
+    if (symbol->kind == SYMBOL_VARIABLE) {
+      return symbol->scope && symbol->scope->type == SCOPE_GLOBAL;
+    }
+    return 1;
+  }
+  case AST_BINARY_EXPRESSION: {
+    BinaryExpression *binary = (BinaryExpression *)expression->data;
+    return !binary ||
+           type_checker_expression_surely_varies(checker, binary->left,
+                                                 depth + 1) ||
+           type_checker_expression_surely_varies(checker, binary->right,
+                                                 depth + 1);
+  }
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *unary = (UnaryExpression *)expression->data;
+    return !unary || type_checker_expression_surely_varies(
+                         checker, unary->operand, depth + 1);
+  }
+  case AST_CAST_EXPRESSION: {
+    CastExpression *cast = (CastExpression *)expression->data;
+    return !cast || type_checker_expression_surely_varies(
+                        checker, cast->operand, depth + 1);
+  }
+  case AST_MEMBER_ACCESS: {
+    MemberAccess *member = (MemberAccess *)expression->data;
+    return !member || type_checker_expression_surely_varies(
+                          checker, member->object, depth + 1);
+  }
+  case AST_NUMBER_LITERAL:
+  case AST_STRING_LITERAL:
+  case AST_FUNCTION_CALL:
+    return 0;
+  default:
+    return 1;
+  }
+}
+
 int type_checker_expression_is_uniform(TypeChecker *checker,
                                        ASTNode *expression,
                                        const char **why) {

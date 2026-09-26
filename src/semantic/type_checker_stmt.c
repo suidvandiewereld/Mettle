@@ -589,7 +589,9 @@ static int type_checker_check_loop_uniformity(TypeChecker *checker,
     return 1;
   }
   if ((condition_type && condition_type->refine_uniform) ||
-      type_checker_expression_is_uniform(checker, condition, &why)) {
+      ((*uniform_mode == 2 ||
+        !type_checker_expression_surely_varies(checker, condition, 0)) &&
+       type_checker_expression_is_uniform(checker, condition, &why))) {
     *uniform_mode = 3;
     return 1;
   }
