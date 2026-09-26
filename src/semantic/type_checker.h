@@ -122,6 +122,7 @@ typedef struct {
   size_t struct_placeholder_count;
   size_t struct_placeholder_capacity;
   int monotone_busy;
+  void *movement_index;
   struct {
     struct ASTNode *body;
     long long trips;
@@ -213,6 +214,7 @@ int type_checker_push_range_guard(TypeChecker *checker, const char *name,
                                   long long max);
 size_t type_checker_guard_depth(const TypeChecker *checker);
 void type_checker_pop_guards(TypeChecker *checker, size_t depth);
+void type_checker_movement_index_drop(TypeChecker *checker);
 int type_checker_expression_range(TypeChecker *checker, ASTNode *expr,
                                   int *has_min, long long *min, int *has_max,
                                   long long *max);

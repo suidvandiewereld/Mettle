@@ -900,11 +900,8 @@ static void narrow_by_relation(TypeChecker *checker, const Type *declared,
   }
 }
 
-static int monotone_scan(const ASTNode *node, const char *name,
-                         int *direction) {
-  if (!node) {
-    return 1;
-  }
+static int monotone_scan_node(const ASTNode *node, const char *name,
+                              int *direction) {
   if (node->type == AST_UNARY_EXPRESSION) {
     const char *op = NULL;
     ASTNode *operand = NULL;
@@ -949,6 +946,17 @@ static int monotone_scan(const ASTNode *node, const char *name,
       *direction = step_direction;
     }
   }
+  return 1;
+}
+
+static int monotone_scan(const ASTNode *node, const char *name,
+                         int *direction) {
+  if (!node) {
+    return 1;
+  }
+  if (!monotone_scan_node(node, name, direction)) {
+    return 0;
+  }
   for (size_t i = 0; i < node->child_count; i++) {
     if (!monotone_scan(node->children[i], name, direction)) {
       return 0;
@@ -957,11 +965,8 @@ static int monotone_scan(const ASTNode *node, const char *name,
   return 1;
 }
 
-static int monotone_step(const ASTNode *node, const char *name,
-                         long long *step) {
-  if (!node) {
-    return 1;
-  }
+static int monotone_step_node(const ASTNode *node, const char *name,
+                              long long *step) {
   if (node->type == AST_ASSIGNMENT) {
     const Assignment *assign = (const Assignment *)node->data;
     if (assign && assign->variable_name && !assign->target &&
@@ -988,12 +993,33 @@ static int monotone_step(const ASTNode *node, const char *name,
       *step = moved;
     }
   }
+  return 1;
+}
+
+static int monotone_step(const ASTNode *node, const char *name,
+                         long long *step) {
+  if (!node) {
+    return 1;
+  }
+  if (!monotone_step_node(node, name, step)) {
+    return 0;
+  }
   for (size_t i = 0; i < node->child_count; i++) {
     if (!monotone_step(node->children[i], name, step)) {
       return 0;
     }
   }
   return 1;
+}
+
+static int monotone_declaration_node(const ASTNode *node,
+                                     const char *name) {
+  if (node->type == AST_VAR_DECLARATION) {
+    const VarDeclaration *decl = (const VarDeclaration *)node->data;
+    return decl && decl->name && strcmp(decl->name, name) == 0 &&
+           decl->initializer;
+  }
+  return 0;
 }
 
 static const ASTNode *monotone_declaration_scan(const ASTNode *node,
@@ -1003,13 +1029,9 @@ static const ASTNode *monotone_declaration_scan(const ASTNode *node,
   if (!node) {
     return NULL;
   }
-  if (node->type == AST_VAR_DECLARATION) {
-    const VarDeclaration *decl = (const VarDeclaration *)node->data;
-    if (decl && decl->name && strcmp(decl->name, name) == 0 &&
-        decl->initializer) {
-      (*seen)++;
-      found = node;
-    }
+  if (monotone_declaration_node(node, name)) {
+    (*seen)++;
+    found = node;
   }
   for (size_t i = 0; i < node->child_count; i++) {
     const ASTNode *deeper =
@@ -1028,11 +1050,9 @@ static const ASTNode *monotone_declaration(const ASTNode *node,
   return seen == 1 ? found : NULL;
 }
 
-static ASTNode *accumulator_addend(ASTNode *node, const char *name, int *ok) {
-  ASTNode *found = NULL;
-  if (!node || !*ok) {
-    return NULL;
-  }
+static int accumulator_node(ASTNode *node, const char *name, int *ok,
+                            ASTNode **addend) {
+  *addend = NULL;
   if (node->type == AST_ASSIGNMENT) {
     Assignment *assign = (Assignment *)node->data;
     if (assign && assign->variable_name && !assign->target &&
@@ -1044,10 +1064,23 @@ static ASTNode *accumulator_addend(ASTNode *node, const char *name, int *ok) {
           strcmp(op, "+") != 0 || !identifier_name(left) ||
           strcmp(identifier_name(left), name) != 0) {
         *ok = 0;
-        return NULL;
+        return 0;
       }
-      found = right;
+      *addend = right;
+      return 1;
     }
+  }
+  return 0;
+}
+
+static ASTNode *accumulator_addend(ASTNode *node, const char *name, int *ok) {
+  ASTNode *found = NULL;
+  if (!node || !*ok) {
+    return NULL;
+  }
+  accumulator_node(node, name, ok, &found);
+  if (!*ok) {
+    return NULL;
   }
   for (size_t i = 0; i < node->child_count; i++) {
     ASTNode *deeper = accumulator_addend(node->children[i], name, ok);
@@ -1119,6 +1152,185 @@ static int constant_range(TypeChecker *checker, const ASTNode *expr, Range *out,
   }
 }
 
+typedef struct {
+  char *name;
+  ASTNode **nodes;
+  size_t count;
+  size_t capacity;
+} MovementSlot;
+
+typedef struct {
+  const ASTNode *decl;
+  MovementSlot *slots;
+  size_t mask;
+} MovementIndex;
+
+static const char *movement_key(const ASTNode *node) {
+  if (node->type == AST_UNARY_EXPRESSION) {
+    const char *op = NULL;
+    ASTNode *operand = NULL;
+    if (unary_parts((ASTNode *)node, &op, &operand) && strcmp(op, "&") == 0) {
+      return identifier_name(operand);
+    }
+    return NULL;
+  }
+  if (node->type == AST_ASSIGNMENT) {
+    const Assignment *assign = (const Assignment *)node->data;
+    return assign && !assign->target ? assign->variable_name : NULL;
+  }
+  if (node->type == AST_VAR_DECLARATION) {
+    const VarDeclaration *decl = (const VarDeclaration *)node->data;
+    return decl ? decl->name : NULL;
+  }
+  return NULL;
+}
+
+static size_t movement_count(const ASTNode *node) {
+  size_t count = 0;
+  if (!node) {
+    return 0;
+  }
+  if (movement_key(node)) {
+    count++;
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    count += movement_count(node->children[i]);
+  }
+  return count;
+}
+
+static MovementSlot *movement_slot(MovementIndex *index, const char *name,
+                                   int claim) {
+  size_t h = mettle_fnv1a_hash(name) & index->mask;
+  while (index->slots[h].name) {
+    if (strcmp(index->slots[h].name, name) == 0) {
+      return &index->slots[h];
+    }
+    h = (h + 1u) & index->mask;
+  }
+  if (!claim) {
+    return NULL;
+  }
+  index->slots[h].name = mettle_strdup(name);
+  return index->slots[h].name ? &index->slots[h] : NULL;
+}
+
+static int movement_fill(MovementIndex *index, ASTNode *node) {
+  const char *key;
+  if (!node) {
+    return 1;
+  }
+  key = movement_key(node);
+  if (key) {
+    MovementSlot *slot = movement_slot(index, key, 1);
+    if (!slot) {
+      return 0;
+    }
+    if (slot->count >= slot->capacity) {
+      size_t capacity = slot->capacity ? slot->capacity * 2 : 4;
+      ASTNode **grown =
+          (ASTNode **)realloc(slot->nodes, capacity * sizeof(ASTNode *));
+      if (!grown) {
+        return 0;
+      }
+      slot->nodes = grown;
+      slot->capacity = capacity;
+    }
+    slot->nodes[slot->count++] = node;
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (!movement_fill(index, node->children[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+void type_checker_movement_index_drop(TypeChecker *checker) {
+  MovementIndex *index = checker ? (MovementIndex *)checker->movement_index
+                                 : NULL;
+  if (!index) {
+    return;
+  }
+  for (size_t h = 0; index->slots && h <= index->mask; h++) {
+    free(index->slots[h].name);
+    free(index->slots[h].nodes);
+  }
+  free(index->slots);
+  free(index);
+  checker->movement_index = NULL;
+}
+
+static const MovementIndex *movement_index_for(TypeChecker *checker,
+                                               ASTNode *body) {
+  MovementIndex *index = (MovementIndex *)checker->movement_index;
+  size_t capacity = 16;
+  size_t count;
+  if (index && index->decl == checker->current_function_decl) {
+    return index;
+  }
+  type_checker_movement_index_drop(checker);
+  count = movement_count(body);
+  while (capacity < count * 2) {
+    capacity *= 2;
+  }
+  index = (MovementIndex *)calloc(1, sizeof(MovementIndex));
+  if (!index) {
+    return NULL;
+  }
+  index->slots = (MovementSlot *)calloc(capacity, sizeof(MovementSlot));
+  index->mask = capacity - 1;
+  index->decl = checker->current_function_decl;
+  checker->movement_index = index;
+  if (!index->slots || !movement_fill(index, body)) {
+    type_checker_movement_index_drop(checker);
+    return NULL;
+  }
+  return index;
+}
+
+static void movement_from_index(const MovementIndex *index, const char *name,
+                                Symbol *symbol) {
+  MovementSlot *slot = movement_slot((MovementIndex *)index, name, 0);
+  size_t count = slot ? slot->count : 0;
+  size_t seen = 0;
+  const ASTNode *declaration = NULL;
+  int ok = 1;
+  ASTNode *addend = NULL;
+  for (size_t k = 0; k < count; k++) {
+    if (monotone_declaration_node(slot->nodes[k], name)) {
+      seen++;
+      if (!declaration) {
+        declaration = slot->nodes[k];
+      }
+    }
+  }
+  symbol->move_declaration = seen == 1 ? (ASTNode *)declaration : NULL;
+  for (size_t k = 0; k < count; k++) {
+    if (!monotone_scan_node(slot->nodes[k], name, &symbol->move_direction)) {
+      symbol->move_direction = 0;
+      break;
+    }
+  }
+  for (size_t k = 0; k < count; k++) {
+    if (!monotone_step_node(slot->nodes[k], name, &symbol->move_step)) {
+      symbol->move_step = 0;
+      break;
+    }
+  }
+  for (size_t k = 0; k < count && ok; k++) {
+    ASTNode *here = NULL;
+    if (accumulator_node(slot->nodes[k], name, &ok, &here)) {
+      if (addend) {
+        ok = 0;
+        break;
+      }
+      addend = here;
+    }
+  }
+  symbol->move_addend = ok ? addend : NULL;
+}
+
 static Symbol *movement_of(TypeChecker *checker, const char *name) {
   Symbol *symbol;
   const ASTNode *body;
@@ -1142,6 +1354,13 @@ static Symbol *movement_of(TypeChecker *checker, const char *name) {
     return symbol;
   }
   body = ((const FunctionDeclaration *)body->data)->body;
+  {
+    const MovementIndex *index = movement_index_for(checker, (ASTNode *)body);
+    if (index) {
+      movement_from_index(index, name, symbol);
+      return symbol;
+    }
+  }
   symbol->move_declaration = (ASTNode *)monotone_declaration(body, name);
   if (!monotone_scan(body, name, &symbol->move_direction)) {
     symbol->move_direction = 0;

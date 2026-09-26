@@ -154,6 +154,9 @@ void type_checker_register_test_builtin(TypeChecker *checker, const char *name,
 
 void type_checker_destroy(TypeChecker *checker) {
   if (checker) {
+    type_checker_movement_index_drop(checker);
+  }
+  if (checker) {
     free(checker->guards);
     free(checker->refine_failure);
     free(checker->effect_failure);

@@ -2348,6 +2348,7 @@ static int type_checker_process_function(TypeChecker *checker,
     }
     checker->current_function_decl = declaration;
     checker->errdefer_scan_decl = NULL;
+    type_checker_movement_index_drop(checker);
 
     if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_FUNCTION)) {
       type_checker_set_error_at_location(
