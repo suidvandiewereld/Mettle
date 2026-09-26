@@ -36,6 +36,35 @@
   return (int64)((uint16)p[i]);
 }
 
+@noinline fn unroll_limit_written_in_body() -> int64 {
+  var n: int64 = 5;
+  var i: int64 = 0;
+  var s: int64 = 0;
+  while (i < n) {
+    n = n - 1;
+    s = s + 10;
+    i = i + 1;
+  }
+  return s + i * 1000 + n * 100000;
+}
+
+var g_unroll_limit: int64 = 10;
+
+@noinline fn shrink_unroll_limit() -> void {
+  g_unroll_limit = g_unroll_limit - 3;
+}
+
+@noinline fn annotated_unroll_global_limit() -> int64 {
+  var i: int64 = 0;
+  var c: int64 = 0;
+  @unroll(4) while (i < g_unroll_limit) {
+    shrink_unroll_limit();
+    c = c + 1;
+    i = i + 1;
+  }
+  return c;
+}
+
 fn main() -> int32 {
   var r: int32 = unrolled_counter_survives();
   if (r != 0) { return r; }
@@ -49,5 +78,7 @@ fn main() -> int32 {
   var shorts: int16[4];
   shorts[1] = (int16)(-2);
   if (unsigned_cast_of_signed_short_load(&shorts[0], (int64)1) != 65534) { return 5; }
+  if (unroll_limit_written_in_body() != 203030) { return 6; }
+  if (annotated_unroll_global_limit() != 3) { return 7; }
   return 0;
 }

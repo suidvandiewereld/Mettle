@@ -174,6 +174,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
   }
 
   const char *counter_symbol = NULL;
+  const IROperand *limit_operand = NULL;
   long long limit_value = 0;
   int inclusive = 0;
 
@@ -185,6 +186,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
     inclusive = 1;
     counter_symbol =
         compare->rhs.kind == IR_OPERAND_SYMBOL ? compare->rhs.name : NULL;
+    limit_operand = &compare->lhs;
     if (!ir_operand_resolve_symbol_int(symbol_map, &compare->lhs, &limit_value) ||
         !counter_symbol) {
       return 0;
@@ -194,6 +196,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
     inclusive = 0;
     counter_symbol =
         compare->rhs.kind == IR_OPERAND_SYMBOL ? compare->rhs.name : NULL;
+    limit_operand = &compare->lhs;
     if (!ir_operand_resolve_symbol_int(symbol_map, &compare->lhs, &limit_value) ||
         !counter_symbol) {
       return 0;
@@ -205,6 +208,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
 
   counter_symbol =
       compare->lhs.kind == IR_OPERAND_SYMBOL ? compare->lhs.name : NULL;
+  limit_operand = &compare->rhs;
   if (!counter_symbol ||
       !ir_operand_resolve_symbol_int(symbol_map, &compare->rhs, &limit_value)) {
     return 0;
@@ -236,6 +240,13 @@ parsed_compare: {
         ir_instruction_writes_symbol(&function->instructions[j]) &&
         function->instructions[j].dest.name &&
         strcmp(function->instructions[j].dest.name, counter_symbol) == 0) {
+      return 0;
+    }
+    if (limit_operand && limit_operand->kind == IR_OPERAND_SYMBOL &&
+        limit_operand->name &&
+        ir_instruction_writes_symbol(&function->instructions[j]) &&
+        function->instructions[j].dest.name &&
+        strcmp(function->instructions[j].dest.name, limit_operand->name) == 0) {
       return 0;
     }
   }
@@ -1350,6 +1361,21 @@ static int ir_unroll_annotated_body_op_safe(const IRInstruction *in) {
   }
 }
 
+static int ir_unroll_symbol_is_private(const IRFunction *function,
+                                       const char *name) {
+  int declared = 0;
+  for (size_t i = 0; i < function->parameter_count && !declared; i++) {
+    declared = function->parameter_names && function->parameter_names[i] &&
+               strcmp(function->parameter_names[i], name) == 0;
+  }
+  for (size_t i = 0; i < function->instruction_count && !declared; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    declared = in->op == IR_OP_DECLARE_LOCAL && in->dest.name &&
+               strcmp(in->dest.name, name) == 0;
+  }
+  return declared && !ir_symbol_address_taken(function, name);
+}
+
 static int ir_unroll_annotated_parse_increment(const IRFunction *function,
                                                size_t body_start,
                                                size_t body_end,
@@ -1481,6 +1507,20 @@ static int ir_unroll_annotated_try_marker(IRFunction *function,
     return 1;
   }
   (void)producer_index;
+
+  int body_reaches_memory = 0;
+  for (size_t j = body_start; j < jump_index; j++) {
+    IROpcode op = function->instructions[j].op;
+    if (op == IR_OP_CALL || op == IR_OP_STORE) {
+      body_reaches_memory = 1;
+    }
+  }
+  if (body_reaches_memory &&
+      (!ir_unroll_symbol_is_private(function, counter_symbol) ||
+       (limit->kind == IR_OPERAND_SYMBOL &&
+        !ir_unroll_symbol_is_private(function, limit->name)))) {
+    return 1;
+  }
 
   for (size_t j = body_start; j < jump_index; j++) {
     if (j == increment_index) continue;
