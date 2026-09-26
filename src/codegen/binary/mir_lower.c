@@ -11088,11 +11088,23 @@ static int mir_rotate_back_edges(const MirFunction *fn,
   return 1;
 }
 
+static size_t mir_rotate_label_def(const MirFunction *fn,
+                                   const MirRotateRefs *refs,
+                                   const char *name) {
+  const MirRotateRefList *list = mir_rotate_refs_find(refs, name);
+  for (size_t k = 0; list && k < list->count; k++) {
+    if (mir_insn_defines_label(&fn->insns[list->pos[k]], name)) {
+      return list->pos[k];
+    }
+  }
+  return (size_t)-1;
+}
+
 static int mir_rotate_test_leaves_loop(MirFunction *fn, MirRotateCfg *cfg,
-                                       size_t j, const char *ename,
-                                       const size_t *bes, size_t nbe,
-                                       int *fatal) {
-  size_t elabel = mir_label_index(fn, ename);
+                                       const MirRotateRefs *refs, size_t j,
+                                       const char *ename, const size_t *bes,
+                                       size_t nbe, int *fatal) {
+  size_t elabel = mir_rotate_label_def(fn, refs, ename);
 
   *fatal = 0;
   if (elabel == (size_t)-1 || elabel == j) {
@@ -11193,7 +11205,8 @@ static void mir_rotate_loops(MirFunction *fn) {
     if (!mir_rotate_back_edges(fn, &refs, j, hname, bes, &nbe)) {
       continue;
     }
-    if (!mir_rotate_test_leaves_loop(fn, &cfg, j, ename, bes, nbe, &fatal)) {
+    if (!mir_rotate_test_leaves_loop(fn, &cfg, &refs, j, ename, bes, nbe,
+                                     &fatal)) {
       if (fatal) {
         mir_rotate_refs_destroy(&refs);
         mir_rotate_cfg_destroy(&cfg);
