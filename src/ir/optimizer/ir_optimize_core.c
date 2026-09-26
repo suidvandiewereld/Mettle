@@ -942,6 +942,10 @@ void ir_optimize_set_program(IRProgram *program) {
   g_ir_optimize_program = program;
 }
 
+IRProgram *ir_optimize_get_program(void) {
+  return g_ir_optimize_program;
+}
+
 static int ir_addr_taken_seed_module_globals(IRTempValueMap *set,
                                              const IROperand *one) {
   IRProgram *p = g_ir_optimize_program;

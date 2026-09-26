@@ -541,6 +541,7 @@ IRFunction *ir_program_find_function(IRProgram *program, const char *name);
 int ir_hoist_pure_calls_pass(IRProgram *program, int *changed);
 
 void ir_optimize_set_program(IRProgram *program);
+IRProgram *ir_optimize_get_program(void);
 void ir_alias_facts_build(IRProgram *program);
 void ir_alias_facts_reset(void);
 int ir_alias_bases_distinct(const IRFunction *function, const char *base_a,

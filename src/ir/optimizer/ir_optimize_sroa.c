@@ -223,6 +223,29 @@ static char *ir_sroa_scalar_name(const char *member, long long offset) {
   return s;
 }
 
+static const MtlcType *ir_sroa_integer_field_at(const MtlcType *type,
+                                                long long offset, int size,
+                                                int depth) {
+  if (!type || depth > 8) {
+    return NULL;
+  }
+  if (type->kind >= MTLC_TYPE_INT8 && type->kind <= MTLC_TYPE_BOOL) {
+    return (offset == 0 && (long long)type->size == size) ? type : NULL;
+  }
+  if (type->kind != MTLC_TYPE_STRUCT || !type->field_types ||
+      !type->field_offsets) {
+    return NULL;
+  }
+  for (size_t f = 0; f < type->field_count; f++) {
+    const MtlcType *field = type->field_types[f];
+    long long start = (long long)type->field_offsets[f];
+    if (field && offset >= start && offset < start + (long long)field->size) {
+      return ir_sroa_integer_field_at(field, offset - start, size, depth + 1);
+    }
+  }
+  return NULL;
+}
+
 static int ir_sroa_transform_all(IRFunction *function,
                                  const IRSroaFlatMember *members,
                                  size_t member_count,
@@ -255,6 +278,10 @@ static int ir_sroa_transform_all(IRFunction *function,
           {
             const MtlcType *field = NULL;
             const MtlcType *aggregate = insn->value_type;
+            if (!aggregate && insn->text && ir_optimize_get_program()) {
+              aggregate =
+                  ir_program_lookup_type(ir_optimize_get_program(), insn->text);
+            }
             for (size_t f = 0; aggregate && aggregate->field_types &&
                                aggregate->field_offsets &&
                                f < aggregate->field_count;
@@ -268,6 +295,13 @@ static int ir_sroa_transform_all(IRFunction *function,
                   (long long)aggregate->field_types[f]->size == slots[s].size) {
                 field = aggregate->field_types[f];
                 break;
+              }
+            }
+            if (!field && !slots[s].is_float) {
+              const MtlcType *scalar = ir_sroa_integer_field_at(
+                  aggregate, slots[s].offset, slots[s].size, 0);
+              if (scalar && scalar->name) {
+                field = scalar;
               }
             }
             if (field) {

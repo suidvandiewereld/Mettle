@@ -72,6 +72,48 @@ var g_unroll_limit: int64 = 10;
   return (int64)(-1);
 }
 
+struct Mixed16 {
+  f0: uint16;
+  f1: int16;
+  f2: uint16;
+}
+
+fn mixed16_total(s: Mixed16) -> float64 {
+  return (float64)s.f0 + (float64)s.f1 + (float64)s.f2;
+}
+
+@noinline fn sroa_keeps_unsigned_pieces() -> int32 {
+  var total: float64 = 1.0;
+  var outer: Mixed16;
+  outer.f0 = (uint16)65535;
+  var i: int64 = 1;
+  while (i < 2) {
+    switch (i & (int64)7) {
+      case 1: {
+        switch (i & (int64)7) {
+          case 4: { }
+          case 6: {
+            if (i > (int64)1) { }
+          }
+          default: { }
+        }
+        var piece: Mixed16;
+        piece.f1 = (int16)0;
+        piece.f0 = (uint16)1;
+        piece.f2 = outer.f0;
+        total = mixed16_total(piece);
+      }
+      case 3: {
+        if (i >= (int64)0) { }
+      }
+      default: { }
+    }
+    i = i + 1;
+  }
+  if (total != 65536.0) { return 9; }
+  return 0;
+}
+
 fn main() -> int32 {
   var r: int32 = unrolled_counter_survives();
   if (r != 0) { return r; }
@@ -91,5 +133,7 @@ fn main() -> int32 {
   for k: int64 in 0..40 { hay[k] = (int8)(k + 1); }
   hay[1] = (int8)(-100);
   if (find_signed_byte(&hay[0], (int64)31, (int8)(-100)) != 1) { return 8; }
+  r = sroa_keeps_unsigned_pieces();
+  if (r != 0) { return r; }
   return 0;
 }
