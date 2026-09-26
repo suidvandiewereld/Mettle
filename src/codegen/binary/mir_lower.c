@@ -8188,29 +8188,68 @@ static int mir_op_demand_passes_through(MirOpcode op) {
   }
 }
 
-static void mir_demand_veto_operand(const MirOperand *op, char *low32,
-                                    size_t n) {
-  if (!op) {
-    return;
-  }
-  if (op->kind == MIR_OPK_VREG && op->vreg != MIR_VREG_NONE &&
-      (size_t)op->vreg < n) {
-    low32[op->vreg] = 0;
-  }
-  if (op->kind == MIR_OPK_MEM) {
-    if (op->mem.base != MIR_VREG_NONE && (size_t)op->mem.base < n) {
-      low32[op->mem.base] = 0;
-    }
-    if (op->mem.index != MIR_VREG_NONE && (size_t)op->mem.index < n) {
-      low32[op->mem.index] = 0;
-    }
-  }
-}
-
 static int mir_demand_dst_is_low32(const MirInst *in, const char *low32,
                                    size_t n) {
   return in->dst.kind == MIR_OPK_VREG && in->dst.vreg != MIR_VREG_NONE &&
          (size_t)in->dst.vreg < n && low32[in->dst.vreg];
+}
+
+typedef struct {
+  char *low32;
+  size_t n;
+  MirVregId *stack;
+  size_t sp;
+} MirDemandState;
+
+static void mir_demand_veto_vreg(MirDemandState *st, MirVregId v) {
+  if (v != MIR_VREG_NONE && (size_t)v < st->n && st->low32[v]) {
+    st->low32[v] = 0;
+    st->stack[st->sp++] = v;
+  }
+}
+
+static void mir_demand_veto_push(MirDemandState *st, const MirOperand *op) {
+  if (op->kind == MIR_OPK_VREG) {
+    mir_demand_veto_vreg(st, op->vreg);
+  } else if (op->kind == MIR_OPK_MEM) {
+    mir_demand_veto_vreg(st, op->mem.base);
+    mir_demand_veto_vreg(st, op->mem.index);
+  }
+}
+
+static void mir_demand_visit(MirDemandState *st, const MirInst *in) {
+  int reads_low32_only = 0;
+  if (in->op == MIR_NOP || in->op == MIR_LABEL) {
+    return;
+  }
+  if ((in->op == MIR_MOVZX || in->op == MIR_MOVSX) && in->width <= 4) {
+    reads_low32_only = 1;
+  } else if ((in->op == MIR_CMP || in->op == MIR_CMPBR ||
+              in->op == MIR_TEST) &&
+             in->width == 4) {
+    reads_low32_only = 1;
+  } else if (mir_op_demand_passes_through(in->op)) {
+    reads_low32_only = mir_demand_dst_is_low32(in, st->low32, st->n) ||
+                       (in->op == MIR_MOV && in->dst.kind == MIR_OPK_MEM &&
+                        in->width <= 4);
+  }
+  if (reads_low32_only) {
+    if (in->a.kind == MIR_OPK_MEM) {
+      mir_demand_veto_push(st, &in->a);
+    }
+    if (in->b.kind == MIR_OPK_MEM) {
+      mir_demand_veto_push(st, &in->b);
+    }
+    if (in->dst.kind == MIR_OPK_MEM) {
+      mir_demand_veto_push(st, &in->dst);
+    }
+    return;
+  }
+  mir_demand_veto_push(st, &in->a);
+  mir_demand_veto_push(st, &in->b);
+  if (in->dst.kind == MIR_OPK_MEM) {
+    mir_demand_veto_push(st, &in->dst);
+  }
 }
 
 static void mir_drop_dead_extensions(MirFunction *fn) {
@@ -8219,7 +8258,14 @@ static void mir_drop_dead_extensions(MirFunction *fn) {
   }
   size_t n = fn->vreg_count;
   char *low32 = (char *)malloc(n);
-  if (!low32) {
+  MirVregId *stack = (MirVregId *)malloc(n * sizeof(MirVregId));
+  size_t *first = (size_t *)calloc(n + 1, sizeof(size_t));
+  size_t *defs = (size_t *)malloc((fn->insn_count + 1) * sizeof(size_t));
+  if (!low32 || !stack || !first || !defs) {
+    free(low32);
+    free(stack);
+    free(first);
+    free(defs);
     return;
   }
   for (size_t v = 0; v < n; v++) {
@@ -8227,54 +8273,50 @@ static void mir_drop_dead_extensions(MirFunction *fn) {
                    ? 1
                    : 0;
   }
-
-  size_t last_low32_count = (size_t)-1;
-  for (int changed = 1; changed;) {
-    changed = 0;
-    for (size_t i = 0; i < fn->insn_count; i++) {
-      const MirInst *in = &fn->insns[i];
-      if (in->op == MIR_NOP || in->op == MIR_LABEL) {
-        continue;
-      }
-      int reads_low32_only = 0;
-      if ((in->op == MIR_MOVZX || in->op == MIR_MOVSX) && in->width <= 4) {
-        reads_low32_only = 1;
-      } else if ((in->op == MIR_CMP || in->op == MIR_CMPBR ||
-                  in->op == MIR_TEST) &&
-                 in->width == 4) {
-        reads_low32_only = 1;
-      } else if (mir_op_demand_passes_through(in->op)) {
-        reads_low32_only = mir_demand_dst_is_low32(in, low32, n) ||
-                           (in->op == MIR_MOV && in->dst.kind == MIR_OPK_MEM &&
-                            in->width <= 4);
-      }
-      if (reads_low32_only) {
-        if (in->a.kind == MIR_OPK_MEM) {
-          mir_demand_veto_operand(&in->a, low32, n);
-        }
-        if (in->b.kind == MIR_OPK_MEM) {
-          mir_demand_veto_operand(&in->b, low32, n);
-        }
-        if (in->dst.kind == MIR_OPK_MEM) {
-          mir_demand_veto_operand(&in->dst, low32, n);
-        }
-        continue;
-      }
-      mir_demand_veto_operand(&in->a, low32, n);
-      mir_demand_veto_operand(&in->b, low32, n);
-      if (in->dst.kind == MIR_OPK_MEM) {
-        mir_demand_veto_operand(&in->dst, low32, n);
-      }
-    }
-    size_t still_low32 = 0;
-    for (size_t v = 0; v < n; v++) {
-      still_low32 += (size_t)low32[v];
-    }
-    if (still_low32 != last_low32_count) {
-      last_low32_count = still_low32;
-      changed = 1;
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    if (mir_op_demand_passes_through(in->op) && in->dst.kind == MIR_OPK_VREG &&
+        in->dst.vreg != MIR_VREG_NONE && (size_t)in->dst.vreg < n) {
+      first[in->dst.vreg + 1]++;
     }
   }
+  for (size_t v = 0; v < n; v++) {
+    first[v + 1] += first[v];
+  }
+  {
+    size_t *fill = (size_t *)malloc((n + 1) * sizeof(size_t));
+    if (!fill) {
+      free(low32);
+      free(stack);
+      free(first);
+      free(defs);
+      return;
+    }
+    memcpy(fill, first, (n + 1) * sizeof(size_t));
+    for (size_t i = 0; i < fn->insn_count; i++) {
+      const MirInst *in = &fn->insns[i];
+      if (mir_op_demand_passes_through(in->op) &&
+          in->dst.kind == MIR_OPK_VREG && in->dst.vreg != MIR_VREG_NONE &&
+          (size_t)in->dst.vreg < n) {
+        defs[fill[in->dst.vreg]++] = i;
+      }
+    }
+    free(fill);
+  }
+
+  MirDemandState st = {low32, n, stack, 0};
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    mir_demand_visit(&st, &fn->insns[i]);
+  }
+  while (st.sp > 0) {
+    MirVregId v = st.stack[--st.sp];
+    for (size_t k = first[v]; k < first[v + 1]; k++) {
+      mir_demand_visit(&st, &fn->insns[defs[k]]);
+    }
+  }
+  free(stack);
+  free(first);
+  free(defs);
 
   for (size_t i = 0; i < fn->insn_count; i++) {
     MirInst *in = &fn->insns[i];
