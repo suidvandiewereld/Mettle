@@ -1365,8 +1365,12 @@ static int type_checker_check_return(TypeChecker *checker, ASTNode *statement) {
         }
 
         if (checker->current_function_decl &&
-            type_checker_ast_contains_node_type(checker->current_function_decl,
-                                                AST_ERRDEFER_STATEMENT)) {
+            checker->errdefer_scan_decl != checker->current_function_decl) {
+          checker->errdefer_scan_decl = checker->current_function_decl;
+          checker->errdefer_scan_found = type_checker_ast_contains_node_type(
+              checker->current_function_decl, AST_ERRDEFER_STATEMENT);
+        }
+        if (checker->current_function_decl && checker->errdefer_scan_found) {
           long long constant_value = 0;
           if (type_checker_eval_integer_constant(value,
                                                  &constant_value) &&

@@ -2347,6 +2347,7 @@ static int type_checker_process_function(TypeChecker *checker,
       checker->current_function = func_symbol;
     }
     checker->current_function_decl = declaration;
+    checker->errdefer_scan_decl = NULL;
 
     if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_FUNCTION)) {
       type_checker_set_error_at_location(

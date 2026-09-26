@@ -688,10 +688,105 @@ static int mir_struct_temp_size_from_assign(CodeGenerator *g,
   return home;
 }
 
+typedef struct {
+  const char *name;
+  int home;
+} MirStructHome;
+
+static struct {
+  const IRFunction *irf;
+  MirStructHome *slots;
+  size_t mask;
+} g_mir_struct_homes;
+
+static MirStructHome *mir_struct_home_slot(const char *name) {
+  size_t h = mettle_fnv1a_hash(name) & g_mir_struct_homes.mask;
+  while (g_mir_struct_homes.slots[h].name &&
+         strcmp(g_mir_struct_homes.slots[h].name, name) != 0) {
+    h = (h + 1) & g_mir_struct_homes.mask;
+  }
+  return &g_mir_struct_homes.slots[h];
+}
+
+static void mir_struct_home_note(const char *name, int home) {
+  MirStructHome *slot = mir_struct_home_slot(name);
+  if (!slot->name) {
+    slot->name = name;
+    slot->home = home;
+  } else if (!slot->home) {
+    slot->home = home;
+  }
+}
+
+static void mir_struct_homes_end(void) {
+  free(g_mir_struct_homes.slots);
+  g_mir_struct_homes.slots = NULL;
+  g_mir_struct_homes.irf = NULL;
+  g_mir_struct_homes.mask = 0;
+}
+
+static void mir_struct_homes_begin(CodeGenerator *g, const IRFunction *irf) {
+  size_t names = 0;
+  size_t capacity = 16;
+  mir_struct_homes_end();
+  if (!g || !irf || !g->ir_program) {
+    return;
+  }
+  for (size_t i = 0; i < irf->instruction_count; i++) {
+    const IRInstruction *in = &irf->instructions[i];
+    if (in->op == IR_OP_CALL) {
+      names += 1 + in->argument_count;
+    } else if (in->op == IR_OP_ASSIGN) {
+      names += 2;
+    }
+  }
+  while (capacity < names * 2) {
+    capacity *= 2;
+  }
+  g_mir_struct_homes.slots =
+      (MirStructHome *)calloc(capacity, sizeof(MirStructHome));
+  if (!g_mir_struct_homes.slots) {
+    return;
+  }
+  g_mir_struct_homes.mask = capacity - 1;
+  for (size_t i = 0; i < irf->instruction_count; i++) {
+    const IRInstruction *in = &irf->instructions[i];
+    if (in->op == IR_OP_CALL) {
+      if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name) {
+        mir_struct_home_note(
+            in->dest.name,
+            mir_struct_temp_size_from_call(g, in, in->dest.name));
+      }
+      for (size_t a = 0; a < in->argument_count; a++) {
+        const IROperand *arg = &in->arguments[a];
+        if (arg->kind == IR_OPERAND_TEMP && arg->name) {
+          mir_struct_home_note(arg->name,
+                               mir_struct_temp_size_from_call(g, in, arg->name));
+        }
+      }
+    } else if (in->op == IR_OP_ASSIGN) {
+      if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name) {
+        mir_struct_home_note(
+            in->dest.name,
+            mir_struct_temp_size_from_assign(g, irf, in, in->dest.name));
+      }
+      if (in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name) {
+        mir_struct_home_note(
+            in->lhs.name,
+            mir_struct_temp_size_from_assign(g, irf, in, in->lhs.name));
+      }
+    }
+  }
+  g_mir_struct_homes.irf = irf;
+}
+
 static int mir_struct_temp_size(CodeGenerator *g, const IRFunction *irf,
                                 const char *name) {
   if (!g || !irf || !name || !g->ir_program) {
     return 0;
+  }
+  if (g_mir_struct_homes.irf == irf && g_mir_struct_homes.slots) {
+    return mir_struct_home_slot(name)->home;
   }
   for (size_t i = 0; i < irf->instruction_count; i++) {
     const IRInstruction *in = &irf->instructions[i];
@@ -3675,15 +3770,57 @@ static int mir_float_cmp_width(CodeGenerator *g, BinaryFunctionContext *ctx,
   return fb ? fb / 8 : 8;
 }
 
-static size_t mir_ir_label_index(IRFunction *function, const char *name) {
-  if (!name) {
-    return SIZE_MAX;
+typedef struct {
+  size_t *slots;
+  size_t mask;
+} MirIrLabelTable;
+
+static int mir_ir_label_table_build(const IRFunction *function,
+                                    MirIrLabelTable *table) {
+  size_t capacity = 16;
+  while (capacity < function->instruction_count * 2) {
+    capacity *= 2;
+  }
+  table->slots = (size_t *)calloc(capacity, sizeof(size_t));
+  table->mask = capacity - 1;
+  if (!table->slots) {
+    return 0;
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *in = &function->instructions[i];
-    if (in->op == IR_OP_LABEL && in->text && strcmp(in->text, name) == 0) {
-      return i;
+    if (in->op != IR_OP_LABEL || !in->text) {
+      continue;
     }
+    size_t h = mettle_fnv1a_hash(in->text) & table->mask;
+    int seen = 0;
+    while (table->slots[h]) {
+      const IRInstruction *other = &function->instructions[table->slots[h] - 1];
+      if (strcmp(other->text, in->text) == 0) {
+        seen = 1;
+        break;
+      }
+      h = (h + 1) & table->mask;
+    }
+    if (!seen) {
+      table->slots[h] = i + 1;
+    }
+  }
+  return 1;
+}
+
+static size_t mir_ir_label_index(const IRFunction *function,
+                                 const MirIrLabelTable *table,
+                                 const char *name) {
+  if (!name) {
+    return SIZE_MAX;
+  }
+  size_t h = mettle_fnv1a_hash(name) & table->mask;
+  while (table->slots[h]) {
+    size_t at = table->slots[h] - 1;
+    if (strcmp(function->instructions[at].text, name) == 0) {
+      return at;
+    }
+    h = (h + 1) & table->mask;
   }
   return SIZE_MAX;
 }
@@ -3696,7 +3833,10 @@ static int mir_build_const_pool(MirFunction *fn, CodeGenerator *g,
     return 1;
   }
   char *in_loop = (char *)calloc(n, 1);
-  if (!in_loop) {
+  MirIrLabelTable labels = {NULL, 0};
+  if (!in_loop || !mir_ir_label_table_build(function, &labels)) {
+    free(in_loop);
+    free(labels.slots);
     fn->has_error = 1;
     return 0;
   }
@@ -3708,13 +3848,14 @@ static int mir_build_const_pool(MirFunction *fn, CodeGenerator *g,
     if (!target) {
       continue;
     }
-    size_t l = mir_ir_label_index(function, target);
+    size_t l = mir_ir_label_index(function, &labels, target);
     if (l != SIZE_MAX && l < j) {
       for (size_t k = l; k <= j; k++) {
         in_loop[k] = 1;
       }
     }
   }
+  free(labels.slots);
 
   int ok = 1;
   for (size_t j = 0; j < n && ok; j++) {
@@ -3762,21 +3903,36 @@ static int mir_build_const_pool(MirFunction *fn, CodeGenerator *g,
   return ok;
 }
 
+struct MirTempUseIndex;
+
+static int mir_temp_def_census(const struct MirTempUseIndex *ix,
+                               const char *name, int *defs_out,
+                               long *first_def_out);
+
 static int mir_fused_cmp_imm(CodeGenerator *g, BinaryFunctionContext *ctx,
                              const IRFunction *f, const IROperand *op,
-                             long long *out) {
+                             long long *out,
+                             const struct MirTempUseIndex *uses) {
   long long v;
   if (op->kind == IR_OPERAND_INT) {
     v = op->int_value;
   } else if (op->kind == IR_OPERAND_TEMP && op->name) {
     const IRInstruction *def = NULL;
     int defs = 0;
-    for (size_t i = 0; i < f->instruction_count; i++) {
-      const IRInstruction *in = &f->instructions[i];
-      if (ir_operand_is_temp(&in->dest) &&
-          strcmp(in->dest.name, op->name) == 0) {
-        def = in;
-        defs++;
+    long first_def = -1;
+    if (uses) {
+      if (mir_temp_def_census(uses, op->name, &defs, &first_def) &&
+          first_def >= 0) {
+        def = &f->instructions[first_def];
+      }
+    } else {
+      for (size_t i = 0; i < f->instruction_count; i++) {
+        const IRInstruction *in = &f->instructions[i];
+        if (ir_operand_is_temp(&in->dest) &&
+            strcmp(in->dest.name, op->name) == 0) {
+          def = in;
+          defs++;
+        }
       }
     }
     if (defs != 1 || !def || def->op != IR_OP_CAST ||
@@ -3834,7 +3990,8 @@ static int mir_lower_compare_branch(MirFunction *fn, CodeGenerator *g,
             mir_operand_is_unsigned(g, ctx, &cmp->rhs);
   long long imm;
   MirOperand b;
-  if (mir_fused_cmp_imm(g, ctx, ir_function, &cmp->rhs, &imm)) {
+  if (mir_fused_cmp_imm(g, ctx, ir_function, &cmp->rhs, &imm,
+                        fn->temp_uses)) {
     b = mir_op_imm(imm);
   } else {
     b = mir_value_operand(fn, g, ctx, map, &cmp->rhs);
@@ -3848,12 +4005,18 @@ static int mir_lower_compare_branch(MirFunction *fn, CodeGenerator *g,
   return mir_emit1(fn, MIR_CMPBR, mir_op_label(br->text), a, b, w, uns, cc);
 }
 
+struct MirTempUseIndex;
+
+static int mir_temp_read_count(const struct MirTempUseIndex *ix,
+                               const char *name);
+
 static int mir_operand_is_temp(const IROperand *operand, const char *name) {
   return operand->kind == IR_OPERAND_TEMP && operand->name &&
          operand->name[0] == name[0] && strcmp(operand->name, name) == 0;
 }
 
 static long mir_select_condition_compare(const IRFunction *f,
+                                         const struct MirTempUseIndex *uses,
                                          const IRInstruction *sel);
 
 static int mir_temp_use_count(const IRFunction *function, const char *name) {
@@ -3874,7 +4037,8 @@ static int mir_temp_use_count(const IRFunction *function, const char *name) {
 }
 
 static int mir_fuses_compare_branch(CodeGenerator *g, IRFunction *function,
-                                    size_t i) {
+                                    size_t i,
+                                    const struct MirTempUseIndex *uses) {
   if (i + 1 >= function->instruction_count) {
     return 0;
   }
@@ -3896,6 +4060,9 @@ static int mir_fuses_compare_branch(CodeGenerator *g, IRFunction *function,
     return 0;
   }
   (void)g;
+  if (uses) {
+    return mir_temp_read_count(uses, cmp->dest.name) == 1;
+  }
   return mir_temp_use_count(function, cmp->dest.name) == 1;
 }
 
@@ -4839,8 +5006,9 @@ static int mir_lower_select(MirFunction *fn, CodeGenerator *g,
     MirVregId then_r = mir_new_vreg(fn, MIR_RC_GP, 8);
     MirVregId res_r = mir_new_vreg(fn, MIR_RC_GP, 8);
     long cmp_at =
-        fn->ir_function ? mir_select_condition_compare(fn->ir_function, in)
-                        : -1;
+        fn->ir_function
+            ? mir_select_condition_compare(fn->ir_function, fn->temp_uses, in)
+            : -1;
     if (cond_r == MIR_VREG_NONE || then_r == MIR_VREG_NONE ||
         res_r == MIR_VREG_NONE) {
       return 0;
@@ -7104,9 +7272,10 @@ typedef struct {
   int addr_reads;
   long def_index;
   int def_count;
+  int store_dests;
 } MirTempUse;
 
-typedef struct {
+typedef struct MirTempUseIndex {
   MirTempUse *items;
   size_t count;
   size_t capacity;
@@ -7146,6 +7315,7 @@ static MirTempUse *mir_temp_use_slot(MirTempUseIndex *ix, const char *name) {
   ix->items[ix->count].addr_reads = 0;
   ix->items[ix->count].def_index = -1;
   ix->items[ix->count].def_count = 0;
+  ix->items[ix->count].store_dests = 0;
   ix->count++;
   ix->buckets[b] = ix->count;
 
@@ -7237,6 +7407,8 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
       }
       if (in->op != IR_OP_STORE) {
         e->def_count++;
+      } else {
+        e->store_dests++;
       }
     }
   }
@@ -7254,6 +7426,18 @@ static const MirTempUse *mir_temp_use_find(const MirTempUseIndex *ix,
     b = (b + 1) & (ix->bucket_count - 1);
   }
   return NULL;
+}
+
+static int mir_temp_def_census(const struct MirTempUseIndex *ix,
+                               const char *name, int *defs_out,
+                               long *first_def_out) {
+  const MirTempUse *e = mir_temp_use_find(ix, name);
+  if (!e) {
+    return 0;
+  }
+  *defs_out = e->def_count + e->store_dests;
+  *first_def_out = e->def_index;
+  return 1;
 }
 
 static int mir_temp_read_count(const MirTempUseIndex *ix, const char *name) {
@@ -7428,7 +7612,7 @@ static void mir_compute_const_compare_skips(CodeGenerator *g,
                                             const MirTempUseIndex *uses,
                                             char *skip) {
   for (size_t i = 0; i + 1 < f->instruction_count; i++) {
-    if (!mir_fuses_compare_branch(g, f, i)) {
+    if (!mir_fuses_compare_branch(g, f, i, uses)) {
       continue;
     }
     const IRInstruction *cmp = &f->instructions[i];
@@ -7436,7 +7620,7 @@ static void mir_compute_const_compare_skips(CodeGenerator *g,
       continue;
     }
     long long imm;
-    if (!mir_fused_cmp_imm(g, ctx, f, &cmp->rhs, &imm)) {
+    if (!mir_fused_cmp_imm(g, ctx, f, &cmp->rhs, &imm, uses)) {
       continue;
     }
     if (mir_temp_read_count(uses, cmp->rhs.name) != 1) {
@@ -7469,6 +7653,7 @@ static long mir_temp_single_def(const IRFunction *f, const char *name) {
 }
 
 static long mir_select_condition_compare(const IRFunction *f,
+                                         const MirTempUseIndex *uses,
                                          const IRInstruction *sel) {
   long def;
   const IRInstruction *cmp;
@@ -7476,10 +7661,19 @@ static long mir_select_condition_compare(const IRFunction *f,
       !sel->lhs.name || sel->is_float) {
     return -1;
   }
-  if (mir_temp_use_count(f, sel->lhs.name) != 1) {
-    return -1;
+  if (uses) {
+    const MirTempUse *e = mir_temp_use_find(uses, sel->lhs.name);
+    if (!e || e->reads != 1 || e->def_count != 1 || e->def_index < 0 ||
+        f->instructions[e->def_index].op == IR_OP_STORE) {
+      return -1;
+    }
+    def = e->def_index;
+  } else {
+    if (mir_temp_use_count(f, sel->lhs.name) != 1) {
+      return -1;
+    }
+    def = mir_temp_single_def(f, sel->lhs.name);
   }
-  def = mir_temp_single_def(f, sel->lhs.name);
   if (def < 0) {
     return -1;
   }
@@ -7491,10 +7685,12 @@ static long mir_select_condition_compare(const IRFunction *f,
   return def;
 }
 
-static void mir_compute_select_compare_skips(const IRFunction *f, char *skip) {
+static void mir_compute_select_compare_skips(const IRFunction *f,
+                                             const MirTempUseIndex *uses,
+                                             char *skip) {
   size_t i;
   for (i = 0; i < f->instruction_count; i++) {
-    long def = mir_select_condition_compare(f, &f->instructions[i]);
+    long def = mir_select_condition_compare(f, uses, &f->instructions[i]);
     if (def >= 0) {
       skip[def] = 1;
     }
@@ -9280,6 +9476,13 @@ static int mir_cse_snapshots_at(MirOpcode op) {
 
 static size_t mir_cse_find_label(const MirFunction *fn, size_t from,
                                  const char *sym) {
+  size_t first = mir_label_index(fn, sym);
+  if (first == (size_t)-1) {
+    return fn->insn_count;
+  }
+  if (first >= from) {
+    return first;
+  }
   for (size_t d = from; d < fn->insn_count; d++) {
     if (mir_insn_defines_label(&fn->insns[d], sym)) {
       return d;
@@ -11908,7 +12111,7 @@ static int mir_lower_at(MirFunction *fn, CodeGenerator *generator,
                                    &folds[*at]) &&
            mir_emit_volatile_global_write(fn, generator, map, in);
   }
-  if (mir_fuses_compare_branch(generator, ir_function, *at)) {
+  if (mir_fuses_compare_branch(generator, ir_function, *at, fn->temp_uses)) {
     if (!mir_lower_compare_branch(fn, generator, context, map, ir_function, in,
                                   &ir_function->instructions[*at + 1])) {
       return 0;
@@ -11939,19 +12142,17 @@ static int mir_lower_instructions(MirFunction *fn, CodeGenerator *generator,
     free(folds);
     return 0;
   }
-  {
-    MirTempUseIndex uses;
-    if (!mir_temp_use_build(ir_function, &uses)) {
-      free(fold_skip);
-      free(folds);
-      return 0;
-    }
-    mir_compute_address_folds(ir_function, &uses, fold_skip, folds);
-    mir_compute_const_compare_skips(generator, context, ir_function, &uses,
-                                    fold_skip);
-    mir_compute_select_compare_skips(ir_function, fold_skip);
-    mir_temp_use_destroy(&uses);
+  MirTempUseIndex uses;
+  if (!mir_temp_use_build(ir_function, &uses)) {
+    free(fold_skip);
+    free(folds);
+    return 0;
   }
+  mir_compute_address_folds(ir_function, &uses, fold_skip, folds);
+  mir_compute_const_compare_skips(generator, context, ir_function, &uses,
+                                  fold_skip);
+  mir_compute_select_compare_skips(ir_function, &uses, fold_skip);
+  fn->temp_uses = &uses;
   for (size_t i = 0; ok && i < ir_function->instruction_count; i++) {
     IROpcode op = ir_function->instructions[i].op;
     int kernel_op =
@@ -11976,6 +12177,8 @@ static int mir_lower_instructions(MirFunction *fn, CodeGenerator *generator,
       ok = 0;
     }
   }
+  fn->temp_uses = NULL;
+  mir_temp_use_destroy(&uses);
   free(fold_skip);
   free(folds);
   return ok;
@@ -12008,7 +12211,9 @@ int code_generator_binary_emit_function_via_mir(
   MirFunction fn;
   MirNameMap map;
   void *vr_oracle = NULL;
+  mir_struct_homes_begin(generator, ir_function);
   if (!mir_function_is_eligible(generator, ir_function)) {
+    mir_struct_homes_end();
     return 0;
   }
   mir_function_init(&fn, context);
@@ -12129,6 +12334,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_name_map_destroy(&map);
   mir_function_destroy(&fn);
   ir_value_range_oracle_destroy(vr_oracle);
+  mir_struct_homes_end();
   return 1;
 
 oom:
@@ -12145,5 +12351,6 @@ oom:
   mir_name_map_destroy(&map);
   mir_function_destroy(&fn);
   ir_value_range_oracle_destroy(vr_oracle);
+  mir_struct_homes_end();
   return 0;
 }

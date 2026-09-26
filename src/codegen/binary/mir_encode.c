@@ -5,6 +5,7 @@ long long mir_encode_last_spills = 0;
 #include "codegen/binary/mir_annotate.h"
 #include "codegen/binary/simd_internal.h"
 #include "codegen/code_generator_internal.h"
+#include "common.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -2162,10 +2163,109 @@ static int mir_home_parameters(MirFunction *fn) {
   return 1;
 }
 
+typedef struct {
+  const char **names;
+  size_t *values;
+  size_t mask;
+} MirEncNameMap;
+
+static int mir_enc_name_map_init(MirEncNameMap *map, size_t expected) {
+  size_t capacity = 16;
+  while (capacity < expected * 2) {
+    capacity *= 2;
+  }
+  map->names = (const char **)calloc(capacity, sizeof(*map->names));
+  map->values = (size_t *)calloc(capacity, sizeof(*map->values));
+  map->mask = capacity - 1;
+  if (!map->names || !map->values) {
+    free(map->names);
+    free(map->values);
+    map->names = NULL;
+    map->values = NULL;
+    return 0;
+  }
+  return 1;
+}
+
+static void mir_enc_name_map_free(MirEncNameMap *map) {
+  free(map->names);
+  free(map->values);
+  map->names = NULL;
+  map->values = NULL;
+}
+
+static void mir_enc_name_map_put_first(MirEncNameMap *map, const char *name,
+                                       size_t value) {
+  size_t h = mettle_fnv1a_hash(name) & map->mask;
+  while (map->names[h]) {
+    if (strcmp(map->names[h], name) == 0) {
+      return;
+    }
+    h = (h + 1) & map->mask;
+  }
+  map->names[h] = name;
+  map->values[h] = value;
+}
+
+static int mir_enc_name_map_get(const MirEncNameMap *map, const char *name,
+                                size_t *value) {
+  size_t h = mettle_fnv1a_hash(name) & map->mask;
+  while (map->names[h]) {
+    if (strcmp(map->names[h], name) == 0) {
+      if (value) {
+        *value = map->values[h];
+      }
+      return 1;
+    }
+    h = (h + 1) & map->mask;
+  }
+  return 0;
+}
+
+static int mir_insn_is_label_branch(const MirInst *b) {
+  return (b->op == MIR_JMP || b->op == MIR_JCC || b->op == MIR_CMPBR ||
+          b->op == MIR_BT || b->op == MIR_FCMPBR) &&
+         b->dst.kind == MIR_OPK_LABEL && b->dst.sym;
+}
+
+static int mir_branch_targets_build(const MirFunction *fn,
+                                    MirEncNameMap *targets) {
+  size_t expected = 0;
+  for (size_t k = 0; k < fn->insn_count; k++) {
+    const MirInst *b = &fn->insns[k];
+    if (b->op == MIR_JMP_TABLE && b->aux) {
+      expected += ((const MirJumpTable *)b->aux)->count;
+    } else if (mir_insn_is_label_branch(b)) {
+      expected++;
+    }
+  }
+  if (!mir_enc_name_map_init(targets, expected)) {
+    return 0;
+  }
+  for (size_t k = 0; k < fn->insn_count; k++) {
+    const MirInst *b = &fn->insns[k];
+    if (b->op == MIR_JMP_TABLE) {
+      const MirJumpTable *tbl = (const MirJumpTable *)b->aux;
+      for (size_t t = 0; tbl && t < tbl->count; t++) {
+        if (tbl->labels[t]) {
+          mir_enc_name_map_put_first(targets, tbl->labels[t], k);
+        }
+      }
+    } else if (mir_insn_is_label_branch(b)) {
+      mir_enc_name_map_put_first(targets, b->dst.sym, k);
+    }
+  }
+  return 1;
+}
+
 static int mir_label_is_branch_target(const MirFunction *fn,
+                                      const MirEncNameMap *targets,
                                       const char *name) {
   if (!name) {
     return 1;
+  }
+  if (targets && targets->names) {
+    return mir_enc_name_map_get(targets, name, NULL);
   }
   for (size_t k = 0; k < fn->insn_count; k++) {
     const MirInst *b = &fn->insns[k];
@@ -2192,13 +2292,15 @@ static int mir_label_is_branch_target(const MirFunction *fn,
   return 0;
 }
 
-static int mir_cmp_gap_is_empty(const MirFunction *fn, const MirInst *in) {
+static int mir_cmp_gap_is_empty(const MirFunction *fn,
+                                const MirEncNameMap *targets,
+                                const MirInst *in) {
   if (in->op == MIR_NOP) {
     return 1;
   }
   if (in->op == MIR_LABEL) {
     return in->dst.kind == MIR_OPK_LABEL &&
-           !mir_label_is_branch_target(fn, in->dst.sym);
+           !mir_label_is_branch_target(fn, targets, in->dst.sym);
   }
   if (in->op == MIR_MOV && !in->is_float && in->dst.kind == MIR_OPK_VREG &&
       in->a.kind == MIR_OPK_VREG && in->dst.vreg != MIR_VREG_NONE &&
@@ -2927,6 +3029,7 @@ typedef struct {
   char epilogue_label[64];
   int epilogue_defined;
   int epilogue_referenced;
+  MirEncNameMap branch_targets;
 } MirEncodeState;
 
 typedef int (*MirEncodeHandler)(MirEncodeState *st, const MirInst *in);
@@ -3881,7 +3984,7 @@ static int mir_cmpbr_reuses_flags(MirEncodeState *st, const MirInst *in) {
   size_t p = st->index;
 
   while (p > 0 && st->prev_cmpbr != p - 1 &&
-         mir_cmp_gap_is_empty(fn, &fn->insns[p - 1])) {
+         mir_cmp_gap_is_empty(fn, &st->branch_targets, &fn->insns[p - 1])) {
     p--;
   }
   if (p == 0 || st->prev_cmpbr != p - 1) {
@@ -4276,9 +4379,19 @@ static const MirEncodeHandler MIR_ENCODERS[MIR_OPCODE_COUNT] = {
 
 static char *mir_scan_loop_alignment(const MirFunction *fn) {
   char *align_label = (char *)calloc(fn->insn_count ? fn->insn_count : 1, 1);
+  MirEncNameMap labels = {NULL, NULL, 0};
 
   if (!align_label) {
     return NULL;
+  }
+  if (mir_enc_name_map_init(&labels, fn->insn_count)) {
+    for (size_t i = 0; i < fn->insn_count; i++) {
+      const MirInst *in = &fn->insns[i];
+      if (in->op == MIR_LABEL && in->dst.kind == MIR_OPK_LABEL &&
+          in->dst.sym) {
+        mir_enc_name_map_put_first(&labels, in->dst.sym, i);
+      }
+    }
   }
   for (size_t b = 0; b < fn->insn_count; b++) {
     const MirInst *in = &fn->insns[b];
@@ -4291,7 +4404,12 @@ static char *mir_scan_loop_alignment(const MirFunction *fn) {
     if (in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
       continue;
     }
-    header = mir_encode_label_index(fn, in->dst.sym);
+    if (labels.names) {
+      size_t at = 0;
+      header = mir_enc_name_map_get(&labels, in->dst.sym, &at) ? (int)at : -1;
+    } else {
+      header = mir_encode_label_index(fn, in->dst.sym);
+    }
     if (header < 0 || (size_t)header >= b) {
       continue;
     }
@@ -4320,6 +4438,7 @@ static char *mir_scan_loop_alignment(const MirFunction *fn) {
       align_label[i] = 4;
     }
   }
+  mir_enc_name_map_free(&labels);
   return align_label;
 }
 
@@ -4435,6 +4554,7 @@ int mir_encode(MirFunction *fn) {
   if (!st.vreg_uses) {
     return 0;
   }
+  mir_branch_targets_build(fn, &st.branch_targets);
   if (annot && ctx->code.size > annot_base) {
     mir_annotate_record_synthetic("prologue", "frame", 0,
                                   ctx->code.size - annot_base,
@@ -4473,6 +4593,7 @@ int mir_encode(MirFunction *fn) {
                                    ctx->code.size) &&
          mir_emit_epilogue(fn);
   }
+  mir_enc_name_map_free(&st.branch_targets);
   if (!ok || !mir_encode_jump_tables(&st)) {
     free((void *)st.vreg_uses);
     return 0;

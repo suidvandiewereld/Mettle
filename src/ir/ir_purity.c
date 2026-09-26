@@ -99,30 +99,80 @@ static int purity_label_defined_before(const IRFunction *function, size_t upto,
   return 0;
 }
 
+typedef struct {
+  const char **names;
+  size_t mask;
+} PurityLabelSet;
+
+static int purity_label_set_init(PurityLabelSet *set, size_t expected) {
+  size_t capacity = 16;
+  while (capacity < expected * 2) {
+    capacity *= 2;
+  }
+  set->names = (const char **)calloc(capacity, sizeof(*set->names));
+  set->mask = capacity - 1;
+  return set->names != NULL;
+}
+
+static int purity_label_set_has(const PurityLabelSet *set, const char *name) {
+  size_t h = mettle_fnv1a_hash(name) & set->mask;
+  while (set->names[h]) {
+    if (strcmp(set->names[h], name) == 0) {
+      return 1;
+    }
+    h = (h + 1) & set->mask;
+  }
+  return 0;
+}
+
+static void purity_label_set_add(PurityLabelSet *set, const char *name) {
+  size_t h = mettle_fnv1a_hash(name) & set->mask;
+  while (set->names[h]) {
+    if (strcmp(set->names[h], name) == 0) {
+      return;
+    }
+    h = (h + 1) & set->mask;
+  }
+  set->names[h] = name;
+}
+
 static int purity_body_is_speculatable(IRProgram *program,
                                        const IRFunction *function) {
-  for (size_t k = 0; k < function->instruction_count; k++) {
+  PurityLabelSet seen;
+  int indexed = purity_label_set_init(&seen, function->instruction_count);
+  int result = 1;
+  for (size_t k = 0; k < function->instruction_count && result; k++) {
     const IRInstruction *inst = &function->instructions[k];
     switch (inst->op) {
+    case IR_OP_LABEL:
+      if (indexed && inst->text) {
+        purity_label_set_add(&seen, inst->text);
+      }
+      break;
     case IR_OP_LOAD:
-      return 0;
+      result = 0;
+      break;
     case IR_OP_BINARY:
       if (!purity_divisor_is_nonzero_constant(inst)) {
-        return 0;
+        result = 0;
       }
       break;
     case IR_OP_JUMP:
     case IR_OP_BRANCH_ZERO:
     case IR_OP_BRANCH_EQ:
-      if (purity_label_defined_before(function, k, inst->text)) {
-        return 0;
+      if (!inst->text) {
+        result = 0;
+      } else if (indexed ? purity_label_set_has(&seen, inst->text)
+                         : purity_label_defined_before(function, k,
+                                                       inst->text)) {
+        result = 0;
       }
       break;
     case IR_OP_CALL: {
       IRFunction *callee =
           inst->text ? ir_program_find_function(program, inst->text) : NULL;
       if (!callee || !callee->is_speculatable_inferred) {
-        return 0;
+        result = 0;
       }
       break;
     }
@@ -130,7 +180,8 @@ static int purity_body_is_speculatable(IRProgram *program,
       break;
     }
   }
-  return 1;
+  free(seen.names);
+  return result;
 }
 
 void ir_purity_infer(IRProgram *program) {

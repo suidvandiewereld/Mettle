@@ -305,6 +305,8 @@ typedef struct {
 
   const IRFunction *ir_function;
 
+  const struct MirTempUseIndex *temp_uses;
+
   int reserve_rbx;
 
   size_t incoming_arg_slots;

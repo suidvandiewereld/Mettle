@@ -40,6 +40,8 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->error_reporter = error_reporter;
   checker->current_function = NULL;
   checker->current_function_decl = NULL;
+  checker->errdefer_scan_decl = NULL;
+  checker->errdefer_scan_found = 0;
   checker->loop_depth = 0;
   checker->switch_depth = 0;
   checker->loop_labels = NULL;

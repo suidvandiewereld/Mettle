@@ -1901,6 +1901,142 @@ static MirVregId mir_color_pick(const MirColorState *st, int low_degree_only) {
   return pick;
 }
 
+typedef struct {
+  int rank;
+  long long metric;
+  MirVregId v;
+} MirPickEntry;
+
+typedef struct {
+  MirPickEntry *items;
+  size_t count;
+  size_t capacity;
+} MirPickHeap;
+
+static int mir_pick_before(const MirPickEntry *a, const MirPickEntry *b) {
+  if (a->rank != b->rank) {
+    return a->rank < b->rank;
+  }
+  if (a->metric != b->metric) {
+    return a->metric < b->metric;
+  }
+  return a->v < b->v;
+}
+
+static void mir_pick_push(MirPickHeap *h, const MirColorState *st, size_t v) {
+  size_t i = h->count++;
+  h->items[i].rank = mir_spill_rank(st->fn, st->use_depth, (MirVregId)v);
+  h->items[i].metric = st->metric[v];
+  h->items[i].v = (MirVregId)v;
+  while (i > 0) {
+    size_t parent = (i - 1) / 2;
+    if (!mir_pick_before(&h->items[i], &h->items[parent])) {
+      break;
+    }
+    MirPickEntry t = h->items[i];
+    h->items[i] = h->items[parent];
+    h->items[parent] = t;
+    i = parent;
+  }
+}
+
+static void mir_pick_pop(MirPickHeap *h) {
+  size_t i = 0;
+  h->items[0] = h->items[--h->count];
+  for (;;) {
+    size_t l = 2 * i + 1;
+    size_t r = l + 1;
+    size_t m = i;
+    if (l < h->count && mir_pick_before(&h->items[l], &h->items[m])) {
+      m = l;
+    }
+    if (r < h->count && mir_pick_before(&h->items[r], &h->items[m])) {
+      m = r;
+    }
+    if (m == i) {
+      break;
+    }
+    MirPickEntry t = h->items[i];
+    h->items[i] = h->items[m];
+    h->items[m] = t;
+    i = m;
+  }
+}
+
+static MirVregId mir_pick_top(MirPickHeap *h, const MirColorState *st,
+                              int low_degree_only) {
+  while (h->count > 0) {
+    const MirPickEntry *top = &h->items[0];
+    size_t v = top->v;
+    if (!st->removed[v] && top->metric == st->metric[v] &&
+        (!low_degree_only || st->degree[v] < st->reg_count[v])) {
+      return top->v;
+    }
+    mir_pick_pop(h);
+  }
+  return MIR_VREG_NONE;
+}
+
+static int mir_color_order_vregs_heap(MirColorState *st, size_t remaining,
+                                      size_t *sp_out) {
+  MirPickHeap low = {NULL, 0, 0};
+  MirPickHeap all = {NULL, 0, 0};
+  size_t sp = 0;
+  size_t capacity = remaining + 1;
+
+  for (size_t w = 0; w < st->count * st->words; w++) {
+    capacity += (size_t)__builtin_popcountll(st->inter[w]);
+  }
+  low.items = (MirPickEntry *)malloc(capacity * sizeof(MirPickEntry));
+  all.items = (MirPickEntry *)malloc(capacity * sizeof(MirPickEntry));
+  if (!low.items || !all.items) {
+    free(low.items);
+    free(all.items);
+    return 0;
+  }
+  low.capacity = capacity;
+  all.capacity = capacity;
+  for (size_t v = 0; v < st->count; v++) {
+    if (!st->colorable[v]) {
+      continue;
+    }
+    mir_pick_push(&all, st, v);
+    if (st->degree[v] < st->reg_count[v]) {
+      mir_pick_push(&low, st, v);
+    }
+  }
+  while (remaining > 0) {
+    MirVregId pick = mir_pick_top(&low, st, 1);
+
+    if (pick == MIR_VREG_NONE) {
+      pick = mir_pick_top(&all, st, 0);
+    }
+    if (pick == MIR_VREG_NONE) {
+      break;
+    }
+    st->removed[pick] = 1;
+    st->stack[sp++] = pick;
+    remaining--;
+    MIR_INTER_FOR_EACH(st, pick, b) {
+      if (!st->removed[b]) {
+        st->degree[b]--;
+        st->metric[b] = mir_color_metric(st, b);
+        if (!st->colorable[b]) {
+          continue;
+        }
+        mir_pick_push(&all, st, b);
+        if (st->degree[b] < st->reg_count[b]) {
+          mir_pick_push(&low, st, b);
+        }
+      }
+    }
+  }
+  free(low.items);
+  free(all.items);
+  *sp_out = sp;
+  return 1;
+}
+
 static size_t mir_color_order_vregs(MirColorState *st) {
   size_t sp = 0;
   size_t remaining = 0;
@@ -1910,6 +2046,9 @@ static size_t mir_color_order_vregs(MirColorState *st) {
       remaining++;
       st->metric[v] = mir_color_metric(st, v);
     }
+  }
+  if (mir_color_order_vregs_heap(st, remaining, &sp)) {
+    return sp;
   }
   while (remaining > 0) {
     MirVregId pick = mir_color_pick(st, 1);

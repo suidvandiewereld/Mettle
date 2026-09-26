@@ -355,7 +355,11 @@ static void mir_cfg_loop_members(const MirCfg *cfg, int header, int tail,
 }
 
 static int mir_cfg_is_back_edge(const MirCfg *cfg, size_t from, int to) {
-  return cfg->blocks[from].rpo >= 0 && mir_cfg_dominates(cfg, to, (int)from);
+  if (cfg->blocks[from].rpo < 0 || cfg->blocks[to].rpo < 0 ||
+      cfg->blocks[to].rpo > cfg->blocks[from].rpo) {
+    return 0;
+  }
+  return mir_cfg_dominates(cfg, to, (int)from);
 }
 
 static void mir_cfg_assign_headers(MirCfg *cfg, int header,

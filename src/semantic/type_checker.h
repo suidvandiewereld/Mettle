@@ -97,6 +97,8 @@ typedef struct {
   size_t generic_enum_template_count;
   Symbol *current_function;
   ASTNode *current_function_decl;
+  ASTNode *errdefer_scan_decl;
+  int errdefer_scan_found;
   int loop_depth;
   int switch_depth;
   const char **loop_labels;
