@@ -1134,19 +1134,99 @@ static int ir_row_index_is_read_in_loop(const IRFunction *function, size_t s,
 
 static size_t ir_narrowing_width(const char *type_name);
 
+static struct {
+  const IRFunction *function;
+  int valid;
+  IRNameIndex count;
+  IRNameIndex first;
+} g_row_readers;
+
+static void ir_row_readers_drop(void) {
+  if (g_row_readers.valid) {
+    ir_name_index_destroy(&g_row_readers.count);
+    ir_name_index_destroy(&g_row_readers.first);
+  }
+  g_row_readers.valid = 0;
+  g_row_readers.function = NULL;
+}
+
+static const IROperand *ir_row_read_operand(const IRInstruction *ins,
+                                            size_t k) {
+  if (k == 0) {
+    return &ins->lhs;
+  }
+  if (k == 1) {
+    return &ins->rhs;
+  }
+  if (k == 2) {
+    return ins->op == IR_OP_STORE ? &ins->dest : NULL;
+  }
+  return &ins->arguments[k - 3];
+}
+
+static int ir_row_readers_build(const IRFunction *function) {
+  size_t operands = 0;
+  ir_row_readers_drop();
+  for (size_t j = 0; j < function->instruction_count; j++) {
+    operands += 3 + function->instructions[j].argument_count;
+  }
+  if (!ir_name_index_init(&g_row_readers.count, operands)) {
+    return 0;
+  }
+  if (!ir_name_index_init(&g_row_readers.first, operands)) {
+    ir_name_index_destroy(&g_row_readers.count);
+    return 0;
+  }
+  g_row_readers.valid = 1;
+  g_row_readers.function = function;
+  for (size_t j = 0; j < function->instruction_count; j++) {
+    const IRInstruction *ins = &function->instructions[j];
+    size_t total = 3 + ins->argument_count;
+    for (size_t k = 0; k < total; k++) {
+      const IROperand *op = ir_row_read_operand(ins, k);
+      int seen = 0;
+      if (!op || op->kind != IR_OPERAND_TEMP || !op->name) {
+        continue;
+      }
+      for (size_t e = 0; e < k && !seen; e++) {
+        const IROperand *earlier = ir_row_read_operand(ins, e);
+        seen = earlier && ir_operand_is_temp_named(earlier, op->name);
+      }
+      if (!seen) {
+        ir_name_index_add(&g_row_readers.count, op->name, 1);
+        ir_name_index_insert(&g_row_readers.first, op->name, j);
+      }
+    }
+  }
+  return 1;
+}
+
 static const char *ir_row_index_through_narrowing(const IRFunction *function,
                                                   const char *name,
                                                   size_t *cast_at) {
   const IRInstruction *cast = NULL;
   size_t readers = 0;
-  for (size_t j = 0; j < function->instruction_count; j++) {
-    const IRInstruction *ins = &function->instructions[j];
-    if (!ir_row_instruction_reads_temp(ins, name)) {
-      continue;
+  if (g_row_readers.function != function || !g_row_readers.valid) {
+    ir_row_readers_build(function);
+  }
+  if (g_row_readers.valid && g_row_readers.function == function) {
+    size_t at = 0;
+    if (ir_name_index_find(&g_row_readers.count, name, &readers) &&
+        readers == 1 && ir_name_index_find(&g_row_readers.first, name, &at) &&
+        at < function->instruction_count) {
+      cast = &function->instructions[at];
+      *cast_at = at;
     }
-    readers++;
-    cast = ins;
-    *cast_at = j;
+  } else {
+    for (size_t j = 0; j < function->instruction_count; j++) {
+      const IRInstruction *ins = &function->instructions[j];
+      if (!ir_row_instruction_reads_temp(ins, name)) {
+        continue;
+      }
+      readers++;
+      cast = ins;
+      *cast_at = j;
+    }
   }
   if (readers != 1 || !cast || cast->op != IR_OP_CAST || cast->is_float ||
       !cast->text || ir_narrowing_width(cast->text) == 0 ||
@@ -1658,6 +1738,7 @@ static int ir_row_hoist_shift(IRRowPass *pass, size_t s, size_t *out_inserted) {
   if (!ir_row_match_shape(function, pass->header, pass->latch, s, &shape)) {
     return 1;
   }
+  ir_row_readers_drop();
   if (!ir_row_collect_consumers(function, pass->header, pass->latch, s,
                                 shape.hop_at, shape.sh_name, consumers,
                                 &consumer_count) ||
@@ -1754,6 +1835,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
       size_t inserted = 0;
       if (!ir_row_hoist_shift(&pass, s, &inserted)) {
         ir_row_cache_clear(cache, &pass.cache_count);
+        ir_row_readers_drop();
         return 0;
       }
       s += inserted;
@@ -1761,6 +1843,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
     header = pass.header;
   }
   ir_row_cache_clear(cache, &pass.cache_count);
+  ir_row_readers_drop();
   return 1;
 }
 

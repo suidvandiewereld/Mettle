@@ -116,7 +116,7 @@ static uint32_t ir_value_table_add(IRValueTable *table, unsigned char kind,
 
   const uint32_t id = (uint32_t)table->count;
   if (table->bucket_count == 0 ||
-      (table->count * 4) >= (table->bucket_count * 3)) {
+      (table->count * 2) >= table->bucket_count) {
     size_t bucket_count =
         table->bucket_count ? table->bucket_count * 2 : IR_VALUE_TABLE_MIN_BUCKETS;
     if (!ir_value_table_rehash(table, bucket_count)) {
@@ -555,6 +555,15 @@ int ir_function_number_values(IRFunction *function) {
       if (!ir_operand_is_value(operand)) {
         operand->value_id = IR_VALUE_ID_NONE;
         continue;
+      }
+      if (operand->value_id != IR_VALUE_ID_NONE &&
+          operand->value_id <= function->values.count) {
+        const IRValueEntry *carried =
+            &function->values.entries[operand->value_id - 1];
+        if (carried->kind == (unsigned char)operand->kind && carried->name &&
+            strcmp(carried->name, operand->name) == 0) {
+          continue;
+        }
       }
       const uint32_t id = ir_value_table_intern(
           &function->values, (unsigned char)operand->kind, operand->name);
