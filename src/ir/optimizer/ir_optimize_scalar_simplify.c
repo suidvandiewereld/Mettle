@@ -173,6 +173,10 @@ static int ir_try_coalesce_unsigned_load_cast(IRFunction *function,
 
   ir_operand_destroy(&producer->dest);
   producer->dest = rewritten_dest;
+  producer->is_unsigned = 1;
+  if (cast->value_type) {
+    producer->value_type = cast->value_type;
+  }
   ir_instruction_make_nop(cast);
 
   if (changed) {
