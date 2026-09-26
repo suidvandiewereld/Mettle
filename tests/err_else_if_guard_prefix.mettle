@@ -1,0 +1,32 @@
+type Small = int32 where value >= 0 && value <= 10;
+@noinline fn f(x: int32) -> int32 {
+  var r: int32 = 0;
+  if (x < 0) {
+    r = 100;
+  } else if (x > 11) {
+    if (x > 20) { r = 200; } else { if (x > 15) { r = 150; } else { r = 120; } }
+  } else if (x == 5 && x > 1) {
+    var s: Small = x;
+    r = s + 50;
+  } else if (x == 7) {
+    if (x > 3) { var t: Small = x; r = t + 70; }
+  } else if (x != 99) {
+    var u: Small = x;
+    r = u;
+  } else {
+    var v: Small = x;
+    r = v + 1000;
+  }
+  return r;
+}
+fn main() -> int32 {
+  if (f(-3) != 100) { return 1; }
+  if (f(30) != 200) { return 2; }
+  if (f(17) != 150) { return 3; }
+  if (f(12) != 120) { return 4; }
+  if (f(5) != 55) { return 5; }
+  if (f(7) != 77) { return 6; }
+  if (f(9) != 9) { return 7; }
+  if (f(0) != 0) { return 8; }
+  return 0;
+}
