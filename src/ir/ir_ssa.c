@@ -648,21 +648,59 @@ static void ir_ssa_reject_nondominated(IRFunction *function,
   }
 }
 
-static void ir_ssa_seed_phi_worklist(const IRFunction *function,
-                                     const IRAnalysis *analysis, uint32_t id,
-                                     size_t *worklist, unsigned char *on_list,
-                                     size_t *tail) {
+static int ir_ssa_def_sites_build(const IRFunction *function,
+                                  size_t value_count, size_t **start_out,
+                                  size_t **sites_out) {
+  size_t *start = (size_t *)calloc(value_count + 1, sizeof(size_t));
+  size_t *fill = (size_t *)calloc(value_count ? value_count : 1,
+                                  sizeof(size_t));
+  size_t total = 0;
+  if (!start || !fill) {
+    free(start);
+    free(fill);
+    return 0;
+  }
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
-    if (!ir_instruction_writes_destination(instruction) ||
-        instruction->dest.value_id != id) {
+    if (ir_instruction_writes_destination(instruction) &&
+        instruction->dest.value_id < value_count) {
+      start[instruction->dest.value_id + 1]++;
+      total++;
+    }
+  }
+  for (size_t v = 0; v < value_count; v++) {
+    start[v + 1] += start[v];
+  }
+  size_t *sites = (size_t *)malloc((total ? total : 1) * sizeof(size_t));
+  if (!sites) {
+    free(start);
+    free(fill);
+    return 0;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    if (ir_instruction_writes_destination(instruction) &&
+        instruction->dest.value_id < value_count) {
+      const uint32_t id = instruction->dest.value_id;
+      sites[start[id] + fill[id]++] = i;
+    }
+  }
+  free(fill);
+  *start_out = start;
+  *sites_out = sites;
+  return 1;
+}
+
+static void ir_ssa_seed_phi_worklist(const IRAnalysis *analysis, uint32_t id,
+                                     const size_t *def_start,
+                                     const size_t *def_sites, size_t *worklist,
+                                     uint32_t *listed, size_t *tail) {
+  for (size_t k = def_start[id]; k < def_start[id + 1]; k++) {
+    const size_t block = analysis->instruction_block[def_sites[k]];
+    if (block == IR_BLOCK_NONE || listed[block] == id) {
       continue;
     }
-    const size_t block = analysis->instruction_block[i];
-    if (block == IR_BLOCK_NONE || on_list[block]) {
-      continue;
-    }
-    on_list[block] = 1;
+    listed[block] = id;
     worklist[(*tail)++] = block;
   }
 }
@@ -736,7 +774,7 @@ static size_t ir_ssa_spread_phis(IRFunction *function,
                                  const IRBasicBlock *blocks,
                                  size_t block_count, IRSsaPhiSites *sites,
                                  uint32_t *stamp, uint32_t id,
-                                 size_t *worklist, unsigned char *on_list,
+                                 size_t *worklist, uint32_t *listed,
                                  size_t tail) {
   size_t placed = 0;
   size_t head = 0;
@@ -754,8 +792,8 @@ static size_t ir_ssa_spread_phis(IRFunction *function,
       stamp[target] = id;
       ir_ssa_phi_sites_add(sites, target, id);
       placed++;
-      if (!on_list[target] && tail < block_count) {
-        on_list[target] = 1;
+      if (listed[target] != id && tail < block_count) {
+        listed[target] = id;
         worklist[tail++] = target;
       }
     }
@@ -768,11 +806,15 @@ static int ir_ssa_place_phis(IRFunction *function, const IRAnalysis *analysis,
                              const IRSsaCandidates *candidates,
                              IRSsaPhiSites *sites, size_t *phi_total) {
   size_t *worklist = (size_t *)malloc(block_count * sizeof(size_t));
-  unsigned char *on_list = (unsigned char *)calloc(block_count, 1);
+  uint32_t *listed = (uint32_t *)calloc(block_count, sizeof(uint32_t));
   uint32_t *stamp = (uint32_t *)calloc(block_count, sizeof(uint32_t));
-  if (!worklist || !on_list || !stamp) {
+  size_t *def_start = NULL;
+  size_t *def_sites = NULL;
+  if (!worklist || !listed || !stamp ||
+      !ir_ssa_def_sites_build(function, candidates->value_count, &def_start,
+                              &def_sites)) {
     free(worklist);
-    free(on_list);
+    free(listed);
     free(stamp);
     return 0;
   }
@@ -782,16 +824,18 @@ static int ir_ssa_place_phis(IRFunction *function, const IRAnalysis *analysis,
     if (!candidates->promotable[id]) {
       continue;
     }
-    memset(on_list, 0, block_count);
     size_t tail = 0;
-    ir_ssa_seed_phi_worklist(function, analysis, id, worklist, on_list, &tail);
+    ir_ssa_seed_phi_worklist(analysis, id, def_start, def_sites, worklist,
+                             listed, &tail);
     *phi_total += ir_ssa_spread_phis(function, blocks, block_count, sites,
-                                     stamp, id, worklist, on_list, tail);
+                                     stamp, id, worklist, listed, tail);
   }
 
   free(worklist);
-  free(on_list);
+  free(listed);
   free(stamp);
+  free(def_start);
+  free(def_sites);
   return !sites->failed;
 }
 

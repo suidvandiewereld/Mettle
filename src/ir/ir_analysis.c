@@ -785,12 +785,18 @@ const IRInstruction *ir_function_temp_producer_before(const IRFunction *function
   }
   const uint32_t barrier = dests->prev_label[before_index];
   const uint32_t start = dests->starts[id];
-  const uint32_t count = dests->counts[id];
-  for (uint32_t k = count; k-- > 0;) {
-    const uint32_t at = dests->sites[start + k];
-    if ((size_t)at >= before_index) {
-      continue;
+  uint32_t lo = 0;
+  uint32_t hi = dests->counts[id];
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    if ((size_t)dests->sites[start + mid] < before_index) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
     }
+  }
+  for (uint32_t k = lo; k-- > 0;) {
+    const uint32_t at = dests->sites[start + k];
     if (barrier != IR_INSTRUCTION_NONE && at <= barrier) {
       break;
     }

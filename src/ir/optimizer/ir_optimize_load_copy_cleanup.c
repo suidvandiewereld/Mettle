@@ -486,6 +486,27 @@ int ir_hoist_load_bases_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
   }
+  size_t cand_count = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *load = &function->instructions[i];
+    if (load->op == IR_OP_LOAD && load->rhs.kind == IR_OPERAND_INT &&
+        load->rhs.int_value == 8) {
+      cand_count++;
+    }
+  }
+  size_t *cand = (size_t *)malloc((cand_count ? cand_count : 1) *
+                                  sizeof(size_t));
+  if (!cand) {
+    return 0;
+  }
+  cand_count = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *load = &function->instructions[i];
+    if (load->op == IR_OP_LOAD && load->rhs.kind == IR_OPERAND_INT &&
+        load->rhs.int_value == 8) {
+      cand[cand_count++] = i;
+    }
+  }
   for (size_t header = 0; header < function->instruction_count; header++) {
     char loop_label[128];
     char seen_keys[8][160];
@@ -507,7 +528,8 @@ int ir_hoist_load_bases_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    for (size_t i = 0; i < header; i++) {
+    for (size_t c = 0; c < cand_count && cand[c] < header; c++) {
+      size_t i = cand[c];
       char temp[128];
       char base_name[128];
       char key[160];
@@ -568,6 +590,7 @@ int ir_hoist_load_bases_pass(IRFunction *function, int *changed) {
           !ir_function_insert_instruction(function, i + 2, &init)) {
         ir_instruction_destroy_storage(&decl);
         ir_instruction_destroy_storage(&init);
+        free(cand);
         return 0;
       }
       ir_instruction_destroy_storage(&decl);
@@ -582,12 +605,15 @@ int ir_hoist_load_bases_pass(IRFunction *function, int *changed) {
       }
       header += 2;
       latch += 2;
-      i += 2;
+      for (size_t m = c + 1; m < cand_count; m++) {
+        cand[m] += 2;
+      }
       if (changed) {
         *changed = 1;
       }
     }
   }
+  free(cand);
   return 1;
 }
 

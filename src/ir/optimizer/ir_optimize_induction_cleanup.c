@@ -60,45 +60,69 @@ static int ir_civ_is_self_add(const IRInstruction *in, const char **name_out,
   return 0;
 }
 
-static int ir_civ_find_offset_init(const IRFunction *function, size_t label_idx,
-                                   const char *v, const char **base_out,
-                                   long long *offset_out, size_t *init_idx_out) {
-  for (size_t i = 0; i < label_idx; i++) {
-    const IRInstruction *in = &function->instructions[i];
-    if (in->op != IR_OP_BINARY || in->is_float || !in->text ||
-        strcmp(in->text, "+") != 0 ||
-        !ir_civ_operand_is_sym(&in->dest, v)) {
-      continue;
-    }
-    if (ir_operand_is_symbol(&in->lhs) &&
-        in->rhs.kind == IR_OPERAND_INT) {
-      *base_out = in->lhs.name;
-      *offset_out = in->rhs.int_value;
-      *init_idx_out = i;
-      return 1;
-    }
-    if (ir_operand_is_symbol(&in->rhs) &&
-        in->lhs.kind == IR_OPERAND_INT) {
-      *base_out = in->rhs.name;
-      *offset_out = in->lhs.int_value;
-      *init_idx_out = i;
-      return 1;
-    }
+static int ir_civ_offset_shape(const IRInstruction *in, const char **base_out,
+                               long long *offset_out) {
+  if (in->op != IR_OP_BINARY || in->is_float || !in->text ||
+      strcmp(in->text, "+") != 0 || in->dest.kind != IR_OPERAND_SYMBOL ||
+      !in->dest.name) {
+    return 0;
+  }
+  if (ir_operand_is_symbol(&in->lhs) &&
+      in->rhs.kind == IR_OPERAND_INT) {
+    *base_out = in->lhs.name;
+    *offset_out = in->rhs.int_value;
+    return 1;
+  }
+  if (ir_operand_is_symbol(&in->rhs) &&
+      in->lhs.kind == IR_OPERAND_INT) {
+    *base_out = in->rhs.name;
+    *offset_out = in->lhs.int_value;
+    return 1;
   }
   return 0;
 }
 
-static size_t ir_civ_symbol_write_count(const IRFunction *function,
-                                        const char *name) {
-  size_t count = 0;
+static int ir_civ_find_offset_init(const IRFunction *function,
+                                   const IRNameIndex *inits, size_t label_idx,
+                                   const char *v, const char **base_out,
+                                   long long *offset_out, size_t *init_idx_out) {
+  size_t i = 0;
+  if (!v || !ir_name_index_find(inits, v, &i) || i >= label_idx) {
+    return 0;
+  }
+  *init_idx_out = i;
+  return ir_civ_offset_shape(&function->instructions[i], base_out, offset_out);
+}
+
+static int ir_civ_index_build(const IRFunction *function, IRNameIndex *inits,
+                              IRNameIndex *writes) {
+  if (!ir_name_index_init(inits, function->instruction_count)) {
+    return 0;
+  }
+  if (!ir_name_index_init(writes, function->instruction_count)) {
+    ir_name_index_destroy(inits);
+    return 0;
+  }
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *in = &function->instructions[i];
-    if (in->op == IR_OP_DECLARE_LOCAL) {
-      continue;
+    const char *base = NULL;
+    long long offset = 0;
+    if (ir_civ_offset_shape(in, &base, &offset)) {
+      ir_name_index_insert(inits, in->dest.name, i);
     }
-    if (ir_civ_operand_is_sym(&in->dest, name)) {
-      count++;
+    if (in->op != IR_OP_DECLARE_LOCAL && in->dest.kind == IR_OPERAND_SYMBOL &&
+        in->dest.name) {
+      ir_name_index_add(writes, in->dest.name, 1);
     }
+  }
+  return 1;
+}
+
+static size_t ir_civ_symbol_write_count(const IRNameIndex *writes,
+                                        const char *name) {
+  size_t count = 0;
+  if (!name || !ir_name_index_find(writes, name, &count)) {
+    return 0;
   }
   return count;
 }
@@ -121,6 +145,12 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
     if (lab->op == IR_OP_LABEL && lab->text) {
       ir_name_index_insert(&labels, lab->text, li);
     }
+  }
+  IRNameIndex inits;
+  IRNameIndex writes;
+  if (!ir_civ_index_build(function, &inits, &writes)) {
+    ir_name_index_destroy(&labels);
+    return 0;
   }
 
   for (size_t jump_idx = 0; jump_idx < function->instruction_count; jump_idx++) {
@@ -162,7 +192,8 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       if (derived_count >= IR_CIV_MAX_GROUP) {
         break;
       }
-      if (!ir_civ_find_offset_init(function, label_idx, v, &base, &offset,
+      if (!ir_civ_find_offset_init(function, &inits, label_idx, v, &base,
+                                   &offset,
                                    &init_idx)) {
         continue;
       }
@@ -181,14 +212,15 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
         const char *bb = NULL;
         long long bo = 0;
         size_t bi = 0;
-        if (ir_civ_find_offset_init(function, label_idx, base, &bb, &bo, &bi)) {
+        if (ir_civ_find_offset_init(function, &inits, label_idx, base, &bb,
+                                    &bo, &bi)) {
           base_is_derived = 1;
         }
       }
       if (base_is_derived) {
         continue;
       }
-      if (ir_civ_symbol_write_count(function, v) != 2) {
+      if (ir_civ_symbol_write_count(&writes, v) != 2) {
         continue;
       }
       int ok = 1;
@@ -243,6 +275,8 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
     }
   }
   ir_name_index_destroy(&labels);
+  ir_name_index_destroy(&inits);
+  ir_name_index_destroy(&writes);
 
   if (derived_count == 0) {
     return 1;
