@@ -1440,10 +1440,8 @@ static int ir_block_append_index_unique(size_t **items, size_t *count,
     return 0;
   }
 
-  for (size_t i = 0; i < *count; i++) {
-    if ((*items)[i] == value) {
-      return 1;
-    }
+  if (*count > 0 && (*items)[*count - 1] == value) {
+    return 1;
   }
 
   size_t *grown = realloc(*items, (*count + 1) * sizeof(size_t));

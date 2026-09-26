@@ -10822,6 +10822,7 @@ typedef struct {
   size_t *ref_list;
   size_t ref_mask;
   size_t ref_insns;
+  size_t ref_misses;
 } MirRotateCfg;
 
 static void mir_rotate_cfg_destroy(MirRotateCfg *cfg) {
@@ -10980,28 +10981,46 @@ static int mir_rotate_table_reaches(const MirFunction *fn, const char *hname) {
   return 0;
 }
 
+static int mir_rotate_note_back_edge(const MirFunction *fn, size_t j,
+                                     size_t k, size_t *bes, size_t *nbe) {
+  if (fn->insns[k].op != MIR_JMP || k <= j + 1) {
+    return 0;
+  }
+  if (*nbe >= MIR_ROTATE_MAX_BACK_EDGES) {
+    return 0;
+  }
+  bes[(*nbe)++] = k;
+  return 1;
+}
+
 static int mir_rotate_back_edges(const MirFunction *fn,
                                  const MirRotateCfg *cfg, size_t j,
                                  const char *hname, size_t *bes,
                                  size_t *out_count) {
   size_t nbe = 0;
-  size_t s = mir_rotate_ref_slot(fn, cfg->ref_slots, cfg->ref_mask, hname);
 
-  if (!cfg->ref_slots[s]) {
-    return 0;
-  }
-  for (size_t p = cfg->ref_start[s]; p < cfg->ref_start[s + 1u]; p++) {
-    size_t k = cfg->ref_list[p];
-    if (k == j) {
-      continue;
-    }
-    if (fn->insns[k].op != MIR_JMP || k <= j + 1) {
+  if (cfg->ref_insns == fn->insn_count) {
+    size_t s = mir_rotate_ref_slot(fn, cfg->ref_slots, cfg->ref_mask, hname);
+    if (!cfg->ref_slots[s]) {
       return 0;
     }
-    if (nbe >= MIR_ROTATE_MAX_BACK_EDGES) {
-      return 0;
+    for (size_t p = cfg->ref_start[s]; p < cfg->ref_start[s + 1u]; p++) {
+      size_t k = cfg->ref_list[p];
+      if (k != j && !mir_rotate_note_back_edge(fn, j, k, bes, &nbe)) {
+        return 0;
+      }
     }
-    bes[nbe++] = k;
+  } else {
+    for (size_t k = 0; k < fn->insn_count; k++) {
+      const MirInst *in = &fn->insns[k];
+      if (k == j || in->dst.kind != MIR_OPK_LABEL || !in->dst.sym ||
+          strcmp(in->dst.sym, hname) != 0) {
+        continue;
+      }
+      if (!mir_rotate_note_back_edge(fn, j, k, bes, &nbe)) {
+        return 0;
+      }
+    }
   }
   if (nbe == 0 || mir_rotate_table_reaches(fn, hname)) {
     return 0;
@@ -11095,9 +11114,13 @@ static void mir_rotate_loops(MirFunction *fn) {
     }
     hname = fn->insns[j].dst.sym;
     ename = fn->insns[j + 1].dst.sym;
-    if (cfg.ref_insns != fn->insn_count && !mir_rotate_refs_build(fn, &cfg)) {
-      mir_rotate_cfg_destroy(&cfg);
-      return;
+    if (cfg.ref_insns != fn->insn_count &&
+        (!cfg.ref_slots || ++cfg.ref_misses > 64)) {
+      cfg.ref_misses = 0;
+      if (!mir_rotate_refs_build(fn, &cfg)) {
+        mir_rotate_cfg_destroy(&cfg);
+        return;
+      }
     }
     if (!mir_rotate_back_edges(fn, &cfg, j, hname, bes, &nbe)) {
       continue;

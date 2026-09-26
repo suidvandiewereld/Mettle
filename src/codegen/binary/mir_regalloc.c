@@ -1987,6 +1987,9 @@ static int mir_color_order_vregs_heap(MirColorState *st, size_t remaining,
   for (size_t w = 0; w < st->count * st->words; w++) {
     capacity += (size_t)__builtin_popcountll(st->inter[w]);
   }
+  if (capacity - remaining - 1 > remaining * remaining / 32) {
+    return 0;
+  }
   low.items = (MirPickEntry *)malloc(capacity * sizeof(MirPickEntry));
   all.items = (MirPickEntry *)malloc(capacity * sizeof(MirPickEntry));
   if (!low.items || !all.items) {
