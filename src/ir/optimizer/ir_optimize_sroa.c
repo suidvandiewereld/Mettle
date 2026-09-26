@@ -246,6 +246,44 @@ static const MtlcType *ir_sroa_integer_field_at(const MtlcType *type,
   return NULL;
 }
 
+static const MtlcType *ir_sroa_declared_aggregate(const IRInstruction *decl) {
+  if (decl->value_type) {
+    return decl->value_type;
+  }
+  if (decl->text && ir_optimize_get_program()) {
+    return ir_program_lookup_type(ir_optimize_get_program(), decl->text);
+  }
+  return NULL;
+}
+
+static int ir_sroa_piece_is_unsigned(const IRFunction *function,
+                                     const IRSroaFlatMember *owner,
+                                     const IRSroaSlot *slot) {
+  const MtlcType *field = NULL;
+  if (owner->decl_index < function->instruction_count) {
+    field = ir_sroa_integer_field_at(
+        ir_sroa_declared_aggregate(&function->instructions[owner->decl_index]),
+        slot->offset, slot->size, 0);
+  }
+  if (field) {
+    return field->kind >= MTLC_TYPE_UINT8 && field->kind <= MTLC_TYPE_BOOL;
+  }
+  return slot->is_unsigned;
+}
+
+static const char *ir_sroa_int_view_name(int size, int is_unsigned) {
+  switch (size) {
+  case 1:
+    return is_unsigned ? "uint8" : "int8";
+  case 2:
+    return is_unsigned ? "uint16" : "int16";
+  case 4:
+    return is_unsigned ? "uint32" : "int32";
+  default:
+    return NULL;
+  }
+}
+
 static int ir_sroa_transform_all(IRFunction *function,
                                  const IRSroaFlatMember *members,
                                  size_t member_count,
@@ -277,11 +315,7 @@ static int ir_sroa_transform_all(IRFunction *function,
           decl.dest = nm ? ir_operand_symbol(nm) : ir_operand_none();
           {
             const MtlcType *field = NULL;
-            const MtlcType *aggregate = insn->value_type;
-            if (!aggregate && insn->text && ir_optimize_get_program()) {
-              aggregate =
-                  ir_program_lookup_type(ir_optimize_get_program(), insn->text);
-            }
+            const MtlcType *aggregate = ir_sroa_declared_aggregate(insn);
             for (size_t f = 0; aggregate && aggregate->field_types &&
                                aggregate->field_offsets &&
                                f < aggregate->field_count;
@@ -387,6 +421,22 @@ static int ir_sroa_transform_all(IRFunction *function,
         assign.location = insn->location;
         assign.is_float = slot->is_float;
         assign.float_bits = slot->float_bits;
+        if (!slot->is_float && slot->size < 8 &&
+            (insn->is_unsigned ? 1 : 0) !=
+                ir_sroa_piece_is_unsigned(function, owner, slot)) {
+          const char *view =
+              ir_sroa_int_view_name(slot->size, insn->is_unsigned);
+          if (view) {
+            assign.op = IR_OP_CAST;
+            assign.text = mettle_strdup(view);
+            assign.is_unsigned = insn->is_unsigned;
+            assign.value_type = insn->value_type;
+            if (!assign.text) {
+              ok = 0;
+              continue;
+            }
+          }
+        }
         char *nm = ir_sroa_scalar_name(owner->name, off);
         if (!nm || !ir_operand_clone(&insn->dest, &assign.dest)) {
           free(nm);

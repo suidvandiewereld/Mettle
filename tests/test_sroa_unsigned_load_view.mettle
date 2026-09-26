@@ -1,0 +1,22 @@
+@noinline fn bits_f32(x: float32) -> uint32 { var y: float32 = x; return *((uint32*)&y); }
+struct S0 { f0: int8; f1: int8; }
+struct S1 { f0: int32; f1: int16; }
+export fn m0(a0: uint16, a1: float32, a2: S0, a3: int64) -> S1 {
+  var h: uint64 = (uint64)0;
+  h = h * (uint64)1000003 + (uint64)((uint16)(a0));
+  h = h * (uint64)1000003 + (uint64)bits_f32(a1);
+  h = h * (uint64)1000003 + (uint64)((uint8)(a2.f0));
+  h = h * (uint64)1000003 + (uint64)((uint8)(a2.f1));
+  h = h * (uint64)1000003 + (uint64)((uint64)(a3));
+  var out: S1;
+  out.f1 = (int16)(h + (uint64)1);
+  return out;
+}
+fn main() -> int32 {
+  var v0_2: S0;
+  v0_2.f0 = (int8)(-110);
+  v0_2.f1 = (int8)120;
+  var r0: S1 = m0((uint16)48606, ((float32)(10000000000.0)), v0_2, (int64)(-6490391309054148526));
+  if (r0.f1 != (int16)11294) { return 2; }
+  return 0;
+}
