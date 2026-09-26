@@ -1,0 +1,19 @@
+fn clamp_to_int(x: float32) -> int64 {
+  if (x >= (float32)(-1000.0) && x <= (float32)1000.0) { return (int64)x; }
+  return (int64)0;
+}
+
+@inline fn compare_inlined_conversion(a: uint8) -> int8 {
+  var w: uint64 = (uint64)3;
+  if (w != (w >> (uint64)5)) {
+    if (((int64)(-5) - (int64)(-3)) == clamp_to_int((float32)1.0)) {
+    }
+  }
+  return (int8)a;
+}
+
+fn main() -> int32 {
+  var fp: fn(uint8) -> int8 = &compare_inlined_conversion;
+  if (fp((uint8)7) != (int8)7) { return 1; }
+  return 0;
+}

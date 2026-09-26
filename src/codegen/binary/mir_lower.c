@@ -897,6 +897,14 @@ static int mir_temp_is_float(CodeGenerator *g, const IRFunction *function,
       if (in->op == IR_OP_BINARY && in->text && mir_is_comparison(in->text)) {
         return 0;
       }
+      if (in->op == IR_OP_CAST && in->text) {
+        const MtlcType *target =
+            code_generator_binary_get_resolved_type(g, in->text, 0);
+        if (target && !code_generator_type_is_aggregate(target) &&
+            code_generator_binary_resolved_type_float_bits(target) == 0) {
+          return 0;
+        }
+      }
       return 1;
     }
     if (in->op == IR_OP_ASSIGN && in->lhs.kind == IR_OPERAND_TEMP) {

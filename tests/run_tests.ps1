@@ -1646,6 +1646,7 @@ $cases = @(
   @{ Name = "uint32_cross_lineage_eq"; Path = "tests/test_uint32_cross_lineage_eq.mettle"; ShouldSucceed = $true },
   @{ Name = "paren_ident_binop"; Path = "tests/test_paren_ident_binop.mettle"; ShouldSucceed = $true },
   @{ Name = "sroa_unsigned_load_view"; Path = "tests/test_sroa_unsigned_load_view.mettle"; ShouldSucceed = $true },
+  @{ Name = "float_to_int_inline_compare"; Path = "tests/test_float_to_int_inline_compare.mettle"; ShouldSucceed = $true; Args = @("-O") },
   @{ Name = "pointer_null"; Path = "tests/test_pointer_null.mettle"; ShouldSucceed = $true },
   @{
     Name          = "runtime_null_deref_check"
