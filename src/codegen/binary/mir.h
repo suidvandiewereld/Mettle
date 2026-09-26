@@ -238,7 +238,7 @@ typedef struct {
   MirVregId sysv_storage;
 } MirParam;
 
-#define MIR_MAX_PARAMS 32
+#define MIR_MAX_PARAMS 128
 
 typedef struct {
   MirVreg *vregs;
