@@ -49,6 +49,7 @@ typedef struct {
   struct TypeCheckerGuard *guards;
   size_t guard_count;
   size_t guard_capacity;
+  size_t guard_pushes;
   char *refine_failure;
   char *effect_failure;
   TypeCheckerEffect *effects;

@@ -1718,6 +1718,7 @@ int type_checker_push_guard(TypeChecker *checker, ASTNode *condition,
   checker->guards[checker->guard_count].condition = condition;
   checker->guards[checker->guard_count].negated = negated;
   checker->guard_count++;
+  checker->guard_pushes++;
   return 1;
 }
 
@@ -1735,6 +1736,7 @@ int type_checker_push_range_guard(TypeChecker *checker, const char *name,
   checker->guards[checker->guard_count].has_max = has_max;
   checker->guards[checker->guard_count].max = max;
   checker->guard_count++;
+  checker->guard_pushes++;
   return 1;
 }
 

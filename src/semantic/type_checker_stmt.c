@@ -455,6 +455,11 @@ int type_checker_check_if_statement(TypeChecker *checker,
   type_checker_init_tracker_restore(checker, init_snapshot,
                                     init_snapshot_count);
 
+  size_t prefix_base = 0;
+  size_t prefix_end = 0;
+  size_t prefix_arms = 0;
+  size_t prefix_pushes = 0;
+  int prefix_valid = 0;
   for (size_t i = 0; i < if_stmt->else_if_count; i++) {
     Type *elif_cond_type =
         type_checker_infer_type(checker, if_stmt->else_ifs[i].condition);
@@ -472,15 +477,29 @@ int type_checker_check_if_statement(TypeChecker *checker,
     }
     if (elif_ok && if_stmt->else_ifs[i].body) {
       size_t guard_depth = type_checker_guard_depth(checker);
-      type_checker_push_guard(checker, if_stmt->condition, 1);
-      for (size_t earlier = 0; earlier < i; earlier++) {
-        type_checker_push_guard(checker, if_stmt->else_ifs[earlier].condition,
-                                1);
+      if (prefix_valid && prefix_arms == i &&
+          checker->guard_pushes == prefix_pushes &&
+          prefix_base == guard_depth) {
+        checker->guard_count = prefix_end;
+      } else {
+        type_checker_push_guard(checker, if_stmt->condition, 1);
+        for (size_t earlier = 0; earlier < i; earlier++) {
+          type_checker_push_guard(checker,
+                                  if_stmt->else_ifs[earlier].condition, 1);
+        }
       }
+      size_t arm_depth = type_checker_guard_depth(checker);
       type_checker_push_guard(checker, if_stmt->else_ifs[i].condition, 0);
       if (!type_checker_check_statement(checker, if_stmt->else_ifs[i].body)) {
         elif_ok = 0;
       }
+      type_checker_pop_guards(checker, arm_depth);
+      type_checker_push_guard(checker, if_stmt->else_ifs[i].condition, 1);
+      prefix_base = guard_depth;
+      prefix_end = type_checker_guard_depth(checker);
+      prefix_arms = i + 1;
+      prefix_pushes = checker->guard_pushes;
+      prefix_valid = prefix_end == arm_depth + 1;
       type_checker_pop_guards(checker, guard_depth);
     }
     if (!elif_ok) {
