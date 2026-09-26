@@ -10633,10 +10633,13 @@ static void mir_jt_emit_dispatch(MirFunction *fn, size_t i, size_t j,
 }
 
 static void mir_build_jump_tables(MirFunction *fn) {
+  size_t tables = 0;
   if (!fn || fn->insn_count == 0) {
     return;
   }
-  for (size_t i = 0; i + MIR_JUMP_TABLE_MIN_CASES < fn->insn_count; i++) {
+  for (size_t i = 0; i + MIR_JUMP_TABLE_MIN_CASES < fn->insn_count &&
+                     tables < MIR_MAX_JUMP_TABLES;
+       i++) {
     MirVregId key = MIR_VREG_NONE;
     long long value = 0;
     if (!mir_jt_case(&fn->insns[i], &key, &value)) {
@@ -10694,6 +10697,7 @@ static void mir_build_jump_tables(MirFunction *fn) {
     }
 
     mir_jt_emit_dispatch(fn, i, j, key, biased, lo, span, deflt, table);
+    tables++;
     i = j - 1;
   }
 }

@@ -1,0 +1,655 @@
+@noinline fn pick(k: int64) -> int64 { return k; }
+
+fn main() -> int32 {
+  var total: int64 = 0;
+  switch (pick((int64)0)) {
+    case 0: { total = total + 0; }
+    case 1: { total = total + 1; }
+    case 2: { total = total + 2; }
+    case 3: { total = total + 3; }
+    case 4: { total = total + 4; }
+    case 5: { total = total + 5; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 7; }
+    case 1: { total = total + 8; }
+    case 2: { total = total + 9; }
+    case 3: { total = total + 10; }
+    case 4: { total = total + 11; }
+    case 5: { total = total + 12; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 14; }
+    case 1: { total = total + 15; }
+    case 2: { total = total + 16; }
+    case 3: { total = total + 17; }
+    case 4: { total = total + 18; }
+    case 5: { total = total + 19; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 21; }
+    case 1: { total = total + 22; }
+    case 2: { total = total + 23; }
+    case 3: { total = total + 24; }
+    case 4: { total = total + 25; }
+    case 5: { total = total + 26; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 28; }
+    case 1: { total = total + 29; }
+    case 2: { total = total + 30; }
+    case 3: { total = total + 31; }
+    case 4: { total = total + 32; }
+    case 5: { total = total + 33; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 35; }
+    case 1: { total = total + 36; }
+    case 2: { total = total + 37; }
+    case 3: { total = total + 38; }
+    case 4: { total = total + 39; }
+    case 5: { total = total + 40; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 42; }
+    case 1: { total = total + 43; }
+    case 2: { total = total + 44; }
+    case 3: { total = total + 45; }
+    case 4: { total = total + 46; }
+    case 5: { total = total + 47; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 49; }
+    case 1: { total = total + 50; }
+    case 2: { total = total + 51; }
+    case 3: { total = total + 52; }
+    case 4: { total = total + 53; }
+    case 5: { total = total + 54; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 56; }
+    case 1: { total = total + 57; }
+    case 2: { total = total + 58; }
+    case 3: { total = total + 59; }
+    case 4: { total = total + 60; }
+    case 5: { total = total + 61; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 63; }
+    case 1: { total = total + 64; }
+    case 2: { total = total + 65; }
+    case 3: { total = total + 66; }
+    case 4: { total = total + 67; }
+    case 5: { total = total + 68; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 70; }
+    case 1: { total = total + 71; }
+    case 2: { total = total + 72; }
+    case 3: { total = total + 73; }
+    case 4: { total = total + 74; }
+    case 5: { total = total + 75; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 77; }
+    case 1: { total = total + 78; }
+    case 2: { total = total + 79; }
+    case 3: { total = total + 80; }
+    case 4: { total = total + 81; }
+    case 5: { total = total + 82; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 84; }
+    case 1: { total = total + 85; }
+    case 2: { total = total + 86; }
+    case 3: { total = total + 87; }
+    case 4: { total = total + 88; }
+    case 5: { total = total + 89; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 91; }
+    case 1: { total = total + 92; }
+    case 2: { total = total + 93; }
+    case 3: { total = total + 94; }
+    case 4: { total = total + 95; }
+    case 5: { total = total + 96; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 98; }
+    case 1: { total = total + 99; }
+    case 2: { total = total + 100; }
+    case 3: { total = total + 101; }
+    case 4: { total = total + 102; }
+    case 5: { total = total + 103; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 105; }
+    case 1: { total = total + 106; }
+    case 2: { total = total + 107; }
+    case 3: { total = total + 108; }
+    case 4: { total = total + 109; }
+    case 5: { total = total + 110; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 112; }
+    case 1: { total = total + 113; }
+    case 2: { total = total + 114; }
+    case 3: { total = total + 115; }
+    case 4: { total = total + 116; }
+    case 5: { total = total + 117; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 119; }
+    case 1: { total = total + 120; }
+    case 2: { total = total + 121; }
+    case 3: { total = total + 122; }
+    case 4: { total = total + 123; }
+    case 5: { total = total + 124; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 126; }
+    case 1: { total = total + 127; }
+    case 2: { total = total + 128; }
+    case 3: { total = total + 129; }
+    case 4: { total = total + 130; }
+    case 5: { total = total + 131; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 133; }
+    case 1: { total = total + 134; }
+    case 2: { total = total + 135; }
+    case 3: { total = total + 136; }
+    case 4: { total = total + 137; }
+    case 5: { total = total + 138; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 140; }
+    case 1: { total = total + 141; }
+    case 2: { total = total + 142; }
+    case 3: { total = total + 143; }
+    case 4: { total = total + 144; }
+    case 5: { total = total + 145; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 147; }
+    case 1: { total = total + 148; }
+    case 2: { total = total + 149; }
+    case 3: { total = total + 150; }
+    case 4: { total = total + 151; }
+    case 5: { total = total + 152; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 154; }
+    case 1: { total = total + 155; }
+    case 2: { total = total + 156; }
+    case 3: { total = total + 157; }
+    case 4: { total = total + 158; }
+    case 5: { total = total + 159; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 161; }
+    case 1: { total = total + 162; }
+    case 2: { total = total + 163; }
+    case 3: { total = total + 164; }
+    case 4: { total = total + 165; }
+    case 5: { total = total + 166; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 168; }
+    case 1: { total = total + 169; }
+    case 2: { total = total + 170; }
+    case 3: { total = total + 171; }
+    case 4: { total = total + 172; }
+    case 5: { total = total + 173; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 175; }
+    case 1: { total = total + 176; }
+    case 2: { total = total + 177; }
+    case 3: { total = total + 178; }
+    case 4: { total = total + 179; }
+    case 5: { total = total + 180; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 182; }
+    case 1: { total = total + 183; }
+    case 2: { total = total + 184; }
+    case 3: { total = total + 185; }
+    case 4: { total = total + 186; }
+    case 5: { total = total + 187; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 189; }
+    case 1: { total = total + 190; }
+    case 2: { total = total + 191; }
+    case 3: { total = total + 192; }
+    case 4: { total = total + 193; }
+    case 5: { total = total + 194; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 196; }
+    case 1: { total = total + 197; }
+    case 2: { total = total + 198; }
+    case 3: { total = total + 199; }
+    case 4: { total = total + 200; }
+    case 5: { total = total + 201; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 203; }
+    case 1: { total = total + 204; }
+    case 2: { total = total + 205; }
+    case 3: { total = total + 206; }
+    case 4: { total = total + 207; }
+    case 5: { total = total + 208; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 210; }
+    case 1: { total = total + 211; }
+    case 2: { total = total + 212; }
+    case 3: { total = total + 213; }
+    case 4: { total = total + 214; }
+    case 5: { total = total + 215; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 217; }
+    case 1: { total = total + 218; }
+    case 2: { total = total + 219; }
+    case 3: { total = total + 220; }
+    case 4: { total = total + 221; }
+    case 5: { total = total + 222; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 224; }
+    case 1: { total = total + 225; }
+    case 2: { total = total + 226; }
+    case 3: { total = total + 227; }
+    case 4: { total = total + 228; }
+    case 5: { total = total + 229; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 231; }
+    case 1: { total = total + 232; }
+    case 2: { total = total + 233; }
+    case 3: { total = total + 234; }
+    case 4: { total = total + 235; }
+    case 5: { total = total + 236; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 238; }
+    case 1: { total = total + 239; }
+    case 2: { total = total + 240; }
+    case 3: { total = total + 241; }
+    case 4: { total = total + 242; }
+    case 5: { total = total + 243; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 245; }
+    case 1: { total = total + 246; }
+    case 2: { total = total + 247; }
+    case 3: { total = total + 248; }
+    case 4: { total = total + 249; }
+    case 5: { total = total + 250; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 252; }
+    case 1: { total = total + 253; }
+    case 2: { total = total + 254; }
+    case 3: { total = total + 255; }
+    case 4: { total = total + 256; }
+    case 5: { total = total + 257; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 259; }
+    case 1: { total = total + 260; }
+    case 2: { total = total + 261; }
+    case 3: { total = total + 262; }
+    case 4: { total = total + 263; }
+    case 5: { total = total + 264; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 266; }
+    case 1: { total = total + 267; }
+    case 2: { total = total + 268; }
+    case 3: { total = total + 269; }
+    case 4: { total = total + 270; }
+    case 5: { total = total + 271; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 273; }
+    case 1: { total = total + 274; }
+    case 2: { total = total + 275; }
+    case 3: { total = total + 276; }
+    case 4: { total = total + 277; }
+    case 5: { total = total + 278; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 280; }
+    case 1: { total = total + 281; }
+    case 2: { total = total + 282; }
+    case 3: { total = total + 283; }
+    case 4: { total = total + 284; }
+    case 5: { total = total + 285; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 287; }
+    case 1: { total = total + 288; }
+    case 2: { total = total + 289; }
+    case 3: { total = total + 290; }
+    case 4: { total = total + 291; }
+    case 5: { total = total + 292; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 294; }
+    case 1: { total = total + 295; }
+    case 2: { total = total + 296; }
+    case 3: { total = total + 297; }
+    case 4: { total = total + 298; }
+    case 5: { total = total + 299; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 301; }
+    case 1: { total = total + 302; }
+    case 2: { total = total + 303; }
+    case 3: { total = total + 304; }
+    case 4: { total = total + 305; }
+    case 5: { total = total + 306; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 308; }
+    case 1: { total = total + 309; }
+    case 2: { total = total + 310; }
+    case 3: { total = total + 311; }
+    case 4: { total = total + 312; }
+    case 5: { total = total + 313; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 315; }
+    case 1: { total = total + 316; }
+    case 2: { total = total + 317; }
+    case 3: { total = total + 318; }
+    case 4: { total = total + 319; }
+    case 5: { total = total + 320; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 322; }
+    case 1: { total = total + 323; }
+    case 2: { total = total + 324; }
+    case 3: { total = total + 325; }
+    case 4: { total = total + 326; }
+    case 5: { total = total + 327; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 329; }
+    case 1: { total = total + 330; }
+    case 2: { total = total + 331; }
+    case 3: { total = total + 332; }
+    case 4: { total = total + 333; }
+    case 5: { total = total + 334; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 336; }
+    case 1: { total = total + 337; }
+    case 2: { total = total + 338; }
+    case 3: { total = total + 339; }
+    case 4: { total = total + 340; }
+    case 5: { total = total + 341; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 343; }
+    case 1: { total = total + 344; }
+    case 2: { total = total + 345; }
+    case 3: { total = total + 346; }
+    case 4: { total = total + 347; }
+    case 5: { total = total + 348; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 350; }
+    case 1: { total = total + 351; }
+    case 2: { total = total + 352; }
+    case 3: { total = total + 353; }
+    case 4: { total = total + 354; }
+    case 5: { total = total + 355; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 357; }
+    case 1: { total = total + 358; }
+    case 2: { total = total + 359; }
+    case 3: { total = total + 360; }
+    case 4: { total = total + 361; }
+    case 5: { total = total + 362; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 364; }
+    case 1: { total = total + 365; }
+    case 2: { total = total + 366; }
+    case 3: { total = total + 367; }
+    case 4: { total = total + 368; }
+    case 5: { total = total + 369; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 371; }
+    case 1: { total = total + 372; }
+    case 2: { total = total + 373; }
+    case 3: { total = total + 374; }
+    case 4: { total = total + 375; }
+    case 5: { total = total + 376; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 378; }
+    case 1: { total = total + 379; }
+    case 2: { total = total + 380; }
+    case 3: { total = total + 381; }
+    case 4: { total = total + 382; }
+    case 5: { total = total + 383; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 385; }
+    case 1: { total = total + 386; }
+    case 2: { total = total + 387; }
+    case 3: { total = total + 388; }
+    case 4: { total = total + 389; }
+    case 5: { total = total + 390; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 392; }
+    case 1: { total = total + 393; }
+    case 2: { total = total + 394; }
+    case 3: { total = total + 395; }
+    case 4: { total = total + 396; }
+    case 5: { total = total + 397; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 399; }
+    case 1: { total = total + 400; }
+    case 2: { total = total + 401; }
+    case 3: { total = total + 402; }
+    case 4: { total = total + 403; }
+    case 5: { total = total + 404; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 406; }
+    case 1: { total = total + 407; }
+    case 2: { total = total + 408; }
+    case 3: { total = total + 409; }
+    case 4: { total = total + 410; }
+    case 5: { total = total + 411; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 413; }
+    case 1: { total = total + 414; }
+    case 2: { total = total + 415; }
+    case 3: { total = total + 416; }
+    case 4: { total = total + 417; }
+    case 5: { total = total + 418; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 420; }
+    case 1: { total = total + 421; }
+    case 2: { total = total + 422; }
+    case 3: { total = total + 423; }
+    case 4: { total = total + 424; }
+    case 5: { total = total + 425; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 427; }
+    case 1: { total = total + 428; }
+    case 2: { total = total + 429; }
+    case 3: { total = total + 430; }
+    case 4: { total = total + 431; }
+    case 5: { total = total + 432; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 434; }
+    case 1: { total = total + 435; }
+    case 2: { total = total + 436; }
+    case 3: { total = total + 437; }
+    case 4: { total = total + 438; }
+    case 5: { total = total + 439; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 441; }
+    case 1: { total = total + 442; }
+    case 2: { total = total + 443; }
+    case 3: { total = total + 444; }
+    case 4: { total = total + 445; }
+    case 5: { total = total + 446; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 448; }
+    case 1: { total = total + 449; }
+    case 2: { total = total + 450; }
+    case 3: { total = total + 451; }
+    case 4: { total = total + 452; }
+    case 5: { total = total + 453; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 455; }
+    case 1: { total = total + 456; }
+    case 2: { total = total + 457; }
+    case 3: { total = total + 458; }
+    case 4: { total = total + 459; }
+    case 5: { total = total + 460; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)0)) {
+    case 0: { total = total + 462; }
+    case 1: { total = total + 463; }
+    case 2: { total = total + 464; }
+    case 3: { total = total + 465; }
+    case 4: { total = total + 466; }
+    case 5: { total = total + 467; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)1)) {
+    case 0: { total = total + 469; }
+    case 1: { total = total + 470; }
+    case 2: { total = total + 471; }
+    case 3: { total = total + 472; }
+    case 4: { total = total + 473; }
+    case 5: { total = total + 474; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)2)) {
+    case 0: { total = total + 476; }
+    case 1: { total = total + 477; }
+    case 2: { total = total + 478; }
+    case 3: { total = total + 479; }
+    case 4: { total = total + 480; }
+    case 5: { total = total + 481; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)3)) {
+    case 0: { total = total + 483; }
+    case 1: { total = total + 484; }
+    case 2: { total = total + 485; }
+    case 3: { total = total + 486; }
+    case 4: { total = total + 487; }
+    case 5: { total = total + 488; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)4)) {
+    case 0: { total = total + 490; }
+    case 1: { total = total + 491; }
+    case 2: { total = total + 492; }
+    case 3: { total = total + 493; }
+    case 4: { total = total + 494; }
+    case 5: { total = total + 495; }
+    default: { total = total - 1; }
+  }
+  switch (pick((int64)5)) {
+    case 0: { total = total + 497; }
+    case 1: { total = total + 498; }
+    case 2: { total = total + 499; }
+    case 3: { total = total + 500; }
+    case 4: { total = total + 501; }
+    case 5: { total = total + 502; }
+    default: { total = total - 1; }
+  }
+  if (total != 18072) { return 1; }
+  return 0;
+}
