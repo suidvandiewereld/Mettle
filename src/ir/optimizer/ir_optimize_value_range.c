@@ -115,6 +115,7 @@ void ir_value_range_ctx_destroy(IRValueRangeCtx *ctx) {
   ir_temp_value_map_destroy(&ctx->monotone);
   ir_temp_value_map_destroy(&ctx->label_guard);
   ir_temp_value_map_destroy(&ctx->unique_def);
+  ir_temp_value_map_destroy(&ctx->label_refs);
   ctx->built = 0;
   ctx->ok = 0;
 }
@@ -167,6 +168,19 @@ static int vr_ctx_populate(IRValueRangeCtx *ctx) {
       return 0;
     }
   }
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *in = &fn->instructions[i];
+    if (!in->text || (in->op != IR_OP_JUMP && in->op != IR_OP_BRANCH_ZERO &&
+                      in->op != IR_OP_BRANCH_EQ)) {
+      continue;
+    }
+    const IROperand *seen = ir_temp_value_map_lookup(&ctx->label_refs, in->text);
+    IROperand value = ir_operand_int(
+        seen ? -2 : (in->op == IR_OP_BRANCH_ZERO ? (long long)i + 1 : -1));
+    if (!ir_temp_value_map_set(&ctx->label_refs, in->text, &value)) {
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -183,7 +197,8 @@ static int vr_ctx_build(IRValueRangeCtx *ctx) {
       !ir_temp_value_map_init(&ctx->addr_taken) ||
       !ir_temp_value_map_init(&ctx->monotone) ||
       !ir_temp_value_map_init(&ctx->label_guard) ||
-      !ir_temp_value_map_init(&ctx->unique_def)) {
+      !ir_temp_value_map_init(&ctx->unique_def) ||
+      !ir_temp_value_map_init(&ctx->label_refs)) {
     ir_value_range_ctx_destroy(ctx);
     ctx->built = 1;
     return 0;
@@ -346,37 +361,11 @@ static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
     break;
   }
 
+  const IROperand *refs = ir_temp_value_map_lookup(&ctx->label_refs, label);
   if (fallthrough_reaches) {
-    transparent = 1;
-    for (size_t i = 0; i < fn->instruction_count && transparent; i++) {
-      const IRInstruction *in = &fn->instructions[i];
-      if (in->text && (in->op == IR_OP_JUMP || in->op == IR_OP_BRANCH_ZERO ||
-                       in->op == IR_OP_BRANCH_EQ) &&
-          strcmp(in->text, label) == 0) {
-        transparent = 0;
-      }
-    }
-  }
-
-  if (!fallthrough_reaches) {
-    size_t sole = (size_t)-1;
-    int usable = 1;
-    for (size_t i = 0; i < fn->instruction_count && usable; i++) {
-      const IRInstruction *in = &fn->instructions[i];
-      if (!in->text || (in->op != IR_OP_JUMP && in->op != IR_OP_BRANCH_ZERO &&
-                        in->op != IR_OP_BRANCH_EQ) ||
-          strcmp(in->text, label) != 0) {
-        continue;
-      }
-      if (in->op != IR_OP_BRANCH_ZERO || sole != (size_t)-1) {
-        usable = 0;
-        break;
-      }
-      sole = i;
-    }
-    if (usable) {
-      result = sole;
-    }
+    transparent = refs == NULL;
+  } else if (refs && refs->kind == IR_OPERAND_INT && refs->int_value > 0) {
+    result = (size_t)(refs->int_value - 1);
   }
 
   IROperand value = ir_operand_int(

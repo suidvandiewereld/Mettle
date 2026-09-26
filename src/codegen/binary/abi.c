@@ -19,6 +19,18 @@ int code_generator_binary_get_local_offset(BinaryFunctionContext *context,
   return binary_named_slot_table_get_offset(&context->local_slots, name);
 }
 
+static int binary_function_has_safety_registers(const IRFunction *function) {
+  for (size_t i = 0; function && i < function->instruction_count; i++) {
+    const IRInstruction *call = &function->instructions[i];
+    if (call->op == IR_OP_CALL && call->text &&
+        (strcmp(call->text, "mettle_safety_register") == 0 ||
+         strcmp(call->text, "mettle_safety_register_static") == 0)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int binary_function_local_is_safety_described(const IRFunction *function,
                                               const char *name) {
   if (!function || !name) {
@@ -342,12 +354,77 @@ size_t code_generator_binary_symbol_write_count(
   return count;
 }
 
+typedef struct {
+  const char **names;
+  size_t *counts;
+  size_t mask;
+} BinaryWriteCounts;
+
+static size_t *binary_write_count_slot(BinaryWriteCounts *wc,
+                                       const char *name) {
+  size_t h = mettle_fnv1a_hash(name) & wc->mask;
+  while (wc->names[h] && strcmp(wc->names[h], name) != 0) {
+    h = (h + 1) & wc->mask;
+  }
+  if (!wc->names[h]) {
+    wc->names[h] = name;
+  }
+  return &wc->counts[h];
+}
+
+static int binary_write_counts_build(const IRFunction *function,
+                                     BinaryWriteCounts *wc) {
+  size_t capacity = 16;
+  while (capacity < (function->instruction_count + function->parameter_count) * 2) {
+    capacity *= 2;
+  }
+  wc->names = (const char **)calloc(capacity, sizeof(*wc->names));
+  wc->counts = (size_t *)calloc(capacity, sizeof(*wc->counts));
+  wc->mask = capacity - 1;
+  if (!wc->names || !wc->counts) {
+    free(wc->names);
+    free(wc->counts);
+    wc->names = NULL;
+    wc->counts = NULL;
+    return 0;
+  }
+  for (size_t p = 0; p < function->parameter_count; p++) {
+    if (function->parameter_names && function->parameter_names[p]) {
+      size_t *slot = binary_write_count_slot(wc, function->parameter_names[p]);
+      if (*slot == 0) {
+        *slot = 1;
+      }
+    }
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    if (!code_generator_binary_instruction_writes_dest(instruction->op) ||
+        instruction->dest.kind != IR_OPERAND_SYMBOL ||
+        !instruction->dest.name) {
+      continue;
+    }
+    (*binary_write_count_slot(wc, instruction->dest.name))++;
+  }
+  return 1;
+}
+
+static size_t binary_write_count(BinaryWriteCounts *wc,
+                                 const IRFunction *function,
+                                 const char *name) {
+  if (!wc->names) {
+    return code_generator_binary_symbol_write_count(function, name);
+  }
+  return *binary_write_count_slot(wc, name);
+}
+
 int code_generator_binary_collect_symbol_aliases(
     CodeGenerator *generator, BinaryFunctionContext *context,
     IRFunction *ir_function) {
+  BinaryWriteCounts writes = {NULL, NULL, 0};
   if (!generator || !context || !ir_function) {
     return 0;
   }
+  binary_write_counts_build(ir_function, &writes);
 
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
     const IRInstruction *instruction = &ir_function->instructions[i];
@@ -370,8 +447,8 @@ int code_generator_binary_collect_symbol_aliases(
     if (strcmp(name, target) == 0 ||
         code_generator_binary_get_local_offset(context, name) <= 0 ||
         code_generator_binary_get_symbol_offset(context, target) <= 0 ||
-        code_generator_binary_symbol_write_count(ir_function, name) != 1 ||
-        code_generator_binary_symbol_write_count(ir_function, target) != 1 ||
+        binary_write_count(&writes, ir_function, name) != 1 ||
+        binary_write_count(&writes, ir_function, target) != 1 ||
         binary_named_slot_table_get_offset(&context->address_taken_symbols,
                                            name) >= 0 ||
         binary_named_slot_table_get_offset(&context->address_taken_symbols,
@@ -416,10 +493,14 @@ int code_generator_binary_collect_symbol_aliases(
           generator,
           "Failed to record local alias '%s' in direct object function '%s'",
           name, context->function_name);
+      free(writes.names);
+      free(writes.counts);
       return 0;
     }
   }
 
+  free(writes.names);
+  free(writes.counts);
   return 1;
 }
 
@@ -1722,6 +1803,8 @@ int code_generator_binary_prepare_function_context(
   size_t temp_slot_count = 0;
   size_t local_slot_count = 0;
   int local_storage_size_total = 0;
+  const int function_has_safety =
+      binary_function_has_safety_registers(ir_function);
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
     const IRInstruction *instruction = &ir_function->instructions[i];
     const MtlcType *local_type = NULL;
@@ -1772,6 +1855,7 @@ int code_generator_binary_prepare_function_context(
                                       : (int)local_type->size;
 
     safety_described =
+        function_has_safety &&
         binary_function_local_is_safety_described(ir_function,
                                                   instruction->dest.name);
     if (safety_described) {

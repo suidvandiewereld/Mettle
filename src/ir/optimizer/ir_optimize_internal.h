@@ -279,6 +279,7 @@ typedef struct {
   IRTempValueMap monotone;
   IRTempValueMap label_guard;
   IRTempValueMap unique_def;
+  IRTempValueMap label_refs;
   int built;
   int ok;
 } IRValueRangeCtx;
