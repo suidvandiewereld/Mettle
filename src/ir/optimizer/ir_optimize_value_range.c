@@ -936,6 +936,60 @@ static int vr_operand_is_unsigned(IRValueRangeCtx *ctx,
   return -1;
 }
 
+static int vr_reads_temp(const IRInstruction *use, const char *name) {
+  if (ir_operand_is_temp_named(&use->lhs, name) ||
+      ir_operand_is_temp_named(&use->rhs, name)) {
+    return 1;
+  }
+  if (use->op == IR_OP_STORE && ir_operand_is_temp_named(&use->dest, name)) {
+    return 1;
+  }
+  for (size_t a = 0; a < use->argument_count; a++) {
+    if (ir_operand_is_temp_named(&use->arguments[a], name)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int vr_use_ignores_signedness(const IRInstruction *use) {
+  static const char *const kOps[] = {"+", "-", "*", "&", "|",
+                                     "^", "<<", "==", "!="};
+  switch (use->op) {
+  case IR_OP_STORE:
+  case IR_OP_CAST:
+  case IR_OP_CALL:
+  case IR_OP_RETURN:
+    return 1;
+  case IR_OP_BINARY:
+    if (use->is_float || !use->text) {
+      return 0;
+    }
+    for (size_t k = 0; k < sizeof(kOps) / sizeof(kOps[0]); k++) {
+      if (strcmp(use->text, kOps[k]) == 0) {
+        return 1;
+      }
+    }
+    return 0;
+  default:
+    return 0;
+  }
+}
+
+static int vr_readers_ignore_signedness(const IRFunction *function,
+                                        const IROperand *dest) {
+  if (dest->kind != IR_OPERAND_TEMP || !dest->name) {
+    return 0;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *use = &function->instructions[i];
+    if (vr_reads_temp(use, dest->name) && !vr_use_ignores_signedness(use)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int vr_cast_is_identity(IRValueRangeCtx *ctx, size_t at,
                                const IRInstruction *in) {
   int bits = 0;
@@ -953,7 +1007,10 @@ static int vr_cast_is_identity(IRValueRangeCtx *ctx, size_t at,
   if (!vr_oracle_bounds_fit(a.lo, a.hi, bits, uns)) {
     return 0;
   }
-  return vr_operand_is_unsigned(ctx, &in->lhs) == uns;
+  if (vr_operand_is_unsigned(ctx, &in->lhs) == uns) {
+    return 1;
+  }
+  return vr_readers_ignore_signedness(ctx->function, &in->dest);
 }
 
 int ir_drop_redundant_int_casts_pass(IRFunction *function, int *changed) {
