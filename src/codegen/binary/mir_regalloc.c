@@ -355,6 +355,7 @@ static int mir_collect_back_edges(const MirFunction *fn,
 }
 
 #define MIR_LIVE_CFG_MAX_WORK 8000000u
+#define MIR_INTER_DENSE_MAX_BYTES (64u << 20)
 
 typedef struct {
   size_t *slots;
@@ -1685,18 +1686,104 @@ static long long mir_color_metric(const MirColorState *st, size_t v) {
   return (long long)st->cost[v] * 1000 / (st->degree[v] + 1);
 }
 
+void mir_inter_set(MirColorState *st, size_t a, size_t b) {
+  MirInterRow *row;
+  uint32_t word = (uint32_t)(b >> 6);
+  uint32_t at;
+  if (!st->rows) {
+    st->inter[a * st->words + (b >> 6)] |= (uint64_t)1 << (b & 63);
+    return;
+  }
+  row = &st->rows[a];
+  at = mir_inter_row_find(row, word);
+  if (at < row->count && row->idx[at] == word) {
+    row->bits[at] |= (uint64_t)1 << (b & 63);
+    return;
+  }
+  if (row->count >= row->capacity) {
+    uint32_t capacity = row->capacity ? row->capacity * 2u : 4u;
+    uint32_t *idx = (uint32_t *)realloc(row->idx, capacity * sizeof(uint32_t));
+    uint64_t *bits;
+    if (!idx) {
+      st->fn->has_error = 1;
+      return;
+    }
+    row->idx = idx;
+    bits = (uint64_t *)realloc(row->bits, capacity * sizeof(uint64_t));
+    if (!bits) {
+      st->fn->has_error = 1;
+      return;
+    }
+    row->bits = bits;
+    row->capacity = capacity;
+  }
+  memmove(&row->idx[at + 1u], &row->idx[at],
+          (row->count - at) * sizeof(uint32_t));
+  memmove(&row->bits[at + 1u], &row->bits[at],
+          (row->count - at) * sizeof(uint64_t));
+  row->idx[at] = word;
+  row->bits[at] = (uint64_t)1 << (b & 63);
+  row->count++;
+}
+
+void mir_inter_clear(MirColorState *st, size_t a, size_t b) {
+  MirInterRow *row;
+  uint32_t word = (uint32_t)(b >> 6);
+  uint32_t at;
+  if (!st->rows) {
+    st->inter[a * st->words + (b >> 6)] &= ~((uint64_t)1 << (b & 63));
+    return;
+  }
+  row = &st->rows[a];
+  at = mir_inter_row_find(row, word);
+  if (at < row->count && row->idx[at] == word) {
+    row->bits[at] &= ~((uint64_t)1 << (b & 63));
+  }
+}
+
+void mir_inter_clear_row(MirColorState *st, size_t a) {
+  if (!st->rows) {
+    memset(st->inter + a * st->words, 0, st->words * sizeof(uint64_t));
+    return;
+  }
+  st->rows[a].count = 0;
+}
+
+static size_t mir_inter_bit_count(const MirColorState *st) {
+  size_t total = 0;
+  if (!st->rows) {
+    for (size_t w = 0; w < st->count * st->words; w++) {
+      total += (size_t)__builtin_popcountll(st->inter[w]);
+    }
+    return total;
+  }
+  for (size_t a = 0; a < st->count; a++) {
+    for (uint32_t w = 0; w < st->rows[a].count; w++) {
+      total += (size_t)__builtin_popcountll(st->rows[a].bits[w]);
+    }
+  }
+  return total;
+}
+
 static void mir_inter_add(MirColorState *st, size_t a, size_t b) {
   if (a == b || mir_inter_get(st, a, b)) {
     return;
   }
-  st->inter[a * st->words + (b >> 6)] |= (uint64_t)1 << (b & 63);
-  st->inter[b * st->words + (a >> 6)] |= (uint64_t)1 << (a & 63);
+  mir_inter_set(st, a, b);
+  mir_inter_set(st, b, a);
   st->degree[a]++;
   st->degree[b]++;
 }
 
 static void mir_color_state_free(MirColorState *st) {
   free(st->inter);
+  if (st->rows) {
+    for (size_t a = 0; a < st->count; a++) {
+      free(st->rows[a].idx);
+      free(st->rows[a].bits);
+    }
+  }
+  free(st->rows);
   free(st->mask);
   free(st->degree);
   free(st->cost);
@@ -1725,7 +1812,11 @@ static int mir_color_state_init(MirColorState *st, MirFunction *fn,
   st->facts = facts;
   st->count = n;
   st->words = (n + 63) / 64;
-  st->inter = (uint64_t *)calloc(n * st->words, sizeof(uint64_t));
+  if (n * st->words * sizeof(uint64_t) > MIR_INTER_DENSE_MAX_BYTES) {
+    st->rows = (MirInterRow *)calloc(n ? n : 1, sizeof(MirInterRow));
+  } else {
+    st->inter = (uint64_t *)calloc(n * st->words, sizeof(uint64_t));
+  }
   st->mask = (uint32_t *)calloc(n, sizeof(uint32_t));
   st->degree = (int *)calloc(n, sizeof(int));
   st->cost = (int *)calloc(n, sizeof(int));
@@ -1739,7 +1830,8 @@ static int mir_color_state_init(MirColorState *st, MirFunction *fn,
   st->rep = (MirVregId *)malloc(n * sizeof(MirVregId));
   st->phys_hint = (int *)malloc(n * sizeof(int));
   st->copy_partner = (MirVregId *)malloc(n * sizeof(MirVregId));
-  if (!st->inter || !st->mask || !st->degree || !st->cost || !st->colorable ||
+  if ((!st->inter && !st->rows) || !st->mask || !st->degree || !st->cost ||
+      !st->colorable ||
       !st->removed || !st->reg_count || !st->metric || !st->stack ||
       !st->use_depth || !st->rep || !st->phys_hint || !st->copy_partner) {
     mir_color_state_free(st);
@@ -1982,9 +2074,7 @@ static int mir_color_order_vregs_heap(MirColorState *st, size_t remaining,
   size_t sp = 0;
   size_t capacity = remaining + 1;
 
-  for (size_t w = 0; w < st->count * st->words; w++) {
-    capacity += (size_t)__builtin_popcountll(st->inter[w]);
-  }
+  capacity += mir_inter_bit_count(st);
   if (capacity - remaining - 1 > remaining * remaining / 32) {
     return 0;
   }

@@ -34,14 +34,6 @@ static int mir_coalesce_is_copy(const MirInst *in) {
          in->a.kind == MIR_OPK_VREG;
 }
 
-static void mir_inter_set(MirColorState *st, size_t a, size_t b) {
-  st->inter[a * st->words + (b >> 6)] |= (uint64_t)1 << (b & 63);
-}
-
-static void mir_inter_clear(MirColorState *st, size_t a, size_t b) {
-  st->inter[a * st->words + (b >> 6)] &= ~((uint64_t)1 << (b & 63));
-}
-
 static int mir_coalesce_significant(const MirColorState *st, size_t x,
                                     int lost) {
   return st->degree[x] - lost >= st->reg_count[x];
@@ -99,7 +91,7 @@ static void mir_coalesce_merge_edges(MirColorState *st, size_t u, size_t v) {
       st->degree[x]++;
     }
   }
-  memset(st->inter + v * st->words, 0, st->words * sizeof(uint64_t));
+  mir_inter_clear_row(st, v);
   st->degree[v] = 0;
 }
 
