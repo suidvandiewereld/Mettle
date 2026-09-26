@@ -268,6 +268,12 @@ typedef struct {
 } IRSroaMemberCtx;
 
 typedef struct {
+  const char **names;
+  size_t *values;
+  size_t capacity;
+} IRNameIndex;
+
+typedef struct {
   long long lo;
   long long hi;
 } IRIntRange;
@@ -280,6 +286,12 @@ typedef struct {
   IRTempValueMap label_guard;
   IRTempValueMap unique_def;
   IRTempValueMap label_refs;
+  IRNameIndex symbol_groups;
+  size_t *symbol_sites;
+  size_t *symbol_group_start;
+  size_t symbol_sites_insns;
+  uint64_t symbol_sites_writes;
+  int symbol_sites_built;
   int built;
   int ok;
 } IRValueRangeCtx;
@@ -380,6 +392,8 @@ const char *ir_opt_pass_name(IROptPassId pass_id);
 
 int ir_binary_is_unit_increment_of_iv(const IRInstruction *instruction,
                                              const char *iv_symbol);
+int ir_symbol_int_map_step(const IRInstruction *instruction,
+                           IRSymbolValueMap *symbol_map);
 int ir_build_symbol_int_map_before(const IRFunction *function,
                                           size_t before_index,
                                           IRSymbolValueMap *symbol_map);
@@ -447,11 +461,6 @@ int ir_find_label_index(const IRFunction *function, const char *label,
 int ir_find_last_writer_before(const IRFunction *function, size_t before_index,
                                       IROperandKind kind, const char *name,
                                       size_t *writer_index);
-typedef struct {
-  const char **names;
-  size_t *values;
-  size_t capacity;
-} IRNameIndex;
 
 typedef struct {
   IRNameIndex symbol_defs;

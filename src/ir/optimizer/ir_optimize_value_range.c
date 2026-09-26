@@ -116,6 +116,14 @@ void ir_value_range_ctx_destroy(IRValueRangeCtx *ctx) {
   ir_temp_value_map_destroy(&ctx->label_guard);
   ir_temp_value_map_destroy(&ctx->unique_def);
   ir_temp_value_map_destroy(&ctx->label_refs);
+  if (ctx->symbol_sites_built) {
+    ir_name_index_destroy(&ctx->symbol_groups);
+  }
+  free(ctx->symbol_sites);
+  free(ctx->symbol_group_start);
+  ctx->symbol_sites = NULL;
+  ctx->symbol_group_start = NULL;
+  ctx->symbol_sites_built = 0;
   ctx->built = 0;
   ctx->ok = 0;
 }
@@ -190,6 +198,9 @@ static int vr_ctx_build(IRValueRangeCtx *ctx) {
   }
   ctx->built = 1;
   ctx->ok = 0;
+  ctx->symbol_sites = NULL;
+  ctx->symbol_group_start = NULL;
+  ctx->symbol_sites_built = 0;
   if (!ctx->function) {
     return 0;
   }
@@ -467,6 +478,127 @@ static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
 
 #define VR_IV_MAX_STEP (1ll << 20)
 
+static int vr_monotone_write(const IRInstruction *in, const char *symbol,
+                             int *saw_init) {
+  if (!ir_instruction_writes_destination(in) ||
+      in->dest.kind != IR_OPERAND_SYMBOL || !in->dest.name ||
+      strcmp(in->dest.name, symbol) != 0) {
+    return 1;
+  }
+  if (in->is_float) {
+    return 0;
+  }
+  if (in->op == IR_OP_ASSIGN && in->lhs.kind == IR_OPERAND_INT &&
+      in->lhs.int_value >= 0) {
+    *saw_init = 1;
+    return 1;
+  }
+  if (in->op == IR_OP_BINARY && in->text && strcmp(in->text, "+") == 0 &&
+      ir_operand_is_symbol_named(&in->lhs, symbol) &&
+      in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 0 &&
+      in->rhs.int_value <= VR_IV_MAX_STEP) {
+    return 1;
+  }
+  return 0;
+}
+
+static int vr_monotone_scan(const IRFunction *fn, const char *symbol) {
+  int saw_init = 0;
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    if (!vr_monotone_write(&fn->instructions[i], symbol, &saw_init)) {
+      return 0;
+    }
+  }
+  return saw_init;
+}
+
+static int vr_symbol_sites_build(IRValueRangeCtx *ctx) {
+  const IRFunction *fn = ctx->function;
+  size_t candidates = 0;
+  size_t groups = 0;
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *in = &fn->instructions[i];
+    if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
+      candidates++;
+    }
+  }
+  if (!ir_name_index_init(&ctx->symbol_groups, candidates)) {
+    return 0;
+  }
+  ctx->symbol_sites_built = 1;
+  ctx->symbol_sites =
+      (size_t *)malloc((candidates ? candidates : 1) * sizeof(size_t));
+  ctx->symbol_group_start =
+      (size_t *)calloc(candidates + 2, sizeof(size_t));
+  size_t *fill = (size_t *)calloc(candidates + 1, sizeof(size_t));
+  if (!ctx->symbol_sites || !ctx->symbol_group_start || !fill) {
+    free(fill);
+    return 0;
+  }
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *in = &fn->instructions[i];
+    size_t group = 0;
+    if (in->dest.kind != IR_OPERAND_SYMBOL || !in->dest.name) {
+      continue;
+    }
+    if (!ir_name_index_find(&ctx->symbol_groups, in->dest.name, &group)) {
+      group = groups++;
+      ir_name_index_insert(&ctx->symbol_groups, in->dest.name, group);
+    }
+    ctx->symbol_group_start[group + 1]++;
+  }
+  for (size_t g = 0; g < groups; g++) {
+    ctx->symbol_group_start[g + 1] += ctx->symbol_group_start[g];
+  }
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *in = &fn->instructions[i];
+    size_t group = 0;
+    if (in->dest.kind != IR_OPERAND_SYMBOL || !in->dest.name ||
+        !ir_name_index_find(&ctx->symbol_groups, in->dest.name, &group)) {
+      continue;
+    }
+    ctx->symbol_sites[ctx->symbol_group_start[group] + fill[group]++] = i;
+  }
+  free(fill);
+  ctx->symbol_sites_insns = fn->instruction_count;
+  ctx->symbol_sites_writes = g_ir_operand_writes;
+  return 1;
+}
+
+static int vr_symbol_sites_ready(IRValueRangeCtx *ctx) {
+  if (ctx->symbol_sites_built &&
+      ctx->symbol_sites_insns == ctx->function->instruction_count &&
+      ctx->symbol_sites_writes == g_ir_operand_writes) {
+    return ctx->symbol_sites != NULL && ctx->symbol_group_start != NULL;
+  }
+  if (ctx->symbol_sites_built) {
+    ir_name_index_destroy(&ctx->symbol_groups);
+  }
+  free(ctx->symbol_sites);
+  free(ctx->symbol_group_start);
+  ctx->symbol_sites = NULL;
+  ctx->symbol_group_start = NULL;
+  ctx->symbol_sites_built = 0;
+  return vr_symbol_sites_build(ctx);
+}
+
+static int vr_monotone_from_sites(const IRValueRangeCtx *ctx,
+                                  const char *symbol) {
+  size_t group = 0;
+  int saw_init = 0;
+  if (!ir_name_index_find(&ctx->symbol_groups, symbol, &group)) {
+    return 0;
+  }
+  for (size_t p = ctx->symbol_group_start[group];
+       p < ctx->symbol_group_start[group + 1]; p++) {
+    if (!vr_monotone_write(&ctx->function->instructions[ctx->symbol_sites[p]],
+                           symbol, &saw_init)) {
+      return 0;
+    }
+  }
+  return saw_init;
+}
+
 static int vr_symbol_is_monotone_counter(IRValueRangeCtx *ctx,
                                          const char *symbol) {
   if (!symbol) {
@@ -481,35 +613,10 @@ static int vr_symbol_is_monotone_counter(IRValueRangeCtx *ctx,
   int result = 0;
   if (enc && enc->kind == IR_OPERAND_INT && VR_TYPE_BITS(enc->int_value) == 64 &&
       !VR_TYPE_UNSIGNED(enc->int_value)) {
-    const IRFunction *fn = ctx->function;
-    int saw_init = 0;
-    result = 1;
-    for (size_t i = 0; i < fn->instruction_count && result; i++) {
-      const IRInstruction *in = &fn->instructions[i];
-      if (!ir_instruction_writes_destination(in) ||
-          in->dest.kind != IR_OPERAND_SYMBOL || !in->dest.name ||
-          strcmp(in->dest.name, symbol) != 0) {
-        continue;
-      }
-      if (in->is_float) {
-        result = 0;
-        break;
-      }
-      if (in->op == IR_OP_ASSIGN && in->lhs.kind == IR_OPERAND_INT &&
-          in->lhs.int_value >= 0) {
-        saw_init = 1;
-        continue;
-      }
-      if (in->op == IR_OP_BINARY && in->text && strcmp(in->text, "+") == 0 &&
-          ir_operand_is_symbol_named(&in->lhs, symbol) &&
-          in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 0 &&
-          in->rhs.int_value <= VR_IV_MAX_STEP) {
-        continue;
-      }
-      result = 0;
-    }
-    if (!saw_init) {
-      result = 0;
+    if (vr_symbol_sites_ready(ctx)) {
+      result = vr_monotone_from_sites(ctx, symbol);
+    } else {
+      result = vr_monotone_scan(ctx->function, symbol);
     }
     if (result && vr_symbol_address_taken(ctx, symbol)) {
       result = 0;

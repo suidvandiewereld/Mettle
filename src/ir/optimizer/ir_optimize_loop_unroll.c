@@ -91,9 +91,124 @@ static int ir_try_parse_loop_increment(const IRFunction *function, size_t body_s
   return 0;
 }
 
+typedef struct {
+  IRSymbolValueMap prefix;
+  size_t upto;
+  IRNameIndex tail_writes;
+  size_t last_barrier;
+  int has_barrier;
+  size_t backedge;
+  int has_backedge;
+} IRUnrollSymbols;
+
+static int ir_unroll_symbols_init(IRUnrollSymbols *symbols,
+                                  const IRFunction *function) {
+  memset(symbols, 0, sizeof(*symbols));
+  if (!ir_temp_value_map_init(&symbols->prefix)) {
+    return 0;
+  }
+  if (!ir_name_index_init(&symbols->tail_writes,
+                          function->instruction_count * 3)) {
+    ir_temp_value_map_destroy(&symbols->prefix);
+    return 0;
+  }
+  for (size_t k = function->instruction_count; k-- > 0;) {
+    const IRInstruction *instruction = &function->instructions[k];
+    if (instruction->op == IR_OP_NOP) {
+      continue;
+    }
+    if (instruction->op == IR_OP_CALL ||
+        instruction->op == IR_OP_CALL_INDIRECT ||
+        instruction->op == IR_OP_STORE ||
+        instruction->op == IR_OP_INLINE_ASM) {
+      if (!symbols->has_barrier) {
+        symbols->last_barrier = k;
+        symbols->has_barrier = 1;
+      }
+      continue;
+    }
+    if (instruction->op == IR_OP_ROTATE_ADD) {
+      if (instruction->lhs.name) {
+        ir_name_index_insert(&symbols->tail_writes, instruction->lhs.name, k);
+      }
+      if (instruction->rhs.name) {
+        ir_name_index_insert(&symbols->tail_writes, instruction->rhs.name, k);
+      }
+    }
+    if (ir_instruction_writes_destination(instruction) &&
+        instruction->dest.kind == IR_OPERAND_SYMBOL &&
+        instruction->dest.name) {
+      ir_name_index_insert(&symbols->tail_writes, instruction->dest.name, k);
+    }
+  }
+  return 1;
+}
+
+static void ir_unroll_symbols_destroy(IRUnrollSymbols *symbols) {
+  ir_temp_value_map_destroy(&symbols->prefix);
+  ir_name_index_destroy(&symbols->tail_writes);
+}
+
+static int ir_unroll_symbols_at(IRUnrollSymbols *symbols,
+                                const IRFunction *function,
+                                size_t header_index) {
+  for (; symbols->upto < header_index &&
+         symbols->upto < function->instruction_count;
+       symbols->upto++) {
+    if (!ir_symbol_int_map_step(&function->instructions[symbols->upto],
+                                &symbols->prefix)) {
+      return 0;
+    }
+  }
+  symbols->has_backedge = 0;
+  const char *loop_label = function->instructions[header_index].text;
+  for (size_t j = header_index + 1; j < function->instruction_count; j++) {
+    const IRInstruction *jump = &function->instructions[j];
+    if (jump->op == IR_OP_JUMP && jump->text &&
+        strcmp(jump->text, loop_label) == 0) {
+      symbols->backedge = j;
+      symbols->has_backedge = 1;
+      break;
+    }
+  }
+  return 1;
+}
+
+static int ir_unroll_resolve_int(const IRUnrollSymbols *symbols,
+                                 const IROperand *operand,
+                                 long long *out_value) {
+  if (!operand || !out_value) {
+    return 0;
+  }
+  if (operand->kind == IR_OPERAND_INT) {
+    *out_value = operand->int_value;
+    return 1;
+  }
+  if (operand->kind != IR_OPERAND_SYMBOL || !operand->name) {
+    return 0;
+  }
+  if (symbols->has_backedge) {
+    size_t written = 0;
+    if (symbols->has_barrier && symbols->last_barrier > symbols->backedge) {
+      return 0;
+    }
+    if (ir_name_index_find(&symbols->tail_writes, operand->name, &written) &&
+        written > symbols->backedge) {
+      return 0;
+    }
+  }
+  const IROperand *mapped =
+      ir_temp_value_map_lookup(&symbols->prefix, operand->name);
+  if (mapped && mapped->kind == IR_OPERAND_INT) {
+    *out_value = mapped->int_value;
+    return 1;
+  }
+  return 0;
+}
+
 static int ir_try_parse_counted_while_loop(const IRFunction *function,
                                            size_t header_index,
-                                           const IRSymbolValueMap *symbol_map,
+                                           const IRUnrollSymbols *symbols,
                                            const char **counter_symbol_out,
                                            long long *start_value_out,
                                            long long *limit_value_out,
@@ -103,7 +218,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
                                            size_t *body_end_out,
                                            size_t *jump_index_out,
                                            size_t *increment_index_out) {
-  if (!function || !symbol_map || !counter_symbol_out || !start_value_out ||
+  if (!function || !symbols || !counter_symbol_out || !start_value_out ||
       !limit_value_out || !inclusive_out || !step_out || !branch_index_out ||
       !body_start_out || !body_end_out || !jump_index_out ||
       !increment_index_out) {
@@ -187,7 +302,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
     counter_symbol =
         compare->rhs.kind == IR_OPERAND_SYMBOL ? compare->rhs.name : NULL;
     limit_operand = &compare->lhs;
-    if (!ir_operand_resolve_symbol_int(symbol_map, &compare->lhs, &limit_value) ||
+    if (!ir_unroll_resolve_int(symbols, &compare->lhs, &limit_value) ||
         !counter_symbol) {
       return 0;
     }
@@ -197,7 +312,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
     counter_symbol =
         compare->rhs.kind == IR_OPERAND_SYMBOL ? compare->rhs.name : NULL;
     limit_operand = &compare->lhs;
-    if (!ir_operand_resolve_symbol_int(symbol_map, &compare->lhs, &limit_value) ||
+    if (!ir_unroll_resolve_int(symbols, &compare->lhs, &limit_value) ||
         !counter_symbol) {
       return 0;
     }
@@ -210,14 +325,14 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
       compare->lhs.kind == IR_OPERAND_SYMBOL ? compare->lhs.name : NULL;
   limit_operand = &compare->rhs;
   if (!counter_symbol ||
-      !ir_operand_resolve_symbol_int(symbol_map, &compare->rhs, &limit_value)) {
+      !ir_unroll_resolve_int(symbols, &compare->rhs, &limit_value)) {
     return 0;
   }
 
 parsed_compare: {
   IROperand counter_operand = ir_operand_symbol(counter_symbol);
   if (!counter_operand.name ||
-      !ir_operand_resolve_symbol_int(symbol_map, &counter_operand,
+      !ir_unroll_resolve_int(symbols, &counter_operand,
                                      start_value_out)) {
     return 0;
   }
@@ -453,16 +568,11 @@ static int ir_unroll_header_reaches_branch(const IRFunction *function,
 }
 
 static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
-                                 int *changed) {
-  IRSymbolValueMap symbol_map;
+                                 IRUnrollSymbols *symbols, int *changed) {
   if (!ir_unroll_header_reaches_branch(function, header_index)) {
     return 1;
   }
-  if (!ir_temp_value_map_init(&symbol_map)) {
-    return 0;
-  }
-  if (!ir_build_symbol_int_map_before(function, header_index, &symbol_map)) {
-    ir_temp_value_map_destroy(&symbol_map);
+  if (!ir_unroll_symbols_at(symbols, function, header_index)) {
     return 0;
   }
 
@@ -477,12 +587,11 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
   size_t jump_index = 0;
   size_t increment_index = 0;
 
-  if (!ir_try_parse_counted_while_loop(function, header_index, &symbol_map,
+  if (!ir_try_parse_counted_while_loop(function, header_index, symbols,
                                        &counter_symbol, &start_value,
                                        &limit_value, &inclusive, &step,
                                        &branch_index, &body_start, &body_end,
                                        &jump_index, &increment_index)) {
-    ir_temp_value_map_destroy(&symbol_map);
     return 1;
   }
 
@@ -499,7 +608,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
       ir_opt_unroll_max_trip_count(function,
                                    function->instructions[header_index].location);
   if (trips <= 0 || trips > max_trips) {
-    ir_temp_value_map_destroy(&symbol_map);
     return 1;
   }
 
@@ -514,7 +622,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
         !ir_instruction_vector_append_move(&vector, &cloned)) {
       ir_instruction_destroy_storage(&cloned);
       ir_instruction_vector_destroy(&vector);
-      ir_temp_value_map_destroy(&symbol_map);
       return 0;
     }
   }
@@ -537,7 +644,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
           !ir_instruction_vector_append_move(&vector, &cloned)) {
         ir_instruction_destroy_storage(&cloned);
         ir_instruction_vector_destroy(&vector);
-        ir_temp_value_map_destroy(&symbol_map);
         ir_unroll_temp_set_destroy(&private_temps);
         return 0;
       }
@@ -554,7 +660,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
         !ir_instruction_vector_append_move(&vector, &final_value)) {
       ir_instruction_destroy_storage(&final_value);
       ir_instruction_vector_destroy(&vector);
-      ir_temp_value_map_destroy(&symbol_map);
       return 0;
     }
   }
@@ -569,7 +674,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
           !ir_instruction_vector_append_move(&vector, &exit_jump)) {
         ir_instruction_destroy_storage(&exit_jump);
         ir_instruction_vector_destroy(&vector);
-        ir_temp_value_map_destroy(&symbol_map);
         return 0;
       }
     }
@@ -581,7 +685,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
         !ir_instruction_vector_append_move(&vector, &cloned)) {
       ir_instruction_destroy_storage(&cloned);
       ir_instruction_vector_destroy(&vector);
-      ir_temp_value_map_destroy(&symbol_map);
       return 0;
     }
   }
@@ -590,7 +693,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
 
   if (!ir_function_replace_instructions(function, &vector)) {
     ir_instruction_vector_destroy(&vector);
-    ir_temp_value_map_destroy(&symbol_map);
     return 0;
   }
 
@@ -605,7 +707,6 @@ static int ir_try_unroll_loop_at(IRFunction *function, size_t header_index,
     ir_explain_remark_quantity("iterations", (long)trips);
   }
 
-  ir_temp_value_map_destroy(&symbol_map);
   if (changed) {
     *changed = 1;
   }
@@ -1226,11 +1327,16 @@ static int ir_unroll_mark_loop_headers(const IRFunction *function,
 int ir_unroll_small_const_bound_loops_pass(IRFunction *function,
                                                   int *changed) {
   IRNameIndex loop_headers;
+  IRUnrollSymbols symbols;
 
   if (!function) {
     return 0;
   }
   if (!ir_unroll_mark_loop_headers(function, &loop_headers)) {
+    return 0;
+  }
+  if (!ir_unroll_symbols_init(&symbols, function)) {
+    ir_name_index_destroy(&loop_headers);
     return 0;
   }
 
@@ -1244,7 +1350,8 @@ int ir_unroll_small_const_bound_loops_pass(IRFunction *function,
     }
 
     int unrolled = 0;
-    if (!ir_try_unroll_loop_at(function, i, &unrolled)) {
+    if (!ir_try_unroll_loop_at(function, i, &symbols, &unrolled)) {
+      ir_unroll_symbols_destroy(&symbols);
       ir_name_index_destroy(&loop_headers);
       return 0;
     }
@@ -1254,6 +1361,7 @@ int ir_unroll_small_const_bound_loops_pass(IRFunction *function,
     }
   }
 
+  ir_unroll_symbols_destroy(&symbols);
   ir_name_index_destroy(&loop_headers);
   if (local_changed && changed) {
     *changed = 1;

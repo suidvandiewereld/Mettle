@@ -892,14 +892,28 @@ static int ir_licm_reads_volatile_definition(const IRFunction *function,
   return 0;
 }
 
+static int ir_licm_has_volatile_definitions(const IRFunction *function) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *def = &function->instructions[i];
+    if (def->is_volatile && def->dest.name &&
+        (def->dest.kind == IR_OPERAND_TEMP ||
+         def->dest.kind == IR_OPERAND_SYMBOL)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int ir_licm_op_is_pure_arith(const IRFunction *function,
-                                    const IRInstruction *ins) {
+                                    const IRInstruction *ins,
+                                    int volatile_definitions) {
   if (!ins) {
     return 0;
   }
   if (ins->is_volatile ||
-      ir_licm_reads_volatile_definition(function, &ins->lhs) ||
-      ir_licm_reads_volatile_definition(function, &ins->rhs)) {
+      (volatile_definitions &&
+       (ir_licm_reads_volatile_definition(function, &ins->lhs) ||
+        ir_licm_reads_volatile_definition(function, &ins->rhs)))) {
     return 0;
   }
   if (ins->op == IR_OP_CAST) {
@@ -1009,6 +1023,7 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
   if (!function || function->instruction_count == 0) {
     return 1;
   }
+  const int volatile_definitions = ir_licm_has_volatile_definitions(function);
   for (size_t header = 0; header < function->instruction_count; header++) {
     char loop_label[128];
     size_t latch = 0;
@@ -1038,7 +1053,7 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
       const char *operands[2];
       size_t operand_count = 0;
       int ok = 1;
-      if (!ir_licm_op_is_pure_arith(function, ins) ||
+      if (!ir_licm_op_is_pure_arith(function, ins, volatile_definitions) ||
           ins->dest.kind != IR_OPERAND_TEMP || !ins->dest.name) {
         continue;
       }
@@ -2958,7 +2973,7 @@ static int ir_guard_match_loop(const IRFunction *function, size_t header,
   if (loop->test->op != IR_OP_BINARY || loop->test->is_float ||
       !loop->test->text || loop->test->dest.kind != IR_OPERAND_TEMP ||
       !loop->test->dest.name ||
-      !ir_licm_op_is_pure_arith(function, loop->test)) {
+      !ir_licm_op_is_pure_arith(function, loop->test, 1)) {
     return 0;
   }
   if (loop->branch->op != IR_OP_BRANCH_ZERO || !loop->branch->text ||

@@ -472,6 +472,62 @@ int ir_operand_resolve_symbol_int(const IRSymbolValueMap *symbol_map,
   return 0;
 }
 
+int ir_symbol_int_map_step(const IRInstruction *instruction,
+                           IRSymbolValueMap *symbol_map) {
+  if (instruction->op == IR_OP_NOP) {
+    return 1;
+  }
+
+  if (instruction->op == IR_OP_CALL || instruction->op == IR_OP_CALL_INDIRECT ||
+      instruction->op == IR_OP_STORE || instruction->op == IR_OP_INLINE_ASM) {
+    ir_temp_value_map_clear(symbol_map);
+    return 1;
+  }
+
+  if (instruction->op == IR_OP_ASSIGN &&
+      ir_operand_is_symbol(&instruction->dest)) {
+    if (instruction->lhs.kind == IR_OPERAND_INT) {
+      if (!ir_temp_value_map_set(symbol_map, instruction->dest.name,
+                                 &instruction->lhs)) {
+        return 0;
+      }
+    } else if (instruction->lhs.kind == IR_OPERAND_SYMBOL &&
+               instruction->lhs.name) {
+      const IROperand *mapped =
+          ir_temp_value_map_lookup(symbol_map, instruction->lhs.name);
+      if (mapped && mapped->kind == IR_OPERAND_INT) {
+        if (!ir_temp_value_map_set(symbol_map, instruction->dest.name, mapped)) {
+          return 0;
+        }
+      } else {
+        ir_temp_value_map_remove(symbol_map, instruction->dest.name);
+      }
+    } else {
+      ir_temp_value_map_remove(symbol_map, instruction->dest.name);
+    }
+  }
+
+  if (instruction->op == IR_OP_ROTATE_ADD) {
+    if (instruction->dest.name) {
+      ir_temp_value_map_remove(symbol_map, instruction->dest.name);
+    }
+    if (instruction->lhs.name) {
+      ir_temp_value_map_remove(symbol_map, instruction->lhs.name);
+    }
+    if (instruction->rhs.name) {
+      ir_temp_value_map_remove(symbol_map, instruction->rhs.name);
+    }
+  }
+
+  if (instruction->op != IR_OP_ASSIGN &&
+      instruction->op != IR_OP_ROTATE_ADD &&
+      ir_instruction_writes_destination(instruction) &&
+      ir_operand_is_symbol(&instruction->dest)) {
+    ir_temp_value_map_remove(symbol_map, instruction->dest.name);
+  }
+  return 1;
+}
+
 int ir_build_symbol_int_map_before(const IRFunction *function,
                                           size_t before_index,
                                           IRSymbolValueMap *symbol_map) {
@@ -482,57 +538,8 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
   ir_temp_value_map_clear(symbol_map);
 
   for (size_t i = 0; i < before_index && i < function->instruction_count; i++) {
-    const IRInstruction *instruction = &function->instructions[i];
-    if (instruction->op == IR_OP_NOP) {
-      continue;
-    }
-
-    if (instruction->op == IR_OP_CALL || instruction->op == IR_OP_CALL_INDIRECT ||
-        instruction->op == IR_OP_STORE || instruction->op == IR_OP_INLINE_ASM) {
-      ir_temp_value_map_clear(symbol_map);
-      continue;
-    }
-
-    if (instruction->op == IR_OP_ASSIGN &&
-        ir_operand_is_symbol(&instruction->dest)) {
-      if (instruction->lhs.kind == IR_OPERAND_INT) {
-        if (!ir_temp_value_map_set(symbol_map, instruction->dest.name,
-                                   &instruction->lhs)) {
-          return 0;
-        }
-      } else if (instruction->lhs.kind == IR_OPERAND_SYMBOL &&
-                 instruction->lhs.name) {
-        const IROperand *mapped =
-            ir_temp_value_map_lookup(symbol_map, instruction->lhs.name);
-        if (mapped && mapped->kind == IR_OPERAND_INT) {
-          if (!ir_temp_value_map_set(symbol_map, instruction->dest.name, mapped)) {
-            return 0;
-          }
-        } else {
-          ir_temp_value_map_remove(symbol_map, instruction->dest.name);
-        }
-      } else {
-        ir_temp_value_map_remove(symbol_map, instruction->dest.name);
-      }
-    }
-
-    if (instruction->op == IR_OP_ROTATE_ADD) {
-      if (instruction->dest.name) {
-        ir_temp_value_map_remove(symbol_map, instruction->dest.name);
-      }
-      if (instruction->lhs.name) {
-        ir_temp_value_map_remove(symbol_map, instruction->lhs.name);
-      }
-      if (instruction->rhs.name) {
-        ir_temp_value_map_remove(symbol_map, instruction->rhs.name);
-      }
-    }
-
-    if (instruction->op != IR_OP_ASSIGN &&
-        instruction->op != IR_OP_ROTATE_ADD &&
-        ir_instruction_writes_destination(instruction) &&
-        ir_operand_is_symbol(&instruction->dest)) {
-      ir_temp_value_map_remove(symbol_map, instruction->dest.name);
+    if (!ir_symbol_int_map_step(&function->instructions[i], symbol_map)) {
+      return 0;
     }
   }
 
