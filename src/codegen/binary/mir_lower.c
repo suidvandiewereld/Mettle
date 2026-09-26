@@ -2348,6 +2348,48 @@ static int mir_sysv_bind_param(CodeGenerator *g, const char *fn_name,
   return 1;
 }
 
+static void mir_sysv_demote_unfit_params(MirFunction *fn,
+                                         const BinaryAbi *abi) {
+  size_t ints = fn->returns_indirect ? 1u : 0u;
+  size_t sses = 0;
+  if (!abi || !abi->counts_classes_separately) {
+    return;
+  }
+  for (size_t i = 0; i < fn->param_count; i++) {
+    MirParam *p = &fn->params[i];
+    if (p->sysv_in_memory) {
+      continue;
+    }
+    if (p->sysv_eightbytes > 0) {
+      size_t need_int = 0;
+      size_t need_sse = 0;
+      for (int e = 0; e < p->sysv_eightbytes && e < 2; e++) {
+        if (p->sysv_sse[e]) {
+          need_sse++;
+        } else {
+          need_int++;
+        }
+      }
+      if (ints + need_int <= abi->int_param_count &&
+          sses + need_sse <= abi->float_param_count) {
+        ints += need_int;
+        sses += need_sse;
+      } else {
+        p->sysv_eightbytes = 0;
+        p->sysv_in_memory = 1;
+      }
+      continue;
+    }
+    if (p->is_float || p->sysv_direct_sse) {
+      if (sses < abi->float_param_count) {
+        sses++;
+      }
+    } else if (ints < abi->int_param_count) {
+      ints++;
+    }
+  }
+}
+
 static int mir_sysv_returns_in_registers(CodeGenerator *g,
                                          const IRFunction *ir_function,
                                          BinarySysvAggregate *agg) {
@@ -2360,7 +2402,9 @@ static int mir_sysv_returns_in_registers(CodeGenerator *g,
   return rt && code_generator_type_is_aggregate(rt) &&
          mir_sysv_aggregate_class(g, ir_function->name, rt, agg) &&
          !agg->in_memory && agg->eightbyte_count > 0 &&
-         code_generator_abi_classify(rt) == ABI_PASS_INDIRECT;
+         (code_generator_abi_classify(rt) == ABI_PASS_INDIRECT ||
+          (agg->eightbyte_count == 1 &&
+           agg->classes[0] == BINARY_EIGHTBYTE_SSE));
 }
 
 static int mir_gate_signature(CodeGenerator *generator,
@@ -2409,6 +2453,7 @@ static int mir_gate_signature(CodeGenerator *generator,
         p->is_float = pis_float[i];
         mir_sysv_bind_param(generator, ir_function->name, rt, p);
       }
+      mir_sysv_demote_unfit_params(&probe, abi);
       if (!mir_param_layout(&probe, abi, locs, first_slot, &n)) {
         return mir_trace_bail(ir_function, "sig:arg_layout");
       }
@@ -5142,13 +5187,22 @@ static const IRFunction *mir_returning_ir_function(CodeGenerator *g,
              : NULL;
 }
 
+static MirVregId mir_emit_packed_value_addr(MirFunction *fn, CodeGenerator *g,
+                                            BinaryFunctionContext *ctx,
+                                            MirNameMap *map,
+                                            const IROperand *op);
+
 static int mir_return_sysv_registers(MirFunction *fn, CodeGenerator *g,
                                      BinaryFunctionContext *ctx,
                                      MirNameMap *map, const IRInstruction *in,
                                      const MirGlobalWriteback *wb) {
-  MirVregId base = mir_emit_indirect_source_addr(
-      fn, g, ctx, map, mir_returning_ir_function(g, ctx), &in->lhs,
-      fn->sysv_return_size);
+  const IRFunction *returning = mir_returning_ir_function(g, ctx);
+  MirVregId base =
+      fn->sysv_return_size <= 8 &&
+              !mir_indirect_source_is_supported(g, returning, &in->lhs)
+          ? mir_emit_packed_value_addr(fn, g, ctx, map, &in->lhs)
+          : mir_emit_indirect_source_addr(fn, g, ctx, map, returning,
+                                          &in->lhs, fn->sysv_return_size);
   MirVregId parts[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
   int ints = 0;
   int sses = 0;
@@ -6040,12 +6094,32 @@ static int mir_call_plan_arguments(MirFunction *fn, CodeGenerator *g,
                                    const IRInstruction *in,
                                    const BinaryAbi *abi, int hidden,
                                    MirCallLayout *layout) {
+  size_t ints = (size_t)hidden;
+  size_t sses = 0;
   layout->slot_count = (size_t)hidden;
   for (size_t a = 0; a < in->argument_count; a++) {
     size_t slot = layout->slot_count;
     layout->agg_base[a] = MIR_VREG_NONE;
     layout->first_slot[a] = slot;
     if (mir_call_sysv_arg_class(g, in, a, &layout->sysv[a])) {
+      if (!layout->sysv[a].in_memory && abi->counts_classes_separately) {
+        size_t need_int = 0;
+        size_t need_sse = 0;
+        for (size_t e = 0; e < layout->sysv[a].eightbyte_count; e++) {
+          if (layout->sysv[a].classes[e] == BINARY_EIGHTBYTE_SSE) {
+            need_sse++;
+          } else {
+            need_int++;
+          }
+        }
+        if (ints + need_int <= abi->int_param_count &&
+            sses + need_sse <= abi->float_param_count) {
+          ints += need_int;
+          sses += need_sse;
+        } else {
+          layout->sysv[a].in_memory = 1;
+        }
+      }
       if (layout->sysv[a].in_memory) {
         if (slot >= MIR_PARAM_SLOTS) {
           fn->has_error = 1;
@@ -6072,6 +6146,13 @@ static int mir_call_plan_arguments(MirFunction *fn, CodeGenerator *g,
     }
     layout->arg_is_float[slot] =
         mir_call_argument_is_float(g, fn->ir_function, in, a);
+    if (layout->arg_is_float[slot]) {
+      if (sses < abi->float_param_count) {
+        sses++;
+      }
+    } else if (ints < abi->int_param_count) {
+      ints++;
+    }
     layout->slot_count = slot + 1;
   }
   if (layout->slot_count > 0 &&
@@ -12251,6 +12332,7 @@ int code_generator_binary_emit_function_via_mir(
   if (!mir_bind_return(&fn, generator, ir_function)) {
     goto oom;
   }
+  mir_sysv_demote_unfit_params(&fn, abi);
 
   {
     BinaryArgLocation slot_locs[MIR_PARAM_SLOTS];

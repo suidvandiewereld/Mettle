@@ -1,0 +1,62 @@
+struct OneF { f0: float32; }
+struct TwoF { f0: float32; f1: float32; }
+struct FD { f0: float32; f1: float64; }
+
+@noinline fn f32_bits(x: float32) -> int64 {
+  var y: float32 = x;
+  return (int64)(*((uint32*)&y));
+}
+
+@noinline fn f64_bits(x: float64) -> int64 {
+  var y: float64 = x;
+  return *((int64*)&y);
+}
+
+export fn abi_export_one(x: int32) -> OneF {
+  var r: OneF;
+  r.f0 = (float32)x + (float32)0.5;
+  return r;
+}
+
+export fn abi_export_two(x: int32) -> TwoF {
+  var r: TwoF;
+  r.f0 = (float32)x + (float32)0.25;
+  r.f1 = (float32)x * (float32)2.0 + (float32)0.5;
+  return r;
+}
+
+export fn abi_export_spill(a0: FD, a1: OneF, a2: int8, a3: OneF, a4: int8,
+                           a5: FD, a6: OneF, a7: uint32, a8: FD,
+                           w: int32) -> int64 {
+  if (w == 0) { return f32_bits(a0.f0); }
+  if (w == 1) { return f64_bits(a0.f1); }
+  if (w == 2) { return f32_bits(a1.f0); }
+  if (w == 3) { return (int64)a2; }
+  if (w == 4) { return f32_bits(a3.f0); }
+  if (w == 5) { return (int64)a4; }
+  if (w == 6) { return f32_bits(a5.f0); }
+  if (w == 7) { return f64_bits(a5.f1); }
+  if (w == 8) { return f32_bits(a6.f0); }
+  if (w == 9) { return (int64)a7; }
+  if (w == 10) { return f32_bits(a8.f0); }
+  return f64_bits(a8.f1);
+}
+
+extern fn drive() -> int32 = "mettle_abi_float_struct_drive";
+extern fn spill_sum(a0: FD, a1: OneF, a2: int8, a3: OneF, a4: int8, a5: FD,
+                    a6: OneF, a7: uint32, a8: FD) -> int64 = "mettle_abi_spill_sum";
+
+fn main() -> int32 {
+  var r: int32 = drive();
+  if (r != 0) { return r; }
+  var a0: FD; a0.f0 = (float32)1.5; a0.f1 = 2.5;
+  var a1: OneF; a1.f0 = (float32)3.5;
+  var a3: OneF; a3.f0 = (float32)4.5;
+  var a5: FD; a5.f0 = (float32)5.5; a5.f1 = 6.5;
+  var a6: OneF; a6.f0 = (float32)7.5;
+  var a8: FD; a8.f0 = (float32)8.5; a8.f1 = 9.5;
+  if (spill_sum(a0, a1, (int8)(-3), a3, (int8)7, a5, a6, (uint32)10, a8) != 10395) {
+    return 40;
+  }
+  return 0;
+}
