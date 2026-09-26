@@ -306,6 +306,7 @@ typedef struct {
   size_t block_count;
   const IRDomTree *dom;
   IRSsaStack *stacks;
+  IRSsaStack pushed;
   uint32_t *phi_origin;
   uint32_t *created_versions;
   uint32_t *created_bases;
@@ -314,6 +315,18 @@ typedef struct {
   unsigned counter;
   int failed;
 } IRSsaRenamer;
+
+static int ir_ssa_renamer_push(IRSsaRenamer *renamer, uint32_t base,
+                               uint32_t version) {
+  if (!ir_ssa_stack_push(&renamer->stacks[base], version)) {
+    return 0;
+  }
+  if (!ir_ssa_stack_push(&renamer->pushed, base)) {
+    renamer->stacks[base].count--;
+    return 0;
+  }
+  return 1;
+}
 
 static int ir_ssa_record_version(IRSsaRenamer *renamer, uint32_t version,
                                  uint32_t base) {
@@ -393,7 +406,7 @@ static int ir_ssa_rename_definition(IRSsaRenamer *renamer, size_t index) {
   }
   ir_ssa_set_operand(function, &instruction->dest, version);
   if (!ir_ssa_record_version(renamer, version, base) ||
-      !ir_ssa_stack_push(&renamer->stacks[base], version)) {
+      !ir_ssa_renamer_push(renamer, base, version)) {
     renamer->failed = 1;
     return 0;
   }
@@ -409,8 +422,8 @@ static int ir_ssa_rename_instruction(IRSsaRenamer *renamer, size_t index) {
     if (instruction->dest.value_id != IR_VALUE_ID_NONE &&
         instruction->dest.value_id < candidates->value_count &&
         candidates->promotable[instruction->dest.value_id] &&
-        !ir_ssa_stack_push(&renamer->stacks[instruction->dest.value_id],
-                           instruction->dest.value_id)) {
+        !ir_ssa_renamer_push(renamer, instruction->dest.value_id,
+                             instruction->dest.value_id)) {
       renamer->failed = 1;
     }
     return 1;
@@ -453,17 +466,8 @@ static void ir_ssa_rename_block(IRSsaRenamer *renamer, size_t block_index) {
   if (renamer->failed || block_index >= renamer->block_count) {
     return;
   }
-  const IRSsaCandidates *candidates = renamer->candidates;
   const IRBasicBlock *block = &renamer->blocks[block_index];
-
-  size_t *saved = (size_t *)calloc(candidates->value_count, sizeof(size_t));
-  if (!saved) {
-    renamer->failed = 1;
-    return;
-  }
-  for (size_t i = 0; i < candidates->value_count; i++) {
-    saved[i] = renamer->stacks[i].count;
-  }
+  const size_t saved = renamer->pushed.count;
 
   const size_t start = block->first_instruction;
   for (size_t k = 0; k < block->instruction_count; k++) {
@@ -491,10 +495,9 @@ static void ir_ssa_rename_block(IRSsaRenamer *renamer, size_t block_index) {
     ir_ssa_rename_block(renamer, child);
   }
 
-  for (size_t i = 0; i < candidates->value_count; i++) {
-    renamer->stacks[i].count = saved[i];
+  while (renamer->pushed.count > saved) {
+    renamer->stacks[renamer->pushed.entries[--renamer->pushed.count]].count--;
   }
-  free(saved);
 }
 
 static int ir_ssa_blocks_tile(const IRFunction *function,
@@ -664,11 +667,75 @@ static void ir_ssa_seed_phi_worklist(const IRFunction *function,
   }
 }
 
+typedef struct {
+  size_t *blocks;
+  uint32_t *ids;
+  size_t count;
+  size_t capacity;
+  size_t *block_start;
+  uint32_t *block_ids;
+  int failed;
+} IRSsaPhiSites;
+
+static void ir_ssa_phi_sites_destroy(IRSsaPhiSites *sites) {
+  free(sites->blocks);
+  free(sites->ids);
+  free(sites->block_start);
+  free(sites->block_ids);
+  memset(sites, 0, sizeof(*sites));
+}
+
+static void ir_ssa_phi_sites_add(IRSsaPhiSites *sites, size_t block,
+                                 uint32_t id) {
+  if (sites->count >= sites->capacity) {
+    const size_t capacity = sites->capacity ? sites->capacity * 2 : 64;
+    size_t *blocks =
+        (size_t *)realloc(sites->blocks, capacity * sizeof(size_t));
+    if (!blocks) {
+      sites->failed = 1;
+      return;
+    }
+    sites->blocks = blocks;
+    uint32_t *ids = (uint32_t *)realloc(sites->ids, capacity * sizeof(uint32_t));
+    if (!ids) {
+      sites->failed = 1;
+      return;
+    }
+    sites->ids = ids;
+    sites->capacity = capacity;
+  }
+  sites->blocks[sites->count] = block;
+  sites->ids[sites->count] = id;
+  sites->count++;
+}
+
+static int ir_ssa_phi_sites_index(IRSsaPhiSites *sites, size_t block_count) {
+  sites->block_start = (size_t *)calloc(block_count + 1, sizeof(size_t));
+  sites->block_ids =
+      (uint32_t *)malloc((sites->count ? sites->count : 1) * sizeof(uint32_t));
+  size_t *fill = (size_t *)calloc(block_count ? block_count : 1, sizeof(size_t));
+  if (!sites->block_start || !sites->block_ids || !fill) {
+    free(fill);
+    return 0;
+  }
+  for (size_t k = 0; k < sites->count; k++) {
+    sites->block_start[sites->blocks[k] + 1]++;
+  }
+  for (size_t b = 0; b < block_count; b++) {
+    sites->block_start[b + 1] += sites->block_start[b];
+  }
+  for (size_t k = 0; k < sites->count; k++) {
+    const size_t b = sites->blocks[k];
+    sites->block_ids[sites->block_start[b] + fill[b]++] = sites->ids[k];
+  }
+  free(fill);
+  return 1;
+}
+
 static size_t ir_ssa_spread_phis(IRFunction *function,
                                  const IRBasicBlock *blocks,
-                                 size_t block_count,
-                                 const IRSsaCandidates *candidates,
-                                 unsigned char *has_phi, uint32_t id,
+                                 size_t block_count, IRSsaPhiSites *sites,
+                                 uint32_t *stamp, uint32_t id,
                                  size_t *worklist, unsigned char *on_list,
                                  size_t tail) {
   size_t placed = 0;
@@ -681,10 +748,11 @@ static size_t ir_ssa_spread_phis(IRFunction *function,
     for (size_t k = 0; k < frontier_count; k++) {
       const size_t target = frontier[k];
       if (target >= block_count || blocks[target].predecessor_count < 2 ||
-          has_phi[target * candidates->value_count + id]) {
+          stamp[target] == id) {
         continue;
       }
-      has_phi[target * candidates->value_count + id] = 1;
+      stamp[target] = id;
+      ir_ssa_phi_sites_add(sites, target, id);
       placed++;
       if (!on_list[target] && tail < block_count) {
         on_list[target] = 1;
@@ -698,12 +766,14 @@ static size_t ir_ssa_spread_phis(IRFunction *function,
 static int ir_ssa_place_phis(IRFunction *function, const IRAnalysis *analysis,
                              const IRBasicBlock *blocks, size_t block_count,
                              const IRSsaCandidates *candidates,
-                             unsigned char *has_phi, size_t *phi_total) {
+                             IRSsaPhiSites *sites, size_t *phi_total) {
   size_t *worklist = (size_t *)malloc(block_count * sizeof(size_t));
   unsigned char *on_list = (unsigned char *)calloc(block_count, 1);
-  if (!worklist || !on_list) {
+  uint32_t *stamp = (uint32_t *)calloc(block_count, sizeof(uint32_t));
+  if (!worklist || !on_list || !stamp) {
     free(worklist);
     free(on_list);
+    free(stamp);
     return 0;
   }
 
@@ -715,29 +785,22 @@ static int ir_ssa_place_phis(IRFunction *function, const IRAnalysis *analysis,
     memset(on_list, 0, block_count);
     size_t tail = 0;
     ir_ssa_seed_phi_worklist(function, analysis, id, worklist, on_list, &tail);
-    *phi_total += ir_ssa_spread_phis(function, blocks, block_count, candidates,
-                                     has_phi, id, worklist, on_list, tail);
+    *phi_total += ir_ssa_spread_phis(function, blocks, block_count, sites,
+                                     stamp, id, worklist, on_list, tail);
   }
 
   free(worklist);
   free(on_list);
-  return 1;
+  free(stamp);
+  return !sites->failed;
 }
 
 static int ir_ssa_phi_sits_on_critical_edge(const IRBasicBlock *blocks,
-                                            size_t block_count,
-                                            const IRSsaCandidates *candidates,
-                                            const unsigned char *has_phi,
-                                            uint32_t id) {
-  for (size_t b = 0; b < block_count; b++) {
-    if (!has_phi[b * candidates->value_count + id]) {
-      continue;
-    }
-    for (size_t p = 0; p < blocks[b].predecessor_count; p++) {
-      const size_t pred = blocks[b].predecessors[p];
-      if (pred < block_count && blocks[pred].successor_count > 1) {
-        return 1;
-      }
+                                            size_t block_count, size_t b) {
+  for (size_t p = 0; p < blocks[b].predecessor_count; p++) {
+    const size_t pred = blocks[b].predecessors[p];
+    if (pred < block_count && blocks[pred].successor_count > 1) {
+      return 1;
     }
   }
   return 0;
@@ -746,22 +809,34 @@ static int ir_ssa_phi_sits_on_critical_edge(const IRBasicBlock *blocks,
 static void ir_ssa_reject_critical_edge_phis(const IRBasicBlock *blocks,
                                              size_t block_count,
                                              IRSsaCandidates *candidates,
-                                             unsigned char *has_phi,
+                                             IRSsaPhiSites *sites,
                                              size_t *phi_total) {
-  for (uint32_t id = 1; id < (uint32_t)candidates->value_count; id++) {
-    if (!candidates->promotable[id] ||
-        !ir_ssa_phi_sits_on_critical_edge(blocks, block_count, candidates,
-                                          has_phi, id)) {
-      continue;
+  size_t kept = 0;
+  size_t k = 0;
+  while (k < sites->count) {
+    const uint32_t id = sites->ids[k];
+    size_t end = k;
+    int critical = 0;
+    while (end < sites->count && sites->ids[end] == id) {
+      if (!critical) {
+        critical = ir_ssa_phi_sits_on_critical_edge(blocks, block_count,
+                                                    sites->blocks[end]);
+      }
+      end++;
     }
-    candidates->promotable[id] = 0;
-    for (size_t b = 0; b < block_count; b++) {
-      if (has_phi[b * candidates->value_count + id]) {
-        has_phi[b * candidates->value_count + id] = 0;
-        (*phi_total)--;
+    if (critical) {
+      candidates->promotable[id] = 0;
+      *phi_total -= end - k;
+    } else {
+      for (size_t j = k; j < end; j++) {
+        sites->blocks[kept] = sites->blocks[j];
+        sites->ids[kept] = sites->ids[j];
+        kept++;
       }
     }
+    k = end;
   }
+  sites->count = kept;
 }
 
 static IRInstruction ir_ssa_build_phi(IRFunction *function,
@@ -803,7 +878,7 @@ static size_t ir_ssa_emit_with_phis(IRFunction *function,
                                     const IRBasicBlock *blocks,
                                     size_t block_count,
                                     const IRSsaCandidates *candidates,
-                                    const unsigned char *has_phi,
+                                    const IRSsaPhiSites *sites,
                                     IRInstruction *grown,
                                     uint32_t *phi_origin) {
   size_t write = 0;
@@ -816,10 +891,9 @@ static size_t ir_ssa_emit_with_phis(IRFunction *function,
       grown[write++] = function->instructions[start];
       emitted = 1;
     }
-    for (uint32_t id = 1; id < (uint32_t)candidates->value_count; id++) {
-      if (!has_phi[b * candidates->value_count + id]) {
-        continue;
-      }
+    for (size_t k = sites->block_start[b]; k < sites->block_start[b + 1];
+         k++) {
+      const uint32_t id = sites->block_ids[k];
       phi_origin[write] = id;
       grown[write++] =
           ir_ssa_build_phi(function, blocks, block_count, b, candidates, id);
@@ -939,23 +1013,24 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
 
   ir_ssa_reject_nondominated(function, &candidates);
 
-  unsigned char *has_phi =
-      (unsigned char *)calloc(block_count * candidates.value_count, 1);
-  if (!has_phi) {
-    ir_ssa_candidates_destroy(&candidates);
-    return 1;
-  }
+  IRSsaPhiSites sites;
+  memset(&sites, 0, sizeof(sites));
 
   size_t phi_total = 0;
   if (!ir_ssa_place_phis(function, analysis, blocks, block_count, &candidates,
-                         has_phi, &phi_total)) {
-    free(has_phi);
+                         &sites, &phi_total)) {
+    ir_ssa_phi_sites_destroy(&sites);
     ir_ssa_candidates_destroy(&candidates);
     return 1;
   }
 
-  ir_ssa_reject_critical_edge_phis(blocks, block_count, &candidates, has_phi,
+  ir_ssa_reject_critical_edge_phis(blocks, block_count, &candidates, &sites,
                                    &phi_total);
+  if (!ir_ssa_phi_sites_index(&sites, block_count)) {
+    ir_ssa_phi_sites_destroy(&sites);
+    ir_ssa_candidates_destroy(&candidates);
+    return 1;
+  }
 
   IRInstruction *grown = (IRInstruction *)malloc(
       (function->instruction_count + phi_total + 1) * sizeof(IRInstruction));
@@ -964,15 +1039,15 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
   if (!grown || !phi_origin) {
     free(grown);
     free(phi_origin);
-    free(has_phi);
+    ir_ssa_phi_sites_destroy(&sites);
     ir_ssa_candidates_destroy(&candidates);
     return 1;
   }
 
   const size_t write = ir_ssa_emit_with_phis(
-      function, blocks, block_count, &candidates, has_phi, grown, phi_origin);
+      function, blocks, block_count, &candidates, &sites, grown, phi_origin);
 
-  free(has_phi);
+  ir_ssa_phi_sites_destroy(&sites);
   if (getenv("METTLE_IR_SSA_DEBUG")) {
     size_t tiled = 0;
     for (size_t b = 0; b < block_count; b++) {
@@ -1021,6 +1096,7 @@ int ir_promote_scalar_locals_pass(IRFunction *function, int *changed) {
     free(renamer.stacks[i].entries);
   }
   free(renamer.stacks);
+  free(renamer.pushed.entries);
   free(phi_origin);
 
   if (renamer.created_count > 0) {
