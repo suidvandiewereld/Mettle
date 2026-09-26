@@ -1647,6 +1647,8 @@ $cases = @(
   @{ Name = "paren_ident_binop"; Path = "tests/test_paren_ident_binop.mettle"; ShouldSucceed = $true },
   @{ Name = "sroa_unsigned_load_view"; Path = "tests/test_sroa_unsigned_load_view.mettle"; ShouldSucceed = $true },
   @{ Name = "float_to_int_inline_compare"; Path = "tests/test_float_to_int_inline_compare.mettle"; ShouldSucceed = $true; Args = @("-O") },
+  @{ Name = "many_jump_tables"; Path = "tests/test_many_jump_tables.mettle"; ShouldSucceed = $true },
+  @{ Name = "many_parameters"; Path = "tests/test_many_parameters.mettle"; ShouldSucceed = $true },
   @{ Name = "pointer_null"; Path = "tests/test_pointer_null.mettle"; ShouldSucceed = $true },
   @{
     Name          = "runtime_null_deref_check"
