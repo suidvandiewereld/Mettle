@@ -167,53 +167,110 @@ static int ir_dom_order_blocks(IRDomTree *dom, const IRBasicBlock *blocks,
   return 1;
 }
 
-static size_t ir_dom_intersect(const IRDomTree *dom, size_t a, size_t b) {
-  while (a != b) {
-    while (dom->rpo_index[a] > dom->rpo_index[b]) {
-      a = dom->idom[a];
-    }
-    while (dom->rpo_index[b] > dom->rpo_index[a]) {
-      b = dom->idom[b];
-    }
+static void ir_dom_compress(size_t *ancestor, size_t *label,
+                            const size_t *semi, size_t *path, size_t v) {
+  size_t top = 0;
+  while (ancestor[ancestor[v]] != IR_BLOCK_NONE) {
+    path[top++] = v;
+    v = ancestor[v];
   }
-  return a;
+  while (top > 0) {
+    const size_t x = path[--top];
+    if (semi[label[ancestor[x]]] < semi[label[x]]) {
+      label[x] = label[ancestor[x]];
+    }
+    ancestor[x] = ancestor[ancestor[x]];
+  }
 }
 
-static size_t ir_dom_candidate_idom(const IRDomTree *dom,
-                                    const IRBasicBlock *blocks,
-                                    size_t block_count, size_t block) {
-  size_t candidate = IR_BLOCK_NONE;
-  for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
-    const size_t pred = blocks[block].predecessors[p];
-    if (pred >= block_count || dom->idom[pred] == IR_BLOCK_NONE) {
-      continue;
+static int ir_dom_compute_idoms(IRDomTree *dom, const IRBasicBlock *blocks,
+                                size_t block_count, size_t entry) {
+  size_t *pre = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *vert = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *parent = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *semi = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *label = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *ancestor = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *idom = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *stack = (size_t *)malloc(block_count * sizeof(size_t));
+  size_t *next_succ = (size_t *)malloc(block_count * sizeof(size_t));
+  int ok = pre && vert && parent && semi && label && ancestor && idom &&
+           stack && next_succ;
+  if (ok) {
+    for (size_t i = 0; i < block_count; i++) {
+      pre[i] = IR_BLOCK_NONE;
     }
-    candidate = (candidate == IR_BLOCK_NONE)
-                    ? pred
-                    : ir_dom_intersect(dom, pred, candidate);
-  }
-  return candidate;
-}
-
-static void ir_dom_compute_idoms(IRDomTree *dom, const IRBasicBlock *blocks,
-                                 size_t block_count, size_t entry) {
-  dom->idom[entry] = entry;
-  int changed = 1;
-  while (changed) {
-    changed = 0;
-    for (size_t k = 0; k < dom->order_count; k++) {
-      const size_t block = dom->order[k];
-      if (block == entry) {
+    size_t n = 0;
+    size_t depth = 1;
+    stack[0] = entry;
+    next_succ[0] = 0;
+    pre[entry] = n;
+    vert[n] = entry;
+    parent[n] = IR_BLOCK_NONE;
+    n++;
+    while (depth > 0) {
+      const size_t block = stack[depth - 1];
+      if (next_succ[depth - 1] < blocks[block].successor_count) {
+        const size_t successor =
+            blocks[block].successors[next_succ[depth - 1]++];
+        if (successor < block_count && pre[successor] == IR_BLOCK_NONE) {
+          pre[successor] = n;
+          vert[n] = successor;
+          parent[n] = pre[block];
+          n++;
+          stack[depth] = successor;
+          next_succ[depth] = 0;
+          depth++;
+        }
         continue;
       }
-      const size_t candidate =
-          ir_dom_candidate_idom(dom, blocks, block_count, block);
-      if (candidate != IR_BLOCK_NONE && dom->idom[block] != candidate) {
-        dom->idom[block] = candidate;
-        changed = 1;
+      depth--;
+    }
+    for (size_t i = 0; i < n; i++) {
+      semi[i] = i;
+      label[i] = i;
+      ancestor[i] = IR_BLOCK_NONE;
+    }
+    for (size_t w = n; w-- > 1;) {
+      const IRBasicBlock *bb = &blocks[vert[w]];
+      for (size_t p = 0; p < bb->predecessor_count; p++) {
+        const size_t pred = bb->predecessors[p];
+        if (pred >= block_count || pre[pred] == IR_BLOCK_NONE) {
+          continue;
+        }
+        size_t v = pre[pred];
+        if (ancestor[v] != IR_BLOCK_NONE) {
+          ir_dom_compress(ancestor, label, semi, stack, v);
+          v = label[v];
+        }
+        if (semi[v] < semi[w]) {
+          semi[w] = semi[v];
+        }
       }
+      ancestor[w] = parent[w];
+    }
+    idom[0] = 0;
+    for (size_t w = 1; w < n; w++) {
+      size_t d = parent[w];
+      while (d > semi[w]) {
+        d = idom[d];
+      }
+      idom[w] = d;
+    }
+    for (size_t w = 0; w < n; w++) {
+      dom->idom[vert[w]] = vert[idom[w]];
     }
   }
+  free(pre);
+  free(vert);
+  free(parent);
+  free(semi);
+  free(label);
+  free(ancestor);
+  free(idom);
+  free(stack);
+  free(next_succ);
+  return ok;
 }
 
 static void ir_dom_build_child_lists(IRDomTree *dom, size_t entry) {
@@ -259,19 +316,15 @@ static int ir_dom_number_tree(IRDomTree *dom, size_t block_count, size_t entry,
   return 1;
 }
 
-static void ir_dom_frontier_add(IRDomTree *dom, size_t runner, size_t block) {
-  const size_t start = dom->frontier_start[runner];
-  for (size_t k = 0; k < dom->frontier_count[runner]; k++) {
-    if (dom->frontier[start + k] == block) {
-      return;
-    }
+static int ir_dom_frontier_pass(IRDomTree *dom, const IRBasicBlock *blocks,
+                                size_t block_count, size_t *counts) {
+  size_t *stamp = (size_t *)malloc(block_count * sizeof(size_t));
+  if (!stamp) {
+    return 0;
   }
-  dom->frontier[start + dom->frontier_count[runner]] = block;
-  dom->frontier_count[runner]++;
-}
-
-static void ir_dom_frontier_pass(IRDomTree *dom, const IRBasicBlock *blocks,
-                                 size_t block_count, size_t *counts) {
+  for (size_t i = 0; i < block_count; i++) {
+    stamp[i] = IR_BLOCK_NONE;
+  }
   for (size_t block = 0; block < block_count; block++) {
     if (blocks[block].predecessor_count < 2) {
       continue;
@@ -283,10 +336,16 @@ static void ir_dom_frontier_pass(IRDomTree *dom, const IRBasicBlock *blocks,
         continue;
       }
       while (runner != stop && runner != IR_BLOCK_NONE) {
+        if (stamp[runner] == block) {
+          break;
+        }
+        stamp[runner] = block;
         if (counts) {
           counts[runner]++;
         } else {
-          ir_dom_frontier_add(dom, runner, block);
+          dom->frontier[dom->frontier_start[runner] +
+                        dom->frontier_count[runner]] = block;
+          dom->frontier_count[runner]++;
         }
         if (runner == dom->idom[runner]) {
           break;
@@ -295,6 +354,8 @@ static void ir_dom_frontier_pass(IRDomTree *dom, const IRBasicBlock *blocks,
       }
     }
   }
+  free(stamp);
+  return 1;
 }
 
 static int ir_dom_build_frontiers(IRDomTree *dom, const IRBasicBlock *blocks,
@@ -303,7 +364,10 @@ static int ir_dom_build_frontiers(IRDomTree *dom, const IRBasicBlock *blocks,
   if (!counts) {
     return 0;
   }
-  ir_dom_frontier_pass(dom, blocks, block_count, counts);
+  if (!ir_dom_frontier_pass(dom, blocks, block_count, counts)) {
+    free(counts);
+    return 0;
+  }
 
   dom->frontier_start = (size_t *)malloc(block_count * sizeof(size_t));
   dom->frontier_count = (size_t *)calloc(block_count, sizeof(size_t));
@@ -324,8 +388,7 @@ static int ir_dom_build_frontiers(IRDomTree *dom, const IRBasicBlock *blocks,
     return 0;
   }
 
-  ir_dom_frontier_pass(dom, blocks, block_count, NULL);
-  return 1;
+  return ir_dom_frontier_pass(dom, blocks, block_count, NULL);
 }
 
 static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
@@ -349,7 +412,11 @@ static int ir_dom_build(IRDomTree *dom, const IRBasicBlock *blocks,
     return 0;
   }
 
-  ir_dom_compute_idoms(dom, blocks, block_count, entry);
+  if (!ir_dom_compute_idoms(dom, blocks, block_count, entry)) {
+    free(stack);
+    ir_dom_destroy(dom);
+    return 0;
+  }
   ir_dom_build_child_lists(dom, entry);
 
   const int numbered = ir_dom_number_tree(dom, block_count, entry, stack);
