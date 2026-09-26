@@ -5047,13 +5047,13 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   if (outer_cmp != 0) {
     OL_DBG("outer compare is not '<'");
-    ir_operand_destroy(&outerP);
+    ir_operand_destroy_detached(&outerP);
     return 1;
   }
   long long oj = ol_find_jump_to(function, outer_branch + 1, n, outer_label);
   if (oj < 0) {
     OL_DBG("no outer back-jump");
-    ir_operand_destroy(&outerP);
+    ir_operand_destroy_detached(&outerP);
     return 1;
   }
   size_t outer_jump = (size_t)oj;
@@ -5066,7 +5066,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
         !strstr(ins->text, "while_end")) {
       if (inner_hdr >= 0) {
         OL_DBG(">1 inner while header");
-        ir_operand_destroy(&outerP);
+        ir_operand_destroy_detached(&outerP);
         return 1;
       }
       inner_hdr = (long long)i;
@@ -5074,14 +5074,14 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   if (inner_hdr < 0) {
     OL_DBG("no inner while header");
-    ir_operand_destroy(&outerP);
+    ir_operand_destroy_detached(&outerP);
     return 1;
   }
   size_t inner_header = (size_t)inner_hdr;
   const char *inner_label = function->instructions[inner_header].text;
 
   long long ib = ol_find_branch_zero(function, inner_header + 1, outer_jump);
-  if (ib < 0) { OL_DBG("no inner branch_zero"); ir_operand_destroy(&outerP); return 1; }
+  if (ib < 0) { OL_DBG("no inner branch_zero"); ir_operand_destroy_detached(&outerP); return 1; }
   size_t inner_branch = (size_t)ib;
   const char *i_sym = NULL;
   IROperand innerN = {0};
@@ -5089,12 +5089,12 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   if (!ol_decode_loop_compare(function, inner_branch, &i_sym, &innerN,
                               &inner_cmp)) {
     OL_DBG("inner compare decode failed");
-    ir_operand_destroy(&outerP);
+    ir_operand_destroy_detached(&outerP);
     return 1;
   }
   long long ij = ol_find_jump_to(function, inner_branch + 1, outer_jump,
                                  inner_label);
-  if (ij < 0) { OL_DBG("no inner back-jump"); ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1; }
+  if (ij < 0) { OL_DBG("no inner back-jump"); ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1; }
   size_t inner_jump = (size_t)ij;
 
   {
@@ -5106,7 +5106,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     if (!ir_try_parse_direct_unit_increment(&function->instructions[inc],
                                             i_sym)) {
       OL_DBG("inner increment not unit");
-      ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+      ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
     }
   }
   {
@@ -5118,24 +5118,24 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     if (!ir_try_parse_direct_unit_increment(&function->instructions[inc],
                                             p_sym)) {
       OL_DBG("outer increment not unit");
-      ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+      ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
     }
   }
   if (ir_loop_body_is_unclaimable(function, inner_branch + 1, inner_jump)) {
     OL_DBG("inner body has nested while");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
 
   if (!ir_iv_zero_at_header(function, header_index, p_sym)) {
     OL_DBG("outer iv does not start at 0");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
   for (size_t i = outer_branch + 1; i < inner_header; i++) {
     IROpcode op = function->instructions[i].op;
     if (op == IR_OP_LABEL || op == IR_OP_JUMP || op == IR_OP_BRANCH_ZERO ||
         op == IR_OP_BRANCH_EQ) {
       OL_DBG("control flow in outer init region");
-      ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+      ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
     }
   }
 
@@ -5154,14 +5154,14 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   if (!total_sym || !iacc_sym || strcmp(total_sym, iacc_sym) == 0) {
     OL_DBG("no outer reduction total+=iacc");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
   if (!ir_float_sum_type_matches(
           ir_function_local_declared_type(function, total_sym), 64) ||
       !ir_float_sum_type_matches(
           ir_function_local_declared_type(function, iacc_sym), 64)) {
     OL_DBG("total/iacc not float64");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
 
   long long i0 = 0;
@@ -5180,7 +5180,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   if (!found_i0) {
     OL_DBG("no inner i0");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
 
   OlDag d;
@@ -5191,7 +5191,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
                                     iacc_sym, &init_idx) ||
         init_idx <= outer_branch) {
       OL_DBG("no iacc init writer in the outer init region");
-      ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+      ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
     }
     const IRInstruction *init_ins = &function->instructions[init_idx];
     if (init_ins->op == IR_OP_ASSIGN && init_ins->lhs.kind == IR_OPERAND_FLOAT) {
@@ -5210,7 +5210,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
                             &d.init_prog) ||
           d.overflow) {
         OL_DBG("iacc seed neither const nor uniform-of-p");
-        ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+        ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
       }
       d.init_mode = 1;
     }
@@ -5230,12 +5230,12 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   if (iacc_upd < 0) {
     OL_DBG("no single iacc recurrence update");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
 
   if (!ol_inner_body_pure(function, inner_branch + 1, inner_jump)) {
     OL_DBG("inner body not pure");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
 
   {
@@ -5249,22 +5249,22 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     int side;
     if (l_has && !r_has) { inner_op = &upd->lhs; term_op = &upd->rhs; side = 0; }
     else if (r_has && !l_has) { inner_op = &upd->rhs; term_op = &upd->lhs; side = 1; }
-    else { OL_DBG("update: both/neither operand carries iacc"); ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1; }
+    else { OL_DBG("update: both/neither operand carries iacc"); ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1; }
     int op_code;
     if (strcmp(upd->text, "+") == 0) op_code = OL_C_ADD;
     else if (strcmp(upd->text, "-") == 0) op_code = OL_C_SUB;
     else if (strcmp(upd->text, "*") == 0) op_code = OL_C_MUL;
     else if (strcmp(upd->text, "/") == 0) op_code = OL_C_DIV;
-    else { OL_DBG("update: top op not +-*/"); ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1; }
+    else { OL_DBG("update: top op not +-*/"); ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1; }
     int kind = 0, idx = 0;
     if (!ol_extract_term(function, (size_t)iacc_upd, term_op, i_sym, &d, &kind,
                          &idx) ||
         !ol_build_chain(function, (size_t)iacc_upd, inner_op, iacc_sym, i_sym,
                         &d)) {
       OL_DBG("chain/term build failed");
-      ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+      ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
     }
-    if (d.n_chain >= OL_MAX_CHAIN) { ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1; }
+    if (d.n_chain >= OL_MAX_CHAIN) { ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1; }
     d.chain[d.n_chain].op = op_code;
     d.chain[d.n_chain].side = side;
     d.chain[d.n_chain].term_kind = kind;
@@ -5273,7 +5273,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   if (d.overflow || d.n_chain == 0) {
     OL_DBG("dag overflow or empty chain");
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
   }
 
   for (size_t i = inner_header; i <= inner_jump; i++) {
@@ -5283,7 +5283,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
       if (ops[k]->kind == IR_OPERAND_SYMBOL && ops[k]->name &&
           strcmp(ops[k]->name, p_sym) == 0) {
         OL_DBG("inner loop references p (not p-invariant)");
-        ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+        ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
       }
     }
   }
@@ -5294,7 +5294,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
       if (ops[k]->kind == IR_OPERAND_SYMBOL && ops[k]->name &&
           strcmp(ops[k]->name, total_sym) == 0) {
         OL_DBG("total referenced in inner region");
-        ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
+        ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 1;
       }
     }
   }
@@ -5310,7 +5310,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   argc += (size_t)d.n_fconst;
   fused.arguments = calloc(argc, sizeof(IROperand));
   if (!fused.arguments) {
-    ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 0;
+    ir_operand_destroy_detached(&outerP); ir_operand_destroy_detached(&innerN); return 0;
   }
   fused.argument_count = argc;
   size_t k = 0;

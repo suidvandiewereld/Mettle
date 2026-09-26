@@ -429,6 +429,7 @@ size_t ir_operand_string_length(const IROperand *operand);
 IROperand ir_operand_label(const char *name);
 IROperand ir_operand_copy(const IROperand *operand);
 void ir_operand_destroy(IROperand *operand);
+void ir_operand_destroy_detached(IROperand *operand);
 
 void ir_declare_float_bound(const char *type_name, double lo, double hi);
 void ir_declare_nonzero_type(const char *type_name);

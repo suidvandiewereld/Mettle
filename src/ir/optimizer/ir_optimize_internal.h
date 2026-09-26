@@ -287,10 +287,11 @@ typedef struct {
   IRTempValueMap unique_def;
   IRTempValueMap label_refs;
   IRNameIndex symbol_groups;
+  char **symbol_names;
+  size_t symbol_name_count;
   size_t *symbol_sites;
   size_t *symbol_group_start;
   size_t symbol_sites_insns;
-  uint64_t symbol_sites_writes;
   int symbol_sites_built;
   int built;
   int ok;

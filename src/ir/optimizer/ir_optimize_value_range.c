@@ -106,6 +106,23 @@ void ir_value_range_ctx_init(IRValueRangeCtx *ctx, const IRFunction *function) {
   ctx->ok = 0;
 }
 
+static void vr_symbol_sites_drop(IRValueRangeCtx *ctx) {
+  if (ctx->symbol_sites_built) {
+    ir_name_index_destroy(&ctx->symbol_groups);
+  }
+  for (size_t i = 0; i < ctx->symbol_name_count; i++) {
+    free(ctx->symbol_names[i]);
+  }
+  free(ctx->symbol_names);
+  free(ctx->symbol_sites);
+  free(ctx->symbol_group_start);
+  ctx->symbol_names = NULL;
+  ctx->symbol_name_count = 0;
+  ctx->symbol_sites = NULL;
+  ctx->symbol_group_start = NULL;
+  ctx->symbol_sites_built = 0;
+}
+
 void ir_value_range_ctx_destroy(IRValueRangeCtx *ctx) {
   if (!ctx || !ctx->built) {
     return;
@@ -116,14 +133,7 @@ void ir_value_range_ctx_destroy(IRValueRangeCtx *ctx) {
   ir_temp_value_map_destroy(&ctx->label_guard);
   ir_temp_value_map_destroy(&ctx->unique_def);
   ir_temp_value_map_destroy(&ctx->label_refs);
-  if (ctx->symbol_sites_built) {
-    ir_name_index_destroy(&ctx->symbol_groups);
-  }
-  free(ctx->symbol_sites);
-  free(ctx->symbol_group_start);
-  ctx->symbol_sites = NULL;
-  ctx->symbol_group_start = NULL;
-  ctx->symbol_sites_built = 0;
+  vr_symbol_sites_drop(ctx);
   ctx->built = 0;
   ctx->ok = 0;
 }
@@ -198,6 +208,8 @@ static int vr_ctx_build(IRValueRangeCtx *ctx) {
   }
   ctx->built = 1;
   ctx->ok = 0;
+  ctx->symbol_names = NULL;
+  ctx->symbol_name_count = 0;
   ctx->symbol_sites = NULL;
   ctx->symbol_group_start = NULL;
   ctx->symbol_sites_built = 0;
@@ -530,8 +542,11 @@ static int vr_symbol_sites_build(IRValueRangeCtx *ctx) {
       (size_t *)malloc((candidates ? candidates : 1) * sizeof(size_t));
   ctx->symbol_group_start =
       (size_t *)calloc(candidates + 2, sizeof(size_t));
+  ctx->symbol_names =
+      (char **)malloc((candidates ? candidates : 1) * sizeof(char *));
   size_t *fill = (size_t *)calloc(candidates + 1, sizeof(size_t));
-  if (!ctx->symbol_sites || !ctx->symbol_group_start || !fill) {
+  if (!ctx->symbol_sites || !ctx->symbol_group_start || !ctx->symbol_names ||
+      !fill) {
     free(fill);
     return 0;
   }
@@ -542,8 +557,14 @@ static int vr_symbol_sites_build(IRValueRangeCtx *ctx) {
       continue;
     }
     if (!ir_name_index_find(&ctx->symbol_groups, in->dest.name, &group)) {
+      char *owned = mettle_strdup(in->dest.name);
+      if (!owned) {
+        free(fill);
+        return 0;
+      }
+      ctx->symbol_names[ctx->symbol_name_count++] = owned;
       group = groups++;
-      ir_name_index_insert(&ctx->symbol_groups, in->dest.name, group);
+      ir_name_index_insert(&ctx->symbol_groups, owned, group);
     }
     ctx->symbol_group_start[group + 1]++;
   }
@@ -561,24 +582,16 @@ static int vr_symbol_sites_build(IRValueRangeCtx *ctx) {
   }
   free(fill);
   ctx->symbol_sites_insns = fn->instruction_count;
-  ctx->symbol_sites_writes = g_ir_operand_writes;
   return 1;
 }
 
 static int vr_symbol_sites_ready(IRValueRangeCtx *ctx) {
   if (ctx->symbol_sites_built &&
-      ctx->symbol_sites_insns == ctx->function->instruction_count &&
-      ctx->symbol_sites_writes == g_ir_operand_writes) {
-    return ctx->symbol_sites != NULL && ctx->symbol_group_start != NULL;
+      ctx->symbol_sites_insns == ctx->function->instruction_count) {
+    return ctx->symbol_sites != NULL && ctx->symbol_group_start != NULL &&
+           ctx->symbol_names != NULL;
   }
-  if (ctx->symbol_sites_built) {
-    ir_name_index_destroy(&ctx->symbol_groups);
-  }
-  free(ctx->symbol_sites);
-  free(ctx->symbol_group_start);
-  ctx->symbol_sites = NULL;
-  ctx->symbol_group_start = NULL;
-  ctx->symbol_sites_built = 0;
+  vr_symbol_sites_drop(ctx);
   return vr_symbol_sites_build(ctx);
 }
 

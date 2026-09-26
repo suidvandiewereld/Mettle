@@ -820,6 +820,12 @@ void ir_operand_destroy(IROperand *operand) {
   *operand = ir_operand_none();
 }
 
+void ir_operand_destroy_detached(IROperand *operand) {
+  const uint64_t writes = g_ir_operand_writes;
+  ir_operand_destroy(operand);
+  g_ir_operand_writes = writes;
+}
+
 static IROperand ir_operand_clone(const IROperand *operand) {
   return ir_operand_copy(operand);
 }
