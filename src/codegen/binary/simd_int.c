@@ -2028,11 +2028,15 @@ static int simd_find_load_operands(SimdFind *f) {
                                                    f->rhs, BINARY_GP_RDX);
   }
   if (f->rhs_kind == 0) {
-    return binary_emit_mov_reg_imm64(b, BINARY_GP_R8,
-                                     (uint64_t)f->rhs->int_value);
+    if (!binary_emit_mov_reg_imm64(b, BINARY_GP_R8,
+                                   (uint64_t)f->rhs->int_value)) {
+      return 0;
+    }
+  } else if (!code_generator_binary_emit_operand_load(f->generator, f->context,
+                                                      f->rhs, BINARY_GP_R8)) {
+    return 0;
   }
-  return code_generator_binary_emit_operand_load(f->generator, f->context,
-                                                 f->rhs, BINARY_GP_R8);
+  return !f->u8 || binary_emit_movzx_reg_reg8(b, BINARY_GP_R8, BINARY_GP_R8);
 }
 
 static int simd_find_broadcast_needle(SimdFind *f) {

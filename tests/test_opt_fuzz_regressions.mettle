@@ -65,6 +65,13 @@ var g_unroll_limit: int64 = 10;
   return c;
 }
 
+@noinline fn find_signed_byte(p: int8*, n: int64, key: int8) -> int64 {
+  for i: int64 in 0..n {
+    if (p[i] == key) { return i; }
+  }
+  return (int64)(-1);
+}
+
 fn main() -> int32 {
   var r: int32 = unrolled_counter_survives();
   if (r != 0) { return r; }
@@ -80,5 +87,9 @@ fn main() -> int32 {
   if (unsigned_cast_of_signed_short_load(&shorts[0], (int64)1) != 65534) { return 5; }
   if (unroll_limit_written_in_body() != 203030) { return 6; }
   if (annotated_unroll_global_limit() != 3) { return 7; }
+  var hay: int8[40];
+  for k: int64 in 0..40 { hay[k] = (int8)(k + 1); }
+  hay[1] = (int8)(-100);
+  if (find_signed_byte(&hay[0], (int64)31, (int8)(-100)) != 1) { return 8; }
   return 0;
 }
