@@ -2206,6 +2206,93 @@ static int ir_collect_operand_temp_use(IRTempUseMap *uses,
   return ir_temp_use_map_add(uses, operand->name);
 }
 
+static struct {
+  const IRFunction *function;
+  unsigned long long serial;
+  size_t insns;
+  IRNameIndex last;
+  char **names;
+  size_t name_count;
+  int built;
+} g_pass_latches;
+
+static void ir_pass_latches_drop(void) {
+  if (g_pass_latches.built) {
+    ir_name_index_destroy(&g_pass_latches.last);
+  }
+  for (size_t i = 0; i < g_pass_latches.name_count; i++) {
+    free(g_pass_latches.names[i]);
+  }
+  free(g_pass_latches.names);
+  g_pass_latches.names = NULL;
+  g_pass_latches.name_count = 0;
+  g_pass_latches.built = 0;
+  g_pass_latches.function = NULL;
+}
+
+static int ir_pass_latches_build(const IRFunction *function) {
+  size_t jumps = 0;
+  ir_pass_latches_drop();
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_JUMP && in->text) {
+      jumps++;
+    }
+  }
+  if (!ir_name_index_init(&g_pass_latches.last, jumps)) {
+    return 0;
+  }
+  g_pass_latches.built = 1;
+  g_pass_latches.names = (char **)malloc((jumps ? jumps : 1) * sizeof(char *));
+  if (!g_pass_latches.names) {
+    ir_pass_latches_drop();
+    return 0;
+  }
+  for (size_t i = function->instruction_count; i-- > 0;) {
+    const IRInstruction *in = &function->instructions[i];
+    size_t seen = 0;
+    if (in->op != IR_OP_JUMP || !in->text ||
+        ir_name_index_find(&g_pass_latches.last, in->text, &seen)) {
+      continue;
+    }
+    char *owned = mettle_strdup(in->text);
+    if (!owned) {
+      ir_pass_latches_drop();
+      return 0;
+    }
+    g_pass_latches.names[g_pass_latches.name_count++] = owned;
+    ir_name_index_insert(&g_pass_latches.last, owned, i);
+  }
+  g_pass_latches.function = function;
+  g_pass_latches.serial = mettle_compiler_ctx_pass_serial();
+  g_pass_latches.insns = function->instruction_count;
+  return 1;
+}
+
+size_t ir_pass_loop_latch(const IRFunction *function, size_t after,
+                          const char *label) {
+  size_t p = 0;
+  if (!function || !label) {
+    return ir_function_last_jump_to(function, after, label);
+  }
+  if (!g_pass_latches.built || g_pass_latches.function != function ||
+      g_pass_latches.serial != mettle_compiler_ctx_pass_serial() ||
+      g_pass_latches.insns != function->instruction_count) {
+    if (!ir_pass_latches_build(function)) {
+      return ir_function_last_jump_to(function, after, label);
+    }
+  }
+  if (!ir_name_index_find(&g_pass_latches.last, label, &p)) {
+    p = 0;
+  } else if (p >= function->instruction_count ||
+             function->instructions[p].op != IR_OP_JUMP ||
+             !function->instructions[p].text ||
+             strcmp(function->instructions[p].text, label) != 0) {
+    return ir_function_last_jump_to(function, after, label);
+  }
+  return p > after ? p : IR_BLOCK_NONE;
+}
+
 int ir_name_index_init(IRNameIndex *index, size_t expected) {
   size_t capacity = 16;
 

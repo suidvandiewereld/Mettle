@@ -115,7 +115,7 @@ static int pure_licm_callee_hoistable(IRProgram *program,
 static size_t pure_licm_find_backedge(const IRFunction *function,
                                       size_t header_index,
                                       const char *loop_label) {
-  return ir_function_last_jump_to(function, header_index, loop_label);
+  return ir_pass_loop_latch(function, header_index, loop_label);
 }
 
 static int pure_licm_label_inside(const IRFunction *function, size_t lo,

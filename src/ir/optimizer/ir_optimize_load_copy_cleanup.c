@@ -83,7 +83,7 @@ static int ir_cleanup_label_is_loop_header(const char *label) {
 
 static size_t ir_cleanup_loop_latch(const IRFunction *function, size_t header,
                                     const char *label) {
-  const size_t latch = ir_function_last_jump_to(function, header, label);
+  const size_t latch = ir_pass_loop_latch(function, header, label);
   return latch == IR_BLOCK_NONE ? 0 : latch;
 }
 
@@ -100,8 +100,8 @@ int ir_hoist_body_locals_pass(IRFunction *function, int *changed) {
         !ir_cleanup_label_is_loop_header(label->text)) {
       continue;
     }
-    latch = ir_cleanup_loop_latch(function, header, label->text);
-    if (!latch) {
+    latch = ir_function_last_jump_to(function, header, label->text);
+    if (latch == IR_BLOCK_NONE || !latch) {
       continue;
     }
 

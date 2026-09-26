@@ -487,6 +487,8 @@ void ir_facts_release(void);
 
 int ir_name_index_init(IRNameIndex *index, size_t expected);
 void ir_name_index_insert(IRNameIndex *index, const char *name, size_t value);
+size_t ir_pass_loop_latch(const IRFunction *function, size_t after,
+                          const char *label);
 int ir_name_index_find(const IRNameIndex *index, const char *name,
                        size_t *out_value);
 void ir_name_index_add(IRNameIndex *index, const char *name, size_t delta);

@@ -144,8 +144,15 @@ void mettle_compiler_ctx_set_function_name(const char *name) {
   mettle_compiler_ctx()->function_name = name;
 }
 
+static unsigned long long g_mettle_pass_serial;
+
 void mettle_compiler_ctx_set_pass_name(const char *pass_name) {
   mettle_compiler_ctx()->pass_name = pass_name;
+  g_mettle_pass_serial++;
+}
+
+unsigned long long mettle_compiler_ctx_pass_serial(void) {
+  return g_mettle_pass_serial;
 }
 
 void mettle_compiler_ctx_set_fixpoint_iteration(int iteration) {

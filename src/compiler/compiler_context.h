@@ -57,6 +57,8 @@ void mettle_compiler_ctx_set_function_name(const char *name);
 
 void mettle_compiler_ctx_set_pass_name(const char *pass_name);
 
+unsigned long long mettle_compiler_ctx_pass_serial(void);
+
 void mettle_compiler_ctx_set_fixpoint_iteration(int iteration);
 
 void mettle_compiler_ctx_set_ir_instruction(size_t index,
