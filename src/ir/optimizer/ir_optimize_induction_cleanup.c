@@ -112,6 +112,16 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
   char derived_base[IR_CIV_MAX_GROUP][256];
   long long derived_off[IR_CIV_MAX_GROUP];
   size_t derived_count = 0;
+  IRNameIndex labels;
+  if (!ir_name_index_init(&labels, function->instruction_count)) {
+    return 0;
+  }
+  for (size_t li = 0; li < function->instruction_count; li++) {
+    const IRInstruction *lab = &function->instructions[li];
+    if (lab->op == IR_OP_LABEL && lab->text) {
+      ir_name_index_insert(&labels, lab->text, li);
+    }
+  }
 
   for (size_t jump_idx = 0; jump_idx < function->instruction_count; jump_idx++) {
     const IRInstruction *jump = &function->instructions[jump_idx];
@@ -120,17 +130,8 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
     }
 
     size_t label_idx = jump_idx;
-    int have_label = 0;
-    for (size_t li = 0; li < jump_idx; li++) {
-      const IRInstruction *lab = &function->instructions[li];
-      if (lab->op == IR_OP_LABEL && lab->text &&
-          strcmp(lab->text, jump->text) == 0) {
-        label_idx = li;
-        have_label = 1;
-        break;
-      }
-    }
-    if (!have_label) {
+    if (!ir_name_index_find(&labels, jump->text, &label_idx) ||
+        label_idx >= jump_idx) {
       continue;
     }
 
@@ -241,6 +242,7 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       derived_count++;
     }
   }
+  ir_name_index_destroy(&labels);
 
   if (derived_count == 0) {
     return 1;

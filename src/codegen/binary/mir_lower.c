@@ -2484,13 +2484,7 @@ static void mir_scan_global_write(CodeGenerator *generator,
                                   const char **gw_names,
                                   size_t *gw_count) {
   if (ir_operand_is_symbol(&in->dest)) {
-    int found = 0;
-    for (size_t j = 0; j < defined->count; j++) {
-      if (strcmp(defined->items[j].name, in->dest.name) == 0) {
-        found = 1;
-        break;
-      }
-    }
+    int found = mir_name_map_has(defined, in->dest.name);
     int agg_addr_dest =
         !found &&
         (in->op == IR_OP_STORE ||
@@ -2529,12 +2523,7 @@ static void mir_scan_global_write(CodeGenerator *generator,
 }
 
 static int mir_name_is_defined(const MirNameMap *defined, const char *name) {
-  for (size_t j = 0; j < defined->count; j++) {
-    if (strcmp(defined->items[j].name, name) == 0) {
-      return 1;
-    }
-  }
-  return 0;
+  return mir_name_map_has(defined, name);
 }
 
 static int mir_global_aggregate_read_ok(CodeGenerator *generator,
@@ -10828,6 +10817,11 @@ typedef struct {
   size_t *stack;
   unsigned char *body;
   size_t insns;
+  size_t *ref_slots;
+  size_t *ref_start;
+  size_t *ref_list;
+  size_t ref_mask;
+  size_t ref_insns;
 } MirRotateCfg;
 
 static void mir_rotate_cfg_destroy(MirRotateCfg *cfg) {
@@ -10835,6 +10829,9 @@ static void mir_rotate_cfg_destroy(MirRotateCfg *cfg) {
   free(cfg->edge);
   free(cfg->stack);
   free(cfg->body);
+  free(cfg->ref_slots);
+  free(cfg->ref_start);
+  free(cfg->ref_list);
   memset(cfg, 0, sizeof(*cfg));
 }
 
@@ -10907,9 +10904,63 @@ static int mir_loop_body_marks(const MirRotateCfg *cfg, size_t header,
   return 1;
 }
 
-static int mir_insn_targets_label(const MirInst *in, const char *name) {
-  return in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
-         strcmp(in->dst.sym, name) == 0;
+static size_t mir_rotate_ref_slot(const MirFunction *fn, const size_t *slots,
+                                  size_t mask, const char *name) {
+  size_t h = mettle_fnv1a_hash(name) & mask;
+  while (slots[h] && strcmp(fn->insns[slots[h] - 1u].dst.sym, name) != 0) {
+    h = (h + 1u) & mask;
+  }
+  return h;
+}
+
+static int mir_rotate_refs_build(const MirFunction *fn, MirRotateCfg *cfg) {
+  size_t refs = 0;
+  size_t cap = 16;
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    if (fn->insns[i].dst.kind == MIR_OPK_LABEL && fn->insns[i].dst.sym) {
+      refs++;
+    }
+  }
+  while (cap < refs * 2u) {
+    cap *= 2u;
+  }
+  free(cfg->ref_slots);
+  free(cfg->ref_start);
+  free(cfg->ref_list);
+  cfg->ref_slots = (size_t *)calloc(cap, sizeof(size_t));
+  cfg->ref_start = (size_t *)calloc(cap + 1u, sizeof(size_t));
+  cfg->ref_list = (size_t *)malloc((refs ? refs : 1u) * sizeof(size_t));
+  size_t *fill = (size_t *)calloc(cap, sizeof(size_t));
+  if (!cfg->ref_slots || !cfg->ref_start || !cfg->ref_list || !fill) {
+    free(fill);
+    return 0;
+  }
+  cfg->ref_mask = cap - 1u;
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    if (fn->insns[i].dst.kind != MIR_OPK_LABEL || !fn->insns[i].dst.sym) {
+      continue;
+    }
+    size_t s = mir_rotate_ref_slot(fn, cfg->ref_slots, cfg->ref_mask,
+                                   fn->insns[i].dst.sym);
+    if (!cfg->ref_slots[s]) {
+      cfg->ref_slots[s] = i + 1u;
+    }
+    cfg->ref_start[s + 1u]++;
+  }
+  for (size_t s = 0; s < cap; s++) {
+    cfg->ref_start[s + 1u] += cfg->ref_start[s];
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    if (fn->insns[i].dst.kind != MIR_OPK_LABEL || !fn->insns[i].dst.sym) {
+      continue;
+    }
+    size_t s = mir_rotate_ref_slot(fn, cfg->ref_slots, cfg->ref_mask,
+                                   fn->insns[i].dst.sym);
+    cfg->ref_list[cfg->ref_start[s] + fill[s]++] = i;
+  }
+  free(fill);
+  cfg->ref_insns = fn->insn_count;
+  return 1;
 }
 
 static int mir_rotate_table_reaches(const MirFunction *fn, const char *hname) {
@@ -10929,13 +10980,19 @@ static int mir_rotate_table_reaches(const MirFunction *fn, const char *hname) {
   return 0;
 }
 
-static int mir_rotate_back_edges(const MirFunction *fn, size_t j,
+static int mir_rotate_back_edges(const MirFunction *fn,
+                                 const MirRotateCfg *cfg, size_t j,
                                  const char *hname, size_t *bes,
                                  size_t *out_count) {
   size_t nbe = 0;
+  size_t s = mir_rotate_ref_slot(fn, cfg->ref_slots, cfg->ref_mask, hname);
 
-  for (size_t k = 0; k < fn->insn_count; k++) {
-    if (k == j || !mir_insn_targets_label(&fn->insns[k], hname)) {
+  if (!cfg->ref_slots[s]) {
+    return 0;
+  }
+  for (size_t p = cfg->ref_start[s]; p < cfg->ref_start[s + 1u]; p++) {
+    size_t k = cfg->ref_list[p];
+    if (k == j) {
       continue;
     }
     if (fn->insns[k].op != MIR_JMP || k <= j + 1) {
@@ -11038,11 +11095,16 @@ static void mir_rotate_loops(MirFunction *fn) {
     }
     hname = fn->insns[j].dst.sym;
     ename = fn->insns[j + 1].dst.sym;
-    if (!mir_rotate_back_edges(fn, j, hname, bes, &nbe)) {
+    if (cfg.ref_insns != fn->insn_count && !mir_rotate_refs_build(fn, &cfg)) {
+      mir_rotate_cfg_destroy(&cfg);
+      return;
+    }
+    if (!mir_rotate_back_edges(fn, &cfg, j, hname, bes, &nbe)) {
       continue;
     }
     if (!mir_rotate_test_leaves_loop(fn, &cfg, j, ename, bes, nbe, &fatal)) {
       if (fatal) {
+        mir_rotate_cfg_destroy(&cfg);
         return;
       }
       continue;
@@ -11051,6 +11113,7 @@ static void mir_rotate_loops(MirFunction *fn) {
       mir_rotate_cfg_destroy(&cfg);
       return;
     }
+    cfg.ref_insns = (size_t)-1;
   }
   mir_rotate_cfg_destroy(&cfg);
 }
