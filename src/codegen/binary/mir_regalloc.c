@@ -302,8 +302,7 @@ static int mir_find_label(const MirFunction *fn, const char *name) {
 }
 
 static int mir_inst_is_branch(const MirInst *in) {
-  return in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR ||
-         in->op == MIR_FCMPBR;
+  return mir_op_has(in->op, MIR_OPF_LABEL_BRANCH);
 }
 
 typedef struct {
@@ -476,9 +475,8 @@ static int mir_label_map_find(const MirFunction *fn, const MirLabelMap *map,
 }
 
 static int mir_inst_ends_block(const MirInst *in) {
-  return in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR ||
-         in->op == MIR_FCMPBR || in->op == MIR_JMP_TABLE || in->op == MIR_RET ||
-         in->op == MIR_TRAP;
+  return mir_op_has(in->op, MIR_OPF_LABEL_BRANCH) ||
+         in->op == MIR_JMP_TABLE || in->op == MIR_RET || in->op == MIR_TRAP;
 }
 
 static void mir_live_bit_set(unsigned long long *set, size_t v) {
@@ -644,8 +642,7 @@ static int mir_live_cfg_build(const MirFunction *fn, MirLiveCfg *cfg,
     if (in->op == MIR_JMP) {
       fall_through = 0;
       targets[target_count++] = mir_label_map_find(fn, &map, in->dst.sym);
-    } else if (in->op == MIR_JCC || in->op == MIR_CMPBR ||
-               in->op == MIR_FCMPBR) {
+    } else if (mir_op_has(in->op, MIR_OPF_CONDITIONAL_BRANCH)) {
       targets[target_count++] = mir_label_map_find(fn, &map, in->dst.sym);
     } else if (in->op == MIR_JMP_TABLE) {
       fall_through = 0;

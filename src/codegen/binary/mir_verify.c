@@ -1,5 +1,6 @@
 #include "codegen/binary/mir.h"
 #include "codegen/binary/mir_cfg.h"
+#include "codegen/binary/mir_machine.h"
 #include "internal.h"
 
 #include <stdio.h>
@@ -218,8 +219,7 @@ static int mir_shape_operand(MirShape *st, size_t at, const MirOperand *op,
 
 static int mir_shape_branch_target(MirShape *st, size_t at) {
   const MirInst *in = &st->fn->insns[at];
-  if (in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR ||
-      in->op == MIR_FCMPBR) {
+  if (mir_op_has(in->op, MIR_OPF_LABEL_BRANCH)) {
     if (in->dst.kind != MIR_OPK_LABEL) {
       return mir_shape_fail(st, at, "branch target is not a label",
                             in->dst.kind);

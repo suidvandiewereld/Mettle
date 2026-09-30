@@ -1,4 +1,5 @@
 #include "codegen/binary/mir_cfg.h"
+#include "codegen/binary/mir_machine.h"
 #include "../../common.h"
 
 #include <stdlib.h>
@@ -56,9 +57,8 @@ MirVregId mir_cfg_insn_def(const MirInst *in) {
 }
 
 static int mir_cfg_ends_block(const MirInst *in) {
-  return in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR ||
-         in->op == MIR_FCMPBR || in->op == MIR_JMP_TABLE || in->op == MIR_RET ||
-         in->op == MIR_TRAP;
+  return mir_op_has(in->op, MIR_OPF_LABEL_BRANCH) ||
+         in->op == MIR_JMP_TABLE || in->op == MIR_RET || in->op == MIR_TRAP;
 }
 
 static int mir_cfg_is_label(const MirInst *in) {
@@ -197,8 +197,7 @@ static int mir_cfg_link_block(MirCfg *cfg, const MirCfgLabelMap *map,
     if (!mir_cfg_link(cfg, b, mir_cfg_label_find(fn, map, last->dst.sym))) {
       return 0;
     }
-  } else if (last->op == MIR_JCC || last->op == MIR_CMPBR ||
-             last->op == MIR_FCMPBR) {
+  } else if (mir_op_has(last->op, MIR_OPF_CONDITIONAL_BRANCH)) {
     if (!mir_cfg_link(cfg, b, mir_cfg_label_find(fn, map, last->dst.sym))) {
       return 0;
     }

@@ -3917,7 +3917,8 @@ foreach ($interpCase in @(
     @{ Name = "string_interpolation"; File = "tests/test_string_interpolation.mettle" },
     @{ Name = "string_concat_chain"; File = "tests/test_string_concat_chain.mettle" },
     @{ Name = "enum_float_payload"; File = "tests/test_enum_float_payload.mettle" },
-    @{ Name = "import_str_bytes"; File = "tests/test_import_str_bytes.mettle" })) {
+    @{ Name = "import_str_bytes"; File = "tests/test_import_str_bytes.mettle" },
+    @{ Name = "bit_test_branch_liveness"; File = "tests/test_bit_test_branch_liveness.mettle" })) {
   foreach ($interpMode in @("debug", "release")) {
     $total++
     try {

@@ -1,4 +1,5 @@
 ﻿#include "codegen/binary/mir.h"
+#include "codegen/binary/mir_machine.h"
 #include "ir/ir_machine.h"
 
 extern long long mir_encode_last_spills;
@@ -11507,8 +11508,7 @@ static int mir_label_has_forward_target(const MirFunction *fn, const char *name,
   }
   for (size_t i = 0; i < label_index; i++) {
     const MirInst *in = &fn->insns[i];
-    if ((in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR ||
-         in->op == MIR_FCMPBR) &&
+    if (mir_op_has(in->op, MIR_OPF_LABEL_BRANCH) &&
         in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
         strcmp(in->dst.sym, name) == 0) {
       return 1;
@@ -11912,8 +11912,7 @@ static void mir_sink_cold_exits(MirFunction *fn) {
     int ok = 1;
     for (size_t r = p + 1; r < q; r++) {
       MirOpcode op = fn->insns[r].op;
-      if (op == MIR_LABEL || op == MIR_JCC || op == MIR_CMPBR ||
-          op == MIR_FCMPBR) {
+      if (op == MIR_LABEL || mir_op_has(op, MIR_OPF_CONDITIONAL_BRANCH)) {
         ok = 0;
         break;
       }

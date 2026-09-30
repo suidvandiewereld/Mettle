@@ -166,7 +166,7 @@ static int mir_verify_successors(MirVerify *st, size_t i, int *out,
   if (in->op == MIR_JMP) {
     fall = 0;
     out[n++] = mir_verify_find_label(st, in->dst.sym);
-  } else if (in->op == MIR_JCC || in->op == MIR_CMPBR || in->op == MIR_FCMPBR) {
+  } else if (mir_op_has(in->op, MIR_OPF_CONDITIONAL_BRANCH)) {
     out[n++] = mir_verify_find_label(st, in->dst.sym);
   } else if (in->op == MIR_JMP_TABLE) {
     const MirJumpTable *jt = (const MirJumpTable *)in->aux;

@@ -1,0 +1,32 @@
+fn pick(role: int32, table: int32*, layer: int32) -> int64 {
+  var kept: int64 = (int64)table[layer];
+  if (role == 0) { return 100; }
+  if (role == 2 || role == 3 || role == 12 || role == 13 ||
+      role == 20 || role == 21 || role == 26 || role == 27) {
+    return 7;
+  }
+  if (role == 24 || role == 25) { return kept; }
+  return 0;
+}
+
+fn main() -> int32 {
+  var table: int32[3];
+  table[0] = 16;
+  table[1] = 17;
+  table[2] = 32;
+  var role: int32 = 0;
+  while (role < 30) {
+    var layer: int32 = 0;
+    while (layer < 3) {
+      var want: int64 = 0;
+      if (role == 0) { want = 100; }
+      if (role == 2 || role == 3 || role == 12 || role == 13) { want = 7; }
+      if (role == 20 || role == 21 || role == 26 || role == 27) { want = 7; }
+      if (role == 24 || role == 25) { want = (int64)table[layer]; }
+      if (pick(role, &table[0], layer) != want) { return 1 + role; }
+      layer = layer + 1;
+    }
+    role = role + 1;
+  }
+  return 66;
+}
