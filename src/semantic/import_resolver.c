@@ -2561,7 +2561,7 @@ static char *resolve_import_path_uncached(ImportContext *ctx,
   return resolve_candidate_path(import_path);
 }
 
-static char *read_file_content(const char *filename) {
+static char *read_file_content(const char *filename, size_t *length_out) {
   FILE *file = fopen(filename, "r");
   if (!file)
     return NULL;
@@ -2585,6 +2585,9 @@ static char *read_file_content(const char *filename) {
   }
   buffer[bytes_read] = '\0';
   fclose(file);
+  if (length_out) {
+    *length_out = bytes_read;
+  }
   return buffer;
 }
 
@@ -3380,7 +3383,8 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
       return;
     }
 
-    char *source = read_file_content(full_path);
+    size_t source_length = 0;
+    char *source = read_file_content(full_path, &source_length);
     if (!source) {
       if (ctx->reporter) {
         char *chain = format_import_chain(ctx);
@@ -3399,11 +3403,18 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
 
     free(full_path);
 
+    StringLiteral *string_literal = calloc(1, sizeof(StringLiteral));
+    if (!string_literal) {
+      free(source);
+      *had_error = 1;
+      return;
+    }
+
     free(import_str->file_path);
     free(import_str);
 
-    StringLiteral *string_literal = malloc(sizeof(StringLiteral));
     string_literal->value = source;
+    string_literal->length = source_length;
 
     node->type = AST_STRING_LITERAL;
     node->data = string_literal;
@@ -3769,7 +3780,7 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
         continue;
       }
 
-      char *source = read_file_content(full_path);
+      char *source = read_file_content(full_path, NULL);
       if (!source) {
         if (ctx->reporter) {
           char *chain = format_import_chain(ctx);

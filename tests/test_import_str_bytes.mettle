@@ -1,0 +1,33 @@
+var EMBEDDED: string = import_str "test_import_str_bytes.bin";
+
+fn byte_sum(s: string) -> int64 {
+  var total: int64 = 0;
+  var p: cstring = s.chars;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    total = total + (int64)p[i];
+    i = i + 1;
+  }
+  return total;
+}
+
+fn check(s: string) -> int32 {
+  if (s.length != 10) { return 1; }
+  var p: cstring = s.chars;
+  if ((int32)p[0] != 104) { return 2; }
+  if ((int32)p[4] != 0) { return 3; }
+  if ((int32)p[5] != 116) { return 4; }
+  if ((int32)p[9] != 10) { return 5; }
+  if ((int32)p[10] != 0) { return 6; }
+  if (byte_sum(s) != 838) { return 7; }
+  return 0;
+}
+
+fn main() -> int32 {
+  var local: string = import_str "test_import_str_bytes.bin";
+  var g: int32 = check(EMBEDDED);
+  if (g != 0) { return g; }
+  var l: int32 = check(local);
+  if (l != 0) { return 10 + l; }
+  return 66;
+}
