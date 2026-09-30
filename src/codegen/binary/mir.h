@@ -37,6 +37,7 @@ typedef struct {
   int crosses_preserving_only;
   int crosses_xmm_preserving_only;
   int coalesced_into;
+  int source_local;
 } MirVreg;
 #define MIR_LIVE_NONE (-1)
 
@@ -383,6 +384,10 @@ const char *mir_opcode_name(MirOpcode op);
 
 int mir_regalloc(MirFunction *fn);
 int mir_regalloc_verify(MirFunction *fn);
+int mir_verify_enabled(void);
+int mir_verify_sabotage_enabled(void);
+void mir_verify_sabotage(MirFunction *fn);
+int mir_verify_structure(MirFunction *fn, const char *stage, int allocated);
 int mir_regalloc_verify_enabled(void);
 int mir_regalloc_verify_sabotage_enabled(void);
 void mir_regalloc_verify_sabotage(MirFunction *fn);

@@ -2306,8 +2306,10 @@ static void mir_color_check_merged_graph(const MirColorState *st,
     return;
   }
   mir_color_build_interference(&again);
-  fprintf(stderr, "RA-COALESCE-CHECK\t%s\tmaxlive_gp=%d\tmaxlive_xmm=%d\n",
-          mir_ra_trace_name(), fresh.max_live_gp, fresh.max_live_xmm);
+  if (mir_env_regalloc_trace()) {
+    fprintf(stderr, "RA-COALESCE-CHECK\t%s\tmaxlive_gp=%d\tmaxlive_xmm=%d\n",
+            mir_ra_trace_name(), fresh.max_live_gp, fresh.max_live_xmm);
+  }
   for (size_t a = 0; a < st->count; a++) {
     if (!st->colorable[a]) {
       continue;
@@ -2322,6 +2324,12 @@ static void mir_color_check_merged_graph(const MirColorState *st,
   }
   if (missing) {
     st->fn->has_error = 1;
+    if (st->fn->generator && !st->fn->generator->has_error) {
+      code_generator_set_error(st->fn->generator,
+                               "coalescing check: %zu interference edges lost "
+                               "by merging in function '%s'",
+                               missing, mir_ra_trace_name());
+    }
   }
   mir_color_state_free(&again);
   mir_ra_facts_free(&fresh);

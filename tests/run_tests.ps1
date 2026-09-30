@@ -428,6 +428,11 @@ if (-not (Test-Path $tmpDir)) {
   New-Item -Path $tmpDir -ItemType Directory | Out-Null
 }
 $repoRoot = (Resolve-Path ".").Path
+if (-not $env:METTLE_ICE_DIR) {
+  $iceDir = Join-Path $tmpDir "ice"
+  if (Test-Path $iceDir) { Remove-Item -Recurse -Force $iceDir }
+  $env:METTLE_ICE_DIR = $iceDir
+}
 
 
 $cases = @(
@@ -2860,6 +2865,16 @@ $cases = @(
      Env = @{ METTLE_REGALLOC_VERIFY = "1"; METTLE_REGALLOC_VERIFY_BREAK = "1" }
      SkipDeterminism = $true
      Pattern = "register allocation verifier: two live values share a register" },
+  @{ Name = "mir_verify_clean"; Path = "tests/verify_clean.mettle"; ShouldSucceed = $true
+     Args = @("--release")
+     Env = @{ METTLE_MIR_VERIFY = "1" }
+     SkipDeterminism = $true },
+  @{ Name = "mir_verify_sabotage_caught"; Path = "tests/verify_clean.mettle"; ShouldSucceed = $false
+     Args = @("--release")
+     Env = @{ METTLE_MIR_VERIFY = "1"; METTLE_MIR_VERIFY_BREAK = "1" }
+     SkipDeterminism = $true
+     Pattern = "MIR verifier: branch to a label the function lacks"
+     OutputMustMatch = @("after mir_lower in function ", "Pass: mir_lower", "Reproduction bundle: .*verify_clean-ice-") },
   # `mettle test`: interpreted @test functions - pass/fail/leak reporting with
   # assertion diagnostics; @test bodies are dropped from normal builds.
   @{ Name = "comptime_test_run"; Path = "tests/comptime_tests_demo.mettle"; ShouldSucceed = $false

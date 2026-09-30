@@ -7,6 +7,8 @@ extern long long mir_encode_last_spills;
 #include "codegen/binary/mir_annotate.h"
 #include "common.h"
 #include "ir/ir_optimize.h"
+#include "compiler/compiler_context.h"
+#include "compiler/compiler_crash.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,6 +260,7 @@ static MirVregId mir_name_map_get_or_add(MirNameMap *m, MirFunction *fn,
   if (v == MIR_VREG_NONE) {
     return MIR_VREG_NONE;
   }
+  fn->vregs[v].source_local = is_temp ? 0 : 1;
   m->items[m->count].name = name;
   m->items[m->count].is_temp = is_temp;
   m->items[m->count].vreg = v;
@@ -12496,6 +12499,64 @@ static int mir_lower_instructions(MirFunction *fn, CodeGenerator *generator,
   return ok;
 }
 
+typedef struct {
+  const char *name;
+  int skippable;
+  void (*run)(MirFunction *fn);
+} MirPass;
+
+static const MirPass MIR_PASSES[] = {
+    {"mir_fuse_mov_then_extend", 1, mir_fuse_mov_then_extend},
+    {"mir_fuse_extend_then_mov", 1, mir_fuse_extend_then_mov},
+    {"mir_drop_dead_extensions", 1, mir_drop_dead_extensions},
+    {"mir_canonicalize_commutative", 1, mir_canonicalize_commutative},
+    {"mir_narrow_zero_extended_ops", 1, mir_narrow_zero_extended_ops},
+    {"mir_elide_guarded_sext", 1, mir_elide_guarded_sext},
+    {"mir_fold_widening_of_canonical", 1, mir_fold_widening_of_canonical},
+    {"mir_fold_address_offsets", 1, mir_fold_address_offsets},
+    {"mir_fold_index_scale", 1, mir_fold_index_scale},
+    {"mir_cse_loads", 1, mir_cse_loads},
+    {"mir_slp_pair_f64", 1, mir_slp_pair_f64},
+    {"mir_build_jump_tables", 1, mir_build_jump_tables},
+    {"mir_rotate_loops", 1, mir_rotate_loops},
+    {"mir_thread_branch_over_jump", 1, mir_thread_branch_over_jump},
+    {"mir_fuse_bit_test_branch", 1, mir_fuse_bit_test_branch},
+    {"mir_place_const_pool", 0, mir_place_const_pool},
+    {"mir_sink_cold_exits", 1, mir_sink_cold_exits},
+};
+
+static int mir_run_passes(MirFunction *fn) {
+  int verify = mir_verify_enabled();
+  if (mir_verify_sabotage_enabled()) {
+    mir_verify_sabotage(fn);
+  }
+  if (verify && !mir_verify_structure(fn, "mir_lower", 0)) {
+    return 0;
+  }
+  for (size_t k = 0; k < sizeof(MIR_PASSES) / sizeof(MIR_PASSES[0]); k++) {
+    if (MIR_PASSES[k].skippable && ir_pass_name_is_skipped(MIR_PASSES[k].name)) {
+      continue;
+    }
+    mettle_compiler_ctx_set_pass_name(MIR_PASSES[k].name);
+    MIR_PASSES[k].run(fn);
+    if (fn->has_error) {
+      return 0;
+    }
+    if (verify && !mir_verify_structure(fn, MIR_PASSES[k].name, 0)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void mir_ice_dump_function(const void *arg, FILE *output) {
+  const MirFunction *fn = (const MirFunction *)arg;
+  fprintf(output, "; MIR function %s\n",
+          fn->ir_function && fn->ir_function->name ? fn->ir_function->name
+                                                   : "?");
+  mir_function_dump(fn, output);
+}
+
 static void mir_maybe_dump_function(MirFunction *fn,
                                     const IRFunction *ir_function) {
   static int dump = -1;
@@ -12532,6 +12593,7 @@ int code_generator_binary_emit_function_via_mir(
   fn.generator = generator;
   fn.ir_function = ir_function;
   fn.reserve_rbx = ir_function->is_interrupt ? 1 : 0;
+  mettle_compiler_ice_set_backend_dump(mir_ice_dump_function, &fn);
   memset(&map, 0, sizeof(map));
 
   MirGlobalWriteback wb = {0};
@@ -12592,36 +12654,26 @@ int code_generator_binary_emit_function_via_mir(
     goto oom;
   }
 
+  mettle_compiler_ctx_set_pass_name("mir_lower");
   if (!mir_lower_instructions(&fn, generator, context, &map, ir_function, &wb,
                              &vr_oracle)) {
     goto oom;
   }
 
-
-  mir_fuse_mov_then_extend(&fn);
-  mir_fuse_extend_then_mov(&fn);
-  mir_drop_dead_extensions(&fn);
-  mir_canonicalize_commutative(&fn);
-  mir_narrow_zero_extended_ops(&fn);
-  mir_elide_guarded_sext(&fn);
-  mir_fold_widening_of_canonical(&fn);
-  mir_fold_address_offsets(&fn);
-  mir_fold_index_scale(&fn);
-  mir_cse_loads(&fn);
-  mir_slp_pair_f64(&fn);
-  mir_build_jump_tables(&fn);
-  mir_rotate_loops(&fn);
-  mir_thread_branch_over_jump(&fn);
-  mir_fuse_bit_test_branch(&fn);
-  mir_place_const_pool(&fn);
-  mir_sink_cold_exits(&fn);
+  if (!mir_run_passes(&fn)) {
+    goto oom;
+  }
 
   g_mir_ra_trace_name = ir_function->name;
+  mettle_compiler_ctx_set_pass_name("mir_regalloc");
   if (!mir_regalloc(&fn) || fn.has_error) {
     goto oom;
   }
   mir_root_local_addresses(&fn);
   mir_maybe_dump_function(&fn, ir_function);
+  if (mir_verify_enabled() && !mir_verify_structure(&fn, "mir_regalloc", 1)) {
+    goto oom;
+  }
   fn.cur_ir_index = -1;
   if (mir_annotate_enabled()) {
     mir_annotate_begin_function(
@@ -12629,11 +12681,14 @@ int code_generator_binary_emit_function_via_mir(
         (ir_function->location.line));
     mir_annotate_note_backend("register-allocated", NULL);
   }
+  mettle_compiler_ctx_set_pass_name("mir_encode");
   if (!mir_encode(&fn) || fn.has_error) {
     mir_annotate_end_function();
     goto oom;
   }
   mir_annotate_end_function();
+  mettle_compiler_ctx_set_pass_name(NULL);
+  mettle_compiler_ice_set_backend_dump(NULL, NULL);
 
   if (ir_machine_collecting() && ir_function->name) {
     ir_machine_note_frame(ir_function->name,
@@ -12651,6 +12706,11 @@ int code_generator_binary_emit_function_via_mir(
   return 1;
 
 oom:
+  if (generator->has_user_error) {
+    mettle_compiler_ice_set_backend_dump(NULL, NULL);
+  } else {
+    mettle_compiler_ice_capture_backend();
+  }
   if (!generator->has_error) {
     code_generator_set_error(generator,
                              "Out of memory or unsupported construct while "
