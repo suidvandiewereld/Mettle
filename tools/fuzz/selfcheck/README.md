@@ -26,7 +26,7 @@ python matrix.py ../../../bin/mettle.exe divmod,shift,cmp d,O,r
 
 Modes: `d` debug, `O`, `r` release, `sr` `-s --release`, `s` `--safe`, `sfr`
 `--safe --release`, `rv` release with the register allocation checks,
-`nossa` release with `METTLE_IR_SSA=0`. `--verify` sets `METTLE_MIR_VERIFY`,
+`nossa` release with `METTLE_IR_SSA=0`. `lind` and `lin` are debug and release on the linear-scan allocator (`METTLE_LINEAR_ALLOC=1`), which the compiler also uses by itself for a function with more than 2048 values live at once. `--verify` sets `METTLE_MIR_VERIFY`,
 `METTLE_REGALLOC_VERIFY` and `METTLE_RA_COALESCE_CHECK` for every mode.
 `--check-overflow` is not a mode: the generators rely on signed wraparound,
 which that flag traps by design.

@@ -56,6 +56,51 @@ static void mir_mark_crosses_call(MirFunction *fn, const MirRaFacts *facts) {
     mir_mark_crosses_call_exact(fn, facts);
     return;
   }
+  size_t n = fn->insn_count;
+  int *prefix = (int *)calloc(3 * (n + 1), sizeof(int));
+  if (prefix) {
+    int *calls = prefix;
+    int *clobber_rax = prefix + (n + 1);
+    int *clobber_xmm = prefix + 2 * (n + 1);
+    for (size_t i = 0; i < n; i++) {
+      const MirInst *in = &fn->insns[i];
+      int barrier = mir_op_is_call_barrier(in->op);
+      int is_call = in->op == MIR_CALL;
+      calls[i + 1] = calls[i] + barrier;
+      clobber_rax[i + 1] =
+          clobber_rax[i] + (barrier && !(is_call && in->preserves_rax));
+      clobber_xmm[i + 1] =
+          clobber_xmm[i] + (barrier && !(is_call && in->preserves_xmm));
+    }
+    for (size_t v = 0; v < fn->vreg_count; v++) {
+      MirVreg *vr = &fn->vregs[v];
+      long long lo;
+      long long hi;
+      if (vr->live_start == MIR_LIVE_NONE) {
+        continue;
+      }
+      lo = vr->entry_live ? 0 : (long long)vr->live_start + 1;
+      hi = vr->live_end;
+      if (lo < 0) {
+        lo = 0;
+      }
+      if (hi > (long long)n) {
+        hi = (long long)n;
+      }
+      if (hi <= lo || calls[hi] == calls[lo]) {
+        continue;
+      }
+      vr->crosses_call = 1;
+      if (clobber_rax[hi] != clobber_rax[lo]) {
+        vr->crosses_preserving_only = 0;
+      }
+      if (clobber_xmm[hi] != clobber_xmm[lo]) {
+        vr->crosses_xmm_preserving_only = 0;
+      }
+    }
+    free(prefix);
+    return;
+  }
   for (size_t i = 0; i < fn->insn_count; i++) {
     if (!mir_op_is_call_barrier(fn->insns[i].op)) {
       continue;
@@ -66,8 +111,8 @@ static void mir_mark_crosses_call(MirFunction *fn, const MirRaFacts *facts) {
     int c = (int)i;
     for (size_t v = 0; v < fn->vreg_count; v++) {
       MirVreg *vr = &fn->vregs[v];
-      if (vr->live_start != MIR_LIVE_NONE && vr->live_start < c &&
-          vr->live_end > c) {
+      if (vr->live_start != MIR_LIVE_NONE &&
+          (vr->live_start < c || vr->entry_live) && vr->live_end > c) {
         vr->crosses_call = 1;
         if (!keeps_rax) {
           vr->crosses_preserving_only = 0;
@@ -355,6 +400,8 @@ static int mir_collect_back_edges(const MirFunction *fn,
 }
 
 #define MIR_LIVE_CFG_MAX_WORK 8000000u
+#define MIR_GRAPH_MAX_LIVE 2048
+#define MIR_RA_BUSY_SLOTS 16
 #define MIR_INTER_DENSE_MAX_BYTES (64u << 20)
 
 typedef struct {
@@ -820,8 +867,46 @@ static void mir_live_cfg_free(MirLiveCfg *cfg) {
   cfg->block_count = 0;
 }
 
+static unsigned char *mir_reads_before_def(const MirFunction *fn) {
+  unsigned char *defined = (unsigned char *)calloc(fn->vreg_count, 1);
+  unsigned char *early = (unsigned char *)calloc(fn->vreg_count, 1);
+  MirVregId uses[6];
+  if (!defined || !early) {
+    free(defined);
+    free(early);
+    return NULL;
+  }
+  for (size_t p = 0; p < fn->param_count; p++) {
+    if (fn->params[p].vreg >= 0 && (size_t)fn->params[p].vreg < fn->vreg_count) {
+      defined[fn->params[p].vreg] = 1;
+    }
+  }
+  if (fn->returns_indirect && fn->indirect_return_vreg >= 0 &&
+      (size_t)fn->indirect_return_vreg < fn->vreg_count) {
+    defined[fn->indirect_return_vreg] = 1;
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    MirVregId d = mir_cfg_insn_def(in);
+    int n = mir_cfg_insn_uses(in, uses);
+    for (int k = 0; k < n; k++) {
+      if (uses[k] >= 0 && (size_t)uses[k] < fn->vreg_count &&
+          !defined[uses[k]]) {
+        early[uses[k]] = 1;
+      }
+    }
+    if (d >= 0 && (size_t)d < fn->vreg_count) {
+      defined[d] = 1;
+    }
+  }
+  free(defined);
+  return early;
+}
+
 static void mir_extend_across_edge(MirFunction *fn, int l, int b,
                                    const unsigned long long *header_live,
+                                   int live_in_crosses,
+                                   const unsigned char *read_first,
                                    int *changed) {
   for (size_t v = 0; v < fn->vreg_count; v++) {
     MirVreg *vr = &fn->vregs[v];
@@ -834,7 +919,9 @@ static void mir_extend_across_edge(MirFunction *fn, int l, int b,
     if (vr->live_end < l || vr->live_start > b) {
       continue;
     }
-    int crosses = (vr->live_start < l) || (vr->live_end > b) ||
+    int crosses = (live_in_crosses && header_live != NULL) ||
+                  (read_first && !header_live && read_first[v]) ||
+                  (vr->live_start < l) || (vr->live_end > b) ||
                   (vr->entry_live && l == 0);
     if (!crosses) {
       continue;
@@ -851,7 +938,7 @@ static void mir_extend_across_edge(MirFunction *fn, int l, int b,
   }
 }
 
-static void mir_compute_liveness(MirFunction *fn) {
+static void mir_compute_liveness(MirFunction *fn, int live_in_crosses) {
   for (size_t i = 0; i < fn->vreg_count; i++) {
     fn->vregs[i].live_start = MIR_LIVE_NONE;
     fn->vregs[i].live_end = MIR_LIVE_NONE;
@@ -886,6 +973,7 @@ static void mir_compute_liveness(MirFunction *fn) {
   MirBackEdge *edges = NULL;
   size_t edge_count = 0;
   int changed = 1;
+  unsigned char *read_first = live_in_crosses ? mir_reads_before_def(fn) : NULL;
   if (mir_collect_back_edges(fn, &edges, &edge_count)) {
     MirLiveCfg cfg;
     int have_cfg = edge_count > 0 && mir_live_cfg_build(fn, &cfg, 0);
@@ -898,13 +986,14 @@ static void mir_compute_liveness(MirFunction *fn) {
               cfg.live_in + (size_t)cfg.block_of[edges[e].l] * cfg.words;
         }
         mir_extend_across_edge(fn, edges[e].l, edges[e].b, header_live,
-                               &changed);
+                               live_in_crosses, read_first, &changed);
       }
     }
     if (have_cfg) {
       mir_live_cfg_free(&cfg);
     }
     free(edges);
+    free(read_first);
     return;
   }
 
@@ -920,9 +1009,11 @@ static void mir_compute_liveness(MirFunction *fn) {
       if (l < 0 || l >= b) {
         continue;
       }
-      mir_extend_across_edge(fn, l, b, NULL, &changed);
+      mir_extend_across_edge(fn, l, b, NULL, live_in_crosses, read_first,
+                             &changed);
     }
   }
+  free(read_first);
 }
 
 static MirVregId *mir_order_by_start(MirFunction *fn, size_t *count_out) {
@@ -1247,18 +1338,78 @@ static void mir_ra_facts_note_operand(const MirRaFacts *facts,
   }
 }
 
-static void mir_ra_facts_at(MirRaFacts *facts, const MirCfgCursor *cur,
-                            size_t i) {
+typedef struct {
+  unsigned long long *undef;
+  unsigned long long *gp;
+  unsigned long long *xmm;
+  uint32_t busy[MIR_RA_BUSY_SLOTS];
+  unsigned long long *busy_bits[MIR_RA_BUSY_SLOTS];
+  size_t busy_count;
+  size_t words;
+} MirRaScan;
+
+static void mir_ra_scan_free(MirRaScan *scan) {
+  free(scan->undef);
+  free(scan->gp);
+  free(scan->xmm);
+  for (size_t k = 0; k < scan->busy_count; k++) {
+    free(scan->busy_bits[k]);
+  }
+  memset(scan, 0, sizeof(*scan));
+}
+
+static int mir_ra_scan_init(MirRaScan *scan, const MirFunction *fn,
+                            size_t words) {
+  size_t n = words ? words : 1;
+  memset(scan, 0, sizeof(*scan));
+  scan->words = words;
+  scan->undef = (unsigned long long *)calloc(n, sizeof(unsigned long long));
+  scan->gp = (unsigned long long *)calloc(n, sizeof(unsigned long long));
+  scan->xmm = (unsigned long long *)calloc(n, sizeof(unsigned long long));
+  if (!scan->undef || !scan->gp || !scan->xmm) {
+    mir_ra_scan_free(scan);
+    return 0;
+  }
+  for (size_t v = 0; v < fn->vreg_count && (v >> 6) < words; v++) {
+    unsigned long long bit = 1ull << (v & 63);
+    if (fn->vregs[v].address_taken) {
+      continue;
+    }
+    if (fn->vregs[v].rclass == MIR_RC_XMM) {
+      scan->xmm[v >> 6] |= bit;
+    } else {
+      scan->gp[v >> 6] |= bit;
+    }
+  }
+  return 1;
+}
+
+static unsigned long long *mir_ra_scan_busy_bits(MirRaScan *scan,
+                                                 uint32_t busy) {
+  unsigned long long *bits;
+  for (size_t k = 0; k < scan->busy_count; k++) {
+    if (scan->busy[k] == busy) {
+      return scan->busy_bits[k];
+    }
+  }
+  if (scan->busy_count == MIR_RA_BUSY_SLOTS) {
+    return NULL;
+  }
+  bits = (unsigned long long *)calloc(scan->words ? scan->words : 1,
+                                      sizeof(unsigned long long));
+  if (!bits) {
+    return NULL;
+  }
+  scan->busy[scan->busy_count] = busy;
+  scan->busy_bits[scan->busy_count] = bits;
+  scan->busy_count++;
+  return bits;
+}
+
+static void mir_ra_scan_finish(MirRaScan *scan, MirRaFacts *facts) {
   const MirFunction *fn = facts->cfg.fn;
-  const MirInst *in = &fn->insns[i];
-  MirVregId d = mir_cfg_insn_def(in);
-  uint32_t busy = in->op == MIR_NOP ? 0 : mir_ra_insn_busy_mask(in);
-  int live_gp = 0;
-  int live_xmm = 0;
-  mir_ra_facts_note_operand(facts, cur, &in->a, &facts->a_dies[i]);
-  mir_ra_facts_note_operand(facts, cur, &in->b, &facts->b_dies[i]);
-  for (size_t w = 0; w < facts->cfg.words; w++) {
-    unsigned long long bits = cur->live[w] & ~cur->defd[w];
+  for (size_t w = 0; w < scan->words; w++) {
+    unsigned long long bits = scan->undef[w];
     while (bits) {
       size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
       bits &= bits - 1;
@@ -1267,21 +1418,49 @@ static void mir_ra_facts_at(MirRaFacts *facts, const MirCfgCursor *cur,
       }
     }
   }
-  for (size_t w = 0; w < facts->cfg.words; w++) {
-    unsigned long long bits = cur->live[w] & cur->defd[w];
-    while (bits) {
-      size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
-      bits &= bits - 1;
-      if (v >= fn->vreg_count || fn->vregs[v].address_taken) {
-        continue;
+  for (size_t k = 0; k < scan->busy_count; k++) {
+    for (size_t w = 0; w < scan->words; w++) {
+      unsigned long long bits = scan->busy_bits[k][w];
+      while (bits) {
+        size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
+        bits &= bits - 1;
+        facts->clobbered[v] |= scan->busy[k];
       }
-      if (fn->vregs[v].rclass == MIR_RC_XMM) {
-        live_xmm++;
+    }
+  }
+}
+
+static void mir_ra_facts_at(MirRaFacts *facts, MirRaScan *scan,
+                            const MirCfgCursor *cur, size_t i) {
+  const MirFunction *fn = facts->cfg.fn;
+  const MirInst *in = &fn->insns[i];
+  MirVregId d = mir_cfg_insn_def(in);
+  uint32_t busy = in->op == MIR_NOP ? 0 : mir_ra_insn_busy_mask(in);
+  unsigned long long *busy_bits = busy != 0 ? mir_ra_scan_busy_bits(scan, busy)
+                                            : NULL;
+  int live_gp = 0;
+  int live_xmm = 0;
+  mir_ra_facts_note_operand(facts, cur, &in->a, &facts->a_dies[i]);
+  mir_ra_facts_note_operand(facts, cur, &in->b, &facts->b_dies[i]);
+  for (size_t w = 0; w < scan->words; w++) {
+    unsigned long long live = cur->live[w];
+    unsigned long long both = live & cur->defd[w];
+    scan->undef[w] |= live & ~cur->defd[w];
+    live_gp += __builtin_popcountll(both & scan->gp[w]);
+    live_xmm += __builtin_popcountll(both & scan->xmm[w]);
+    if (busy != 0) {
+      unsigned long long hit = both & (scan->gp[w] | scan->xmm[w]);
+      if (d >= 0 && ((size_t)d >> 6) == w) {
+        hit &= ~(1ull << ((size_t)d & 63));
+      }
+      if (busy_bits) {
+        busy_bits[w] |= hit;
       } else {
-        live_gp++;
-      }
-      if (busy != 0 && (MirVregId)v != d) {
-        facts->clobbered[v] |= busy;
+        while (hit) {
+          size_t v = w * 64 + (size_t)__builtin_ctzll(hit);
+          hit &= hit - 1;
+          facts->clobbered[v] |= busy;
+        }
       }
     }
   }
@@ -1312,6 +1491,7 @@ static void mir_ra_facts_at(MirRaFacts *facts, const MirCfgCursor *cur,
 
 static int mir_ra_facts_build(MirRaFacts *facts, MirFunction *fn) {
   MirCfgCursor cur;
+  MirRaScan scan;
   static int interval_only = -1;
   memset(facts, 0, sizeof(*facts));
   if (interval_only < 0) {
@@ -1326,7 +1506,12 @@ static int mir_ra_facts_build(MirRaFacts *facts, MirFunction *fn) {
   facts->b_dies = (unsigned char *)calloc(fn->insn_count, 1);
   facts->undef_live = (unsigned char *)calloc(fn->vreg_count, 1);
   if (!facts->clobbered || !facts->a_dies || !facts->b_dies ||
-      !facts->undef_live || !mir_cfg_cursor_init(&cur, &facts->cfg)) {
+      !facts->undef_live || !mir_ra_scan_init(&scan, fn, facts->cfg.words)) {
+    mir_ra_facts_free(facts);
+    return 0;
+  }
+  if (!mir_cfg_cursor_init(&cur, &facts->cfg)) {
+    mir_ra_scan_free(&scan);
     mir_ra_facts_free(facts);
     return 0;
   }
@@ -1334,11 +1519,13 @@ static int mir_ra_facts_build(MirRaFacts *facts, MirFunction *fn) {
     const MirCfgBlock *blk = &facts->cfg.blocks[b];
     mir_cfg_cursor_start_block(&cur, b);
     for (int at = blk->end; at > blk->start; at--) {
-      mir_ra_facts_at(facts, &cur, (size_t)at - 1);
+      mir_ra_facts_at(facts, &scan, &cur, (size_t)at - 1);
       mir_cfg_cursor_step_back(&cur);
     }
   }
   mir_cfg_cursor_free(&cur);
+  mir_ra_scan_finish(&scan, facts);
+  mir_ra_scan_free(&scan);
   return 1;
 }
 
@@ -2487,8 +2674,17 @@ static int mir_regalloc_finish(MirFunction *fn) {
 
 static int mir_regalloc_color(MirFunction *fn) {
   MirRaFacts facts;
-  mir_compute_liveness(fn);
+  mir_compute_liveness(fn, 0);
   mir_ra_facts_build(&facts, fn);
+  if (facts.valid &&
+      facts.max_live_gp + facts.max_live_xmm > MIR_GRAPH_MAX_LIVE) {
+    if (mir_env_regalloc_trace()) {
+      fprintf(stderr, "RA-LINEAR\t%s\tmaxlive_gp=%d\tmaxlive_xmm=%d\n",
+              mir_ra_trace_name(), facts.max_live_gp, facts.max_live_xmm);
+    }
+    mir_ra_facts_free(&facts);
+    return -1;
+  }
   mir_compute_coalesce_hints(fn, &facts);
   mir_mark_crosses_call(fn, &facts);
 
@@ -2549,6 +2745,7 @@ typedef struct {
   int *def_head;
   int *def_next;
   unsigned char *marked;
+  unsigned char *defs_marked;
   size_t *work;
   size_t work_count;
 } MirDce;
@@ -2576,9 +2773,10 @@ static int mir_dce_is_root(const MirFunction *fn, const MirInst *in) {
 }
 
 static void mir_dce_mark_defs_of(MirDce *d, MirVregId v) {
-  if (v < 0 || (size_t)v >= d->fn->vreg_count) {
+  if (v < 0 || (size_t)v >= d->fn->vreg_count || d->defs_marked[v]) {
     return;
   }
+  d->defs_marked[v] = 1;
   for (int j = d->def_head[v]; j >= 0; j = d->def_next[j]) {
     mir_dce_mark(d, (size_t)j);
   }
@@ -2604,8 +2802,10 @@ static int mir_dce_init(MirDce *d, const MirFunction *fn) {
   d->def_head = (int *)malloc(fn->vreg_count * sizeof(int));
   d->def_next = (int *)malloc(fn->insn_count * sizeof(int));
   d->marked = (unsigned char *)calloc(fn->insn_count, 1);
+  d->defs_marked = (unsigned char *)calloc(fn->vreg_count, 1);
   d->work = (size_t *)malloc(fn->insn_count * sizeof(size_t));
-  if (!d->def_head || !d->def_next || !d->marked || !d->work) {
+  if (!d->def_head || !d->def_next || !d->marked || !d->defs_marked ||
+      !d->work) {
     return 0;
   }
   for (size_t v = 0; v < fn->vreg_count; v++) {
@@ -2626,6 +2826,7 @@ static void mir_dce_free(MirDce *d) {
   free(d->def_head);
   free(d->def_next);
   free(d->marked);
+  free(d->defs_marked);
   free(d->work);
 }
 
@@ -2676,11 +2877,14 @@ int mir_regalloc(MirFunction *fn) {
       linear = getenv("METTLE_LINEAR_ALLOC") ? 1 : 0;
     }
     if (!linear) {
-      return mir_regalloc_color(fn);
+      int colored = mir_regalloc_color(fn);
+      if (colored >= 0) {
+        return colored;
+      }
     }
   }
 
-  mir_compute_liveness(fn);
+  mir_compute_liveness(fn, 1);
   mir_compute_coalesce_hints(fn, NULL);
 
   mir_mark_crosses_call(fn, NULL);

@@ -47,6 +47,8 @@ typedef struct {
   int *phys_hint;
   MirVregId *copy_partner;
   size_t merged_copies;
+  unsigned long long coalesce_work;
+  unsigned long long coalesce_budget;
 } MirColorState;
 
 static inline size_t mir_inter_row_len(const MirColorState *st, size_t a) {

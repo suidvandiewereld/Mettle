@@ -135,6 +135,11 @@
       "source": "tests/test_many_global_writes.mettle",
       "run": true,
       "exit": 0
+    },
+    {
+      "source": "tests/test_many_live_values.mettle",
+      "run": true,
+      "exit": 0
     }
   ]
 }

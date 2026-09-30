@@ -1655,6 +1655,22 @@ $cases = @(
   @{ Name = "many_jump_tables"; Path = "tests/test_many_jump_tables.mettle"; ShouldSucceed = $true },
   @{ Name = "many_parameters"; Path = "tests/test_many_parameters.mettle"; ShouldSucceed = $true },
   @{ Name = "many_global_writes"; Path = "tests/test_many_global_writes.mettle"; ShouldSucceed = $true },
+  @{ Name = "many_live_values"; Path = "tests/test_many_live_values.mettle"; ShouldSucceed = $true },
+  @{ Name = "many_live_values_take_linear_scan"; Path = "tests/test_many_live_values.mettle"; ShouldSucceed = $true
+     Args = @("--release")
+     Env = @{ METTLE_REGALLOC_TRACE = "1" }
+     SkipDeterminism = $true
+     OutputMustMatch = @("RA-LINEAR\tmain\tmaxlive_gp=2101") },
+  @{ Name = "linear_scan_loop_carried_verified"; Path = "examples/os/kernel.mettle"; ShouldSucceed = $true
+     Args = @("--release")
+     Env = @{ METTLE_LINEAR_ALLOC = "1"; METTLE_REGALLOC_VERIFY = "1" }
+     SkipDeterminism = $true
+     SkipRunDiff = $true },
+  @{ Name = "linear_scan_param_across_first_call_verified"; Path = "tests/test_gpu_view_param.mettle"; ShouldSucceed = $true
+     Args = @("-O")
+     Env = @{ METTLE_LINEAR_ALLOC = "1"; METTLE_REGALLOC_VERIFY = "1" }
+     SkipDeterminism = $true
+     SkipRunDiff = $true },
   @{ Name = "else_if_guard_prefix"; Path = "tests/test_else_if_guard_prefix.mettle"; ShouldSucceed = $true },
   @{ Name = "err_else_if_guard_prefix"; Path = "tests/err_else_if_guard_prefix.mettle"; ShouldSucceed = $false; Pattern = 'its range here is 0\.\.11' },
   @{ Name = "pointer_null"; Path = "tests/test_pointer_null.mettle"; ShouldSucceed = $true },
@@ -7036,6 +7052,31 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "safe_mode_naked_call" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($flags in @(@("-O"), @("--release"))) {
+    $linearExe = Join-Path $tmpDir "linear_scan_param_across_call.exe"
+    $env:METTLE_LINEAR_ALLOC = "1"
+    $linearBuild = & $CompilerPath --build @flags tests/test_linear_scan_param_across_call.mettle -o $linearExe 2>&1 | Out-String
+    $linearCode = $LASTEXITCODE
+    Remove-Item Env:METTLE_LINEAR_ALLOC
+    if ($linearCode -ne 0) {
+      throw "linear scan did not build the program with $flags`n$linearBuild"
+    }
+    $linearOut = & $linearExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a float parameter did not survive the first call under linear scan with $flags (exit $LASTEXITCODE)`n$linearOut"
+    }
+  }
+  Write-CaseResult -Name "linear_scan_param_across_call" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_LINEAR_ALLOC) { Remove-Item Env:METTLE_LINEAR_ALLOC }
+  Write-CaseResult -Name "linear_scan_param_across_call" -Passed $false -Reason $_.Exception.Message
 }
 
 # A slice carries its length, so the index check compares against a number the

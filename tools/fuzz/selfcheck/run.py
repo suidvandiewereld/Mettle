@@ -15,6 +15,8 @@ MODES = {
     "sr": (["-s", "--release"], {}),
     "s": (["--safe"], {}),
     "sfr": (["--safe", "--release"], {}),
+    "lind": ([], {"METTLE_LINEAR_ALLOC": "1"}),
+    "lin": (["--release"], {"METTLE_LINEAR_ALLOC": "1"}),
     "rv": (["--release"], {"METTLE_REGALLOC_VERIFY": "1", "METTLE_RA_COALESCE_CHECK": "1"}),
     "nossa": (["--release"], {"METTLE_IR_SSA": "0"}),
 }

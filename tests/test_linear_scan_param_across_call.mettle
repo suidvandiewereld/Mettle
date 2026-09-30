@@ -1,0 +1,22 @@
+@noinline fn tick() -> int64 {
+  var a: float64 = 2.25;
+  var b: float64 = 1.75;
+  var f: float32 = (float32)3.5;
+  return (int64)(a + b + (float64)f - 0.5);
+}
+
+@noinline fn scale(k: float64) -> float64 {
+  var t: int64 = tick();
+  return k * (float64)t;
+}
+
+@noinline fn scale32(k: float32) -> float32 {
+  var t: int64 = tick();
+  return k * (float32)t;
+}
+
+fn main() -> int32 {
+  if (scale(1.5) != 10.5) { return 1; }
+  if (scale32((float32)0.5) != (float32)3.5) { return 2; }
+  return 0;
+}

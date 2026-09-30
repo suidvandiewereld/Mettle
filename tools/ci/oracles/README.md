@@ -118,6 +118,7 @@ at the same path, one at a time.
 | `mldiff.ps1` | `--ml-opt` objects plus the `METTLE_ML_ACTIONS` per-instruction decision dump |
 | `stdlibdiff2.ps1` | two stdlib trees through one path. **Moves `stdlib/` out of the worktree; never run it while another agent shares the tree** |
 | `callseq.py` | static, no build: ordered call sequence of one function before and after a split |
+| `scaling.py` | compile-time blowups: eight pathological shapes (else-if chain, one big switch, sequential loops, deep nesting, thousands of live locals, many functions, straight-line code, a big enum) built at n and 2n; fails when time or peak memory grows more than 3x for a doubling. Ratios, not seconds, so runner speed cancels out |
 | `twocopies.py` | nondeterminism: one compiler copied to two paths of different length, the second run's environment padded, every test and example compared byte for byte. `--selftest` flips a byte to prove the comparison reads bytes. A heap use-after-free once showed up only this way |
 
 Comment tooling: `comments.py` (string-aware scanner, `--show FILE` lists them),

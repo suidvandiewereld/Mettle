@@ -1,9 +1,14 @@
 #include "codegen/binary/mir_color.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MIR_COALESCE_MAX_COST (1 << 24)
+#define MIR_COALESCE_WORK_PER_INSN 256ull
+#define MIR_COALESCE_MIN_WORK 16000000ull
+
+extern const char *g_mir_ra_trace_name;
 
 MirVregId mir_color_find(const MirColorState *st, MirVregId v) {
   MirVregId root = v;
@@ -25,6 +30,14 @@ static int mir_coalesce_aggressive(void) {
   static int cached = -1;
   if (cached < 0) {
     cached = getenv("METTLE_RA_COALESCE_AGGRESSIVE") ? 1 : 0;
+  }
+  return cached;
+}
+
+static int mir_coalesce_trace(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    cached = getenv("METTLE_REGALLOC_TRACE") ? 1 : 0;
   }
   return cached;
 }
@@ -157,6 +170,11 @@ static int mir_coalesce_try(MirColorState *st, const MirInst *in) {
     u = (size_t)d;
     v = (size_t)s;
   }
+  st->coalesce_work += (unsigned long long)st->degree[u] +
+                       (unsigned long long)st->degree[v] + 1ull;
+  if (st->coalesce_work > st->coalesce_budget) {
+    return 0;
+  }
   if (!mir_coalesce_aggressive() && !mir_coalesce_safe(st, u, v)) {
     return 0;
   }
@@ -234,15 +252,28 @@ int mir_color_coalesce(MirColorState *st) {
       copies[copy_count++] = i;
     }
   }
-  while (changed) {
+  st->coalesce_work = 0;
+  st->coalesce_budget = (unsigned long long)fn->insn_count *
+                        MIR_COALESCE_WORK_PER_INSN;
+  if (st->coalesce_budget < MIR_COALESCE_MIN_WORK) {
+    st->coalesce_budget = MIR_COALESCE_MIN_WORK;
+  }
+  while (changed && st->coalesce_work <= st->coalesce_budget) {
     changed = 0;
-    for (size_t k = 0; k < copy_count; k++) {
+    for (size_t k = 0;
+         k < copy_count && st->coalesce_work <= st->coalesce_budget; k++) {
       if (mir_coalesce_try(st, &fn->insns[copies[k]])) {
         changed = 1;
       }
     }
   }
   free(copies);
+  if (mir_coalesce_trace()) {
+    fprintf(stderr, "RA-COALESCE\t%s\twork=%llu\tbudget=%llu\tinsns=%zu%s\n",
+            g_mir_ra_trace_name ? g_mir_ra_trace_name : "?", st->coalesce_work,
+            st->coalesce_budget, fn->insn_count,
+            st->coalesce_work > st->coalesce_budget ? "\texhausted" : "");
+  }
   mir_coalesce_rewrite(st);
   return 1;
 }

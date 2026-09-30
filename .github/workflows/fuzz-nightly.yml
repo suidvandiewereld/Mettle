@@ -192,7 +192,7 @@ jobs:
         run: |
           python tools/fuzz/selfcheck/run.py --gen ${{ matrix.gen }} `
             --start ${{ steps.window.outputs.start }} --count ${{ matrix.count }} `
-            --modes d,O,r,sr,s,sfr -j 4 --verify `
+            --modes d,O,r,sr,s,sfr,lind,lin -j 4 --verify `
             --comp (Resolve-Path "bin\mettle.exe").Path
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
@@ -259,6 +259,14 @@ jobs:
           python tools/ci/oracles/twocopies.py --selftest --limit 20 -j 4
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python tools/ci/oracles/twocopies.py --modes d,O,r,safe,s -j 4
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Compile time and memory grow linearly with input size
+        if: always()
+        shell: pwsh
+        run: |
+          python tools/ci/oracles/scaling.py --modes d,r --scale 4 `
+            --shapes elseif,switch,nest,functions,straight,enum
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Upload failing programs and ICE bundles

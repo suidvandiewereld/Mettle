@@ -885,16 +885,91 @@ static int mir_indirect_source_is_supported(CodeGenerator *g,
           mir_name_is_global_aggregate(g, irf, op->name));
 }
 
+typedef struct {
+  const IRFunction *function;
+  size_t count;
+  const char **names;
+  size_t *first;
+  size_t mask;
+} MirTempDefIndex;
+
+static MirTempDefIndex g_mir_temp_defs;
+
+static void mir_temp_defs_end(void) {
+  free(g_mir_temp_defs.names);
+  free(g_mir_temp_defs.first);
+  memset(&g_mir_temp_defs, 0, sizeof(g_mir_temp_defs));
+}
+
+static void mir_temp_defs_begin(const IRFunction *function) {
+  size_t capacity = 16;
+  const char **names = NULL;
+  size_t *first = NULL;
+  mir_temp_defs_end();
+  while (capacity < function->instruction_count * 2 + 2) {
+    capacity *= 2;
+  }
+  names = (const char **)calloc(capacity, sizeof(*names));
+  first = (size_t *)malloc(capacity * sizeof(*first));
+  if (!names || !first) {
+    free(names);
+    free(first);
+    return;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    size_t slot;
+    if (in->dest.kind != IR_OPERAND_TEMP || !in->dest.name) {
+      continue;
+    }
+    slot = (size_t)mettle_fnv1a_hash(in->dest.name) & (capacity - 1);
+    while (names[slot] && strcmp(names[slot], in->dest.name) != 0) {
+      slot = (slot + 1) & (capacity - 1);
+    }
+    if (!names[slot]) {
+      names[slot] = in->dest.name;
+      first[slot] = i;
+    }
+  }
+  g_mir_temp_defs.function = function;
+  g_mir_temp_defs.count = function->instruction_count;
+  g_mir_temp_defs.names = names;
+  g_mir_temp_defs.first = first;
+  g_mir_temp_defs.mask = capacity - 1;
+}
+
+static const IRInstruction *mir_temp_first_def(const IRFunction *function,
+                                               const char *name) {
+  if (g_mir_temp_defs.function == function &&
+      g_mir_temp_defs.count == function->instruction_count) {
+    size_t slot = (size_t)mettle_fnv1a_hash(name) & g_mir_temp_defs.mask;
+    while (g_mir_temp_defs.names[slot]) {
+      if (strcmp(g_mir_temp_defs.names[slot], name) == 0) {
+        return &function->instructions[g_mir_temp_defs.first[slot]];
+      }
+      slot = (slot + 1) & g_mir_temp_defs.mask;
+    }
+    return NULL;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+        strcmp(in->dest.name, name) == 0) {
+      return in;
+    }
+  }
+  return NULL;
+}
+
 static int mir_temp_is_float(CodeGenerator *g, const IRFunction *function,
                              const char *name, int depth) {
   if (!name || depth > 16) {
     return 0;
   }
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *in = &function->instructions[i];
-    if (in->dest.kind != IR_OPERAND_TEMP || !in->dest.name ||
-        strcmp(in->dest.name, name) != 0) {
-      continue;
+  {
+    const IRInstruction *in = mir_temp_first_def(function, name);
+    if (!in) {
+      return 0;
     }
     if (in->is_float) {
       if (in->op == IR_OP_BINARY && in->text && mir_is_comparison(in->text)) {
@@ -943,7 +1018,6 @@ static int mir_temp_is_float(CodeGenerator *g, const IRFunction *function,
     }
     return 0;
   }
-  return 0;
 }
 
 static void mir_call_trace(const char *sub) {
@@ -10771,6 +10845,7 @@ typedef struct {
   size_t count;
   size_t capacity;
   int in_table;
+  size_t def_plus_one;
 } MirRotateRefList;
 
 typedef struct {
@@ -11066,9 +11141,19 @@ static int mir_rotate_back_edges(const MirFunction *fn,
 static size_t mir_rotate_label_def(const MirFunction *fn,
                                    const MirRotateRefs *refs,
                                    const char *name) {
-  const MirRotateRefList *list = mir_rotate_refs_find(refs, name);
-  for (size_t k = 0; list && k < list->count; k++) {
+  MirRotateRefList *list = mir_rotate_refs_find(refs, name);
+  if (!list) {
+    return (size_t)-1;
+  }
+  if (list->def_plus_one > 0) {
+    size_t at = list->def_plus_one - 1u;
+    if (at < fn->insn_count && mir_insn_defines_label(&fn->insns[at], name)) {
+      return at;
+    }
+  }
+  for (size_t k = 0; k < list->count; k++) {
     if (mir_insn_defines_label(&fn->insns[list->pos[k]], name)) {
+      list->def_plus_one = list->pos[k] + 1u;
       return list->pos[k];
     }
   }
@@ -12595,7 +12680,9 @@ int code_generator_binary_emit_function_via_mir(
   MirNameMap map;
   void *vr_oracle = NULL;
   mir_struct_homes_begin(generator, ir_function);
+  mir_temp_defs_begin(ir_function);
   if (!mir_function_is_eligible(generator, ir_function)) {
+    mir_temp_defs_end();
     mir_struct_homes_end();
     return 0;
   }
@@ -12716,6 +12803,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_name_map_destroy(&map);
   mir_function_destroy(&fn);
   ir_value_range_oracle_destroy(vr_oracle);
+  mir_temp_defs_end();
   mir_struct_homes_end();
   return 1;
 
@@ -12738,6 +12826,7 @@ oom:
   mir_name_map_destroy(&map);
   mir_function_destroy(&fn);
   ir_value_range_oracle_destroy(vr_oracle);
+  mir_temp_defs_end();
   mir_struct_homes_end();
   return 0;
 }
