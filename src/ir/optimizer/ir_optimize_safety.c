@@ -3002,6 +3002,15 @@ static int safety_local_address_escapes(const IRFunction *function,
       }
       break;
     case IR_OP_SAFETY_CHECK:
+      if (instruction->arguments &&
+          instruction->argument_count > IR_SAFETY_ARG_EXTENT &&
+          safety_temp_set_has(&addresses,
+                              &instruction->arguments[IR_SAFETY_ARG_BASE]) &&
+          instruction->arguments[IR_SAFETY_ARG_EXTENT].kind == IR_OPERAND_INT &&
+          instruction->arguments[IR_SAFETY_ARG_EXTENT].int_value ==
+              IR_SAFETY_EXTENT_UNKNOWN) {
+        return 1;
+      }
       break;
     case IR_OP_RETURN:
       if (safety_temp_set_has(&addresses, &instruction->lhs)) {

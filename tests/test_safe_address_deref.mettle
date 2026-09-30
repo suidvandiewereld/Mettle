@@ -1,0 +1,14 @@
+@noinline fn bits32(x: float32) -> uint32 { var y: float32 = x; return *((uint32*)&y); }
+@noinline fn bits64(x: float64) -> uint64 { var y: float64 = x; return *((uint64*)&y); }
+@noinline fn same(x: int32) -> int32 { var y: int32 = x; return *(&y); }
+@noinline fn param(x: int32) -> int32 { return *(&x); }
+@noinline fn poke(x: int32) -> int32 { var y: int32 = 0; *(&y) = x; return y; }
+
+fn main() -> int32 {
+  if (bits32((float32)1.0) != (uint32)1065353216) { return 1; }
+  if (bits64(1.0) != (uint64)4607182418800017408) { return 2; }
+  if (same((int32)7) != (int32)7) { return 3; }
+  if (param((int32)9) != (int32)9) { return 4; }
+  if (poke((int32)11) != (int32)11) { return 5; }
+  return 0;
+}

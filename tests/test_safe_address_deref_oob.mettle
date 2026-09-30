@@ -1,0 +1,7 @@
+@noinline fn widen(x: int32) -> int64 { var y: int32 = x; return *((int64*)&y); }
+
+fn main() -> int32 {
+  var v: int64 = widen((int32)7);
+  if (v == (int64)0) { return 3; }
+  return 0;
+}

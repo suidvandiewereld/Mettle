@@ -6945,6 +6945,39 @@ catch {
   Write-CaseResult -Name "safe_mode_bounds" -Passed $false -Reason $_.Exception.Message
 }
 
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($flags in @(@("--safe"), @("--safe", "--release"))) {
+    $derefExe = Join-Path $tmpDir "safe_address_deref.exe"
+    & $CompilerPath --build @flags tests/test_safe_address_deref.mettle -o $derefExe 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "build of test_safe_address_deref failed with $flags"
+    }
+    $derefOut = & $derefExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a read through the address of a local trapped with $flags (exit $LASTEXITCODE):`n$derefOut"
+    }
+  }
+  $oobExe = Join-Path $tmpDir "safe_address_deref_oob.exe"
+  & $CompilerPath --build --safe --release tests/test_safe_address_deref_oob.mettle -o $oobExe 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "build of test_safe_address_deref_oob failed"
+  }
+  $oobOut = & $oobExe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) {
+    throw "an 8 byte read of a 4 byte local ran to completion under --safe"
+  }
+  if (($oobOut -replace '\s', '') -notmatch '8bytesatoffset0ofa4byteallocation') {
+    throw "the oversized read trapped without naming the allocation:`n$oobOut"
+  }
+  Write-CaseResult -Name "safe_mode_address_deref" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "safe_mode_address_deref" -Passed $false -Reason $_.Exception.Message
+}
+
 # A slice carries its length, so the index check compares against a number the
 # value really holds. The check is emitted in a normal build and dropped under
 # --release, the same rule a fixed array's check follows.
