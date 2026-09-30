@@ -14,7 +14,18 @@ typedef struct {
   IRFunction *function;
   IRInstructionVector out;
   int return_prepared;
+  int any_naked;
 } SafetyOrigins;
+
+static int origin_callee_is_naked(const SafetyOrigins *origins, const char *name) {
+  if (!origins->any_naked || !name) return 0;
+  for (size_t f = 0; f < origins->program->function_count; f++) {
+    const IRFunction *function = origins->program->functions[f];
+    if (function && function->is_naked && function->name &&
+        strcmp(function->name, name) == 0) return 1;
+  }
+  return 0;
+}
 
 static IROperand origin_fresh(void) {
   char name[64];
@@ -321,7 +332,8 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
   int instrument_call = call && safety_classify_call(in) == SAFETY_ALLOC_NONE;
   if (instrument_call && in->op == IR_OP_CALL) {
     const IRModuleSymbol *symbol = ir_program_lookup_symbol(origins->program, in->text);
-    instrument_call = symbol && !symbol->is_extern;
+    instrument_call = symbol && !symbol->is_extern &&
+                      !origin_callee_is_naked(origins, in->text);
   }
   if (instrument_call) {
     IROperand callee = ir_operand_none();
@@ -516,6 +528,9 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
   SafetyOrigins origins = {0};
   origins.program = program;
   origins.function = function;
+  for (size_t f = 0; f < program->function_count && !origins.any_naked; f++) {
+    origins.any_naked = program->functions[f] && program->functions[f]->is_naked;
+  }
   IROperand entry = origin_fresh();
   IROperand address = ir_operand_none();
   int ok = 0;

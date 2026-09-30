@@ -2686,7 +2686,7 @@ int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats) {
     if (!function) {
       continue;
     }
-    if (function->is_rule) {
+    if (function->is_rule || function->is_naked) {
       continue;
     }
     int resolved =
@@ -3478,7 +3478,7 @@ int ir_safety_register_allocations(IRProgram *program) {
   }
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *function = program->functions[i];
-    if (function && !function->is_rule &&
+    if (function && !function->is_rule && !function->is_naked &&
         !safety_function_is_allocator(function, allocator_source) &&
         !safety_origins_function(program, function)) return 0;
   }
