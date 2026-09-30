@@ -37,7 +37,7 @@ typedef struct {
   int crosses_preserving_only;
   int crosses_xmm_preserving_only;
   int coalesced_into;
-  int source_local;
+  int may_read_undefined;
 } MirVreg;
 #define MIR_LIVE_NONE (-1)
 

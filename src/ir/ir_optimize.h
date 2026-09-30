@@ -27,6 +27,7 @@ int ir_optimize_program(IRProgram *program,
 
 int ir_optimize_had_user_error(void);
 int ir_pass_name_is_skipped(const char *pass_name);
+int ir_instruction_writes_temp(const IRInstruction *instruction);
 void ir_note_parallel_loops_unverified(IRProgram *program);
 
 int ir_explain_enabled(void);

@@ -2875,6 +2875,11 @@ $cases = @(
      SkipDeterminism = $true
      Pattern = "MIR verifier: branch to a label the function lacks"
      OutputMustMatch = @("after mir_lower in function ", "Pass: mir_lower", "Reproduction bundle: .*verify_clean-ice-") },
+  @{ Name = "mir_verify_undefined_read_caught"; Path = "tests/verify_clean.mettle"; ShouldSucceed = $false
+     Args = @("--release")
+     Env = @{ METTLE_MIR_VERIFY = "1"; METTLE_MIR_VERIFY_BREAK = "def" }
+     SkipDeterminism = $true
+     Pattern = "MIR verifier: reads a vreg nothing defines" },
   # `mettle test`: interpreted @test functions - pass/fail/leak reporting with
   # assertion diagnostics; @test bodies are dropped from normal builds.
   @{ Name = "comptime_test_run"; Path = "tests/comptime_tests_demo.mettle"; ShouldSucceed = $false

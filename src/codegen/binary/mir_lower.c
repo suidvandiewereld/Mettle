@@ -260,7 +260,7 @@ static MirVregId mir_name_map_get_or_add(MirNameMap *m, MirFunction *fn,
   if (v == MIR_VREG_NONE) {
     return MIR_VREG_NONE;
   }
-  fn->vregs[v].source_local = is_temp ? 0 : 1;
+  fn->vregs[v].may_read_undefined = is_temp ? 0 : 1;
   m->items[m->count].name = name;
   m->items[m->count].is_temp = is_temp;
   m->items[m->count].vreg = v;
@@ -12499,6 +12499,52 @@ static int mir_lower_instructions(MirFunction *fn, CodeGenerator *generator,
   return ok;
 }
 
+static int mir_name_set_has(const char **set, size_t mask, const char *name) {
+  size_t slot = (size_t)mettle_fnv1a_hash(name) & mask;
+  while (set[slot]) {
+    if (strcmp(set[slot], name) == 0) {
+      return 1;
+    }
+    slot = (slot + 1) & mask;
+  }
+  return 0;
+}
+
+static int mir_mark_ir_undefined_temps(MirFunction *fn, const MirNameMap *map,
+                                       const IRFunction *ir_function) {
+  size_t capacity = 16;
+  const char **set = NULL;
+  while (capacity < ir_function->instruction_count * 2 + 2) {
+    capacity *= 2;
+  }
+  set = (const char **)calloc(capacity, sizeof(*set));
+  if (!set) {
+    return 0;
+  }
+  for (size_t i = 0; i < ir_function->instruction_count; i++) {
+    const IRInstruction *in = &ir_function->instructions[i];
+    size_t slot;
+    if (!ir_instruction_writes_temp(in) ||
+        mir_name_set_has(set, capacity - 1, in->dest.name)) {
+      continue;
+    }
+    slot = (size_t)mettle_fnv1a_hash(in->dest.name) & (capacity - 1);
+    while (set[slot]) {
+      slot = (slot + 1) & (capacity - 1);
+    }
+    set[slot] = in->dest.name;
+  }
+  for (size_t k = 0; k < map->count; k++) {
+    const MirNameEntry *e = &map->items[k];
+    if (e->is_temp && e->vreg >= 0 && (size_t)e->vreg < fn->vreg_count &&
+        !mir_name_set_has(set, capacity - 1, e->name)) {
+      fn->vregs[e->vreg].may_read_undefined = 1;
+    }
+  }
+  free(set);
+  return 1;
+}
+
 typedef struct {
   const char *name;
   int skippable;
@@ -12660,6 +12706,10 @@ int code_generator_binary_emit_function_via_mir(
     goto oom;
   }
 
+  if (mir_verify_enabled() &&
+      !mir_mark_ir_undefined_temps(&fn, &map, ir_function)) {
+    goto oom;
+  }
   if (!mir_run_passes(&fn)) {
     goto oom;
   }

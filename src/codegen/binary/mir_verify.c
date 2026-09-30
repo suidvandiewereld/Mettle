@@ -32,7 +32,47 @@ int mir_verify_sabotage_enabled(void) {
   return cached;
 }
 
+static void mir_verify_sabotage_def(MirFunction *fn) {
+  unsigned *defs = (unsigned *)calloc(fn->vreg_count ? fn->vreg_count : 1,
+                                      sizeof(unsigned));
+  unsigned char *read = (unsigned char *)calloc(
+      fn->vreg_count ? fn->vreg_count : 1, 1);
+  MirVregId uses[6];
+  if (!defs || !read) {
+    free(defs);
+    free(read);
+    return;
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    MirVregId d = mir_cfg_insn_def(&fn->insns[i]);
+    int n = mir_cfg_insn_uses(&fn->insns[i], uses);
+    if (d >= 0 && (size_t)d < fn->vreg_count) {
+      defs[d]++;
+    }
+    for (int k = 0; k < n; k++) {
+      if (uses[k] >= 0 && (size_t)uses[k] < fn->vreg_count) {
+        read[uses[k]] = 1;
+      }
+    }
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    MirVregId d = mir_cfg_insn_def(&fn->insns[i]);
+    if (d >= 0 && (size_t)d < fn->vreg_count && defs[d] == 1 && read[d] &&
+        !fn->vregs[d].may_read_undefined && !fn->vregs[d].address_taken) {
+      fn->insns[i].op = MIR_NOP;
+      break;
+    }
+  }
+  free(defs);
+  free(read);
+}
+
 void mir_verify_sabotage(MirFunction *fn) {
+  const char *mode = getenv("METTLE_MIR_VERIFY_BREAK");
+  if (mode && strcmp(mode, "def") == 0) {
+    mir_verify_sabotage_def(fn);
+    return;
+  }
   for (size_t i = 0; i < fn->insn_count; i++) {
     MirInst *in = &fn->insns[i];
     if (in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR) {
@@ -239,8 +279,8 @@ static int mir_shape_reads_defined(MirShape *st, size_t at) {
       continue;
     }
     if (!st->has_def[v] && !fn->vregs[v].address_taken &&
-        !fn->vregs[v].source_local) {
-      return mir_shape_fail(st, at, "reads a temporary nothing defines", v);
+        !fn->vregs[v].may_read_undefined) {
+      return mir_shape_fail(st, at, "reads a vreg nothing defines", v);
     }
   }
   return 1;
