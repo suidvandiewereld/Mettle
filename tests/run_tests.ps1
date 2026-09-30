@@ -6983,6 +6983,39 @@ catch {
   Write-CaseResult -Name "safe_mode_address_deref" -Passed $false -Reason $_.Exception.Message
 }
 
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($flags in @(@("--safe"), @("--safe", "--release"))) {
+    $aggExe = Join-Path $tmpDir "safe_small_aggregate_copy.exe"
+    $aggBuild = & $CompilerPath --build @flags tests/test_safe_small_aggregate_copy.mettle -o $aggExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "build of test_safe_small_aggregate_copy failed with $flags`n$aggBuild"
+    }
+    $aggOut = & $aggExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "copying an 8 byte struct out of an array failed with $flags (exit $LASTEXITCODE):`n$aggOut"
+    }
+  }
+  $aggOobExe = Join-Path $tmpDir "safe_small_aggregate_copy_oob.exe"
+  & $CompilerPath --build --safe --release tests/test_safe_small_aggregate_copy_oob.mettle -o $aggOobExe 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "build of test_safe_small_aggregate_copy_oob failed"
+  }
+  $aggOobOut = & $aggOobExe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) {
+    throw "a read past the pointer inside a copied struct ran to completion under --safe"
+  }
+  if (($aggOobOut -replace '\s', '') -notmatch 'outsideitsallocation.*ofa8byteallocation') {
+    throw "the copied pointer lost its allocation:`n$aggOobOut"
+  }
+  Write-CaseResult -Name "safe_mode_small_aggregate_copy" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "safe_mode_small_aggregate_copy" -Passed $false -Reason $_.Exception.Message
+}
+
 # A slice carries its length, so the index check compares against a number the
 # value really holds. The check is emitted in a normal build and dropped under
 # --release, the same rule a fixed array's check follows.

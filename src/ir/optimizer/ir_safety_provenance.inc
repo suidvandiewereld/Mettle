@@ -112,8 +112,37 @@ static int origin_value_is_string(SafetyOrigins *origins, const IROperand *value
   return origin && origin->type && origin->type->kind == MTLC_TYPE_STRING;
 }
 
+static const IROperand *origin_temp_home(const SafetyOrigins *origins,
+                                         const IROperand *value) {
+  if (value->kind != IR_OPERAND_TEMP || !value->name) return NULL;
+  for (size_t k = origins->out.count; k > 0; k--) {
+    const IRInstruction *in = &origins->out.items[k - 1];
+    if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+        strcmp(in->dest.name, value->name) == 0) {
+      if (in->op != IR_OP_LOAD || !in->lhs.name ||
+          (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL)) {
+        return NULL;
+      }
+      for (size_t j = k; j < origins->out.count; j++) {
+        const IRInstruction *later = &origins->out.items[j];
+        if (later->dest.kind == in->lhs.kind && later->dest.name &&
+            strcmp(later->dest.name, in->lhs.name) == 0) return NULL;
+      }
+      return &in->lhs;
+    }
+    if (in->op == IR_OP_STORE || in->op == IR_OP_LABEL || in->op == IR_OP_JUMP ||
+        in->op == IR_OP_BRANCH_ZERO || in->op == IR_OP_BRANCH_EQ ||
+        in->op == IR_OP_RETURN || in->op == IR_OP_CALL_INDIRECT) return NULL;
+    if (in->op == IR_OP_CALL &&
+        (!in->text || strncmp(in->text, "mettle_safety_", 14) != 0)) return NULL;
+  }
+  return NULL;
+}
+
 static int origin_address(SafetyOrigins *origins, SourceLocation location,
                           const IROperand *value, IROperand *address) {
+  const IROperand *home = origin_temp_home(origins, value);
+  if (home) return ir_operand_clone(home, address);
   *address = origin_fresh();
   IRInstruction in = {0};
   in.op = IR_OP_ADDRESS_OF;
