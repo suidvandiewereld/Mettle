@@ -2903,8 +2903,8 @@ int mir_regalloc(MirFunction *fn) {
     gp_held_by[i] = -1;
     xmm_held_by[i] = -1;
   }
-  xmm_held_by[BINARY_XMM4] = -2;
-  xmm_held_by[BINARY_XMM5] = -2;
+  xmm_held_by[mir_xmm_scratch_a()] = -2;
+  xmm_held_by[mir_xmm_scratch_b()] = -2;
   BinaryGpRegister gp_leaf_pool[MIR_GP_LEAF_POOL_MAX];
   size_t gp_leaf_pool_count = mir_build_gp_leaf_pool(
       gp_leaf_pool, fn->param_count + (fn->returns_indirect ? 1 : 0),

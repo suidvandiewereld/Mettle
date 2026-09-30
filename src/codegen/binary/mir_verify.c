@@ -299,6 +299,17 @@ static int mir_shape_assigned(MirShape *st, size_t at, MirVregId v) {
     if (vr->rclass == MIR_RC_GP && vr->phys == BINARY_GP_RSP) {
       return mir_shape_fail(st, at, "vreg assigned the stack pointer", v);
     }
+    if (vr->rclass == MIR_RC_GP &&
+        (vr->phys == BINARY_GP_R10 || vr->phys == BINARY_GP_R11)) {
+      return mir_shape_fail(st, at, "vreg assigned an encoder scratch register",
+                            v);
+    }
+    if (vr->rclass == MIR_RC_XMM &&
+        mir_xmm_is_encoder_scratch((BinaryXmmRegister)vr->phys)) {
+      return mir_shape_fail(st, at,
+                            "vreg assigned an encoder float scratch register",
+                            v);
+    }
     return 1;
   }
   if (vr->spill_offset <= 0) {
