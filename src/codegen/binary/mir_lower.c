@@ -2482,10 +2482,7 @@ static int mir_gate_signature(CodeGenerator *generator,
 static void mir_scan_global_write(CodeGenerator *generator,
                                   const IRFunction *ir_function,
                                   const IRInstruction *in,
-                                  MirNameMap *defined, int *globals_ok,
-                                  int *has_global_write, int *gw_overflow,
-                                  const char **gw_names,
-                                  size_t *gw_count) {
+                                  MirNameMap *defined, int *globals_ok) {
   if (ir_operand_is_symbol(&in->dest)) {
     int found = mir_name_map_has(defined, in->dest.name);
     int agg_addr_dest =
@@ -2504,23 +2501,6 @@ static void mir_scan_global_write(CodeGenerator *generator,
       mir_call_trace_named("global_write", in->dest.name);
       *globals_ok = 0;
       return;
-    }
-    if (!found && !agg_addr_dest) {
-      *has_global_write = 1;
-      int seen = 0;
-      for (size_t j = 0; j < (*gw_count); j++) {
-        if (strcmp(gw_names[j], in->dest.name) == 0) {
-          seen = 1;
-          break;
-        }
-      }
-      if (!seen) {
-        if ((*gw_count) < 64) {
-          gw_names[(*gw_count)++] = in->dest.name;
-        } else {
-          *gw_overflow = 1;
-        }
-      }
     }
   }
 }
@@ -2603,19 +2583,10 @@ static int mir_scan_global_arguments(CodeGenerator *generator,
 
 static void mir_scan_global_operands(CodeGenerator *generator,
                                      const IRFunction *ir_function,
-                                     MirNameMap *defined, int *globals_ok,
-                                     int *has_global_write, int *has_call,
-                                     int *gw_overflow) {
-  const char *gw_names[64];
-  size_t gw_count = 0;
-
+                                     MirNameMap *defined, int *globals_ok) {
   for (size_t i = 0; i < ir_function->instruction_count && *globals_ok; i++) {
     const IRInstruction *in = &ir_function->instructions[i];
-    if (in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) {
-      *has_call = 1;
-    }
-    mir_scan_global_write(generator, ir_function, in, defined, globals_ok,
-                          has_global_write, gw_overflow, gw_names, &gw_count);
+    mir_scan_global_write(generator, ir_function, in, defined, globals_ok);
     if (*globals_ok &&
         (!mir_scan_global_reads(generator, ir_function, in, defined) ||
          !mir_scan_global_arguments(generator, ir_function, in, defined))) {
@@ -2630,9 +2601,6 @@ static int mir_gate_globals(CodeGenerator *generator,
   MirFunction scratch_fn;
   memset(&scratch_fn, 0, sizeof(scratch_fn));
   int globals_ok = 1;
-  int has_global_write = 0;
-  int has_call = 0;
-  int gw_overflow = 0;
   for (size_t i = 0; i < ir_function->parameter_count; i++) {
     if (ir_function->parameter_names[i]) {
       mir_name_map_get_or_add(&defined, &scratch_fn,
@@ -2653,15 +2621,11 @@ static int mir_gate_globals(CodeGenerator *generator,
     mir_function_destroy(&scratch_fn);
     return mir_trace_bail(ir_function, "globals:lowering_error");
   }
-  mir_scan_global_operands(generator, ir_function, &defined, &globals_ok,
-                           &has_global_write, &has_call, &gw_overflow);
+  mir_scan_global_operands(generator, ir_function, &defined, &globals_ok);
   mir_name_map_destroy(&defined);
   mir_function_destroy(&scratch_fn);
   if (!globals_ok) {
     return mir_trace_bail(ir_function, "global_access");
-  }
-  if (has_global_write && has_call && gw_overflow) {
-    return mir_trace_bail(ir_function, "global_write_with_call");
   }
   return 1;
 }

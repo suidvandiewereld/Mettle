@@ -1654,6 +1654,7 @@ $cases = @(
   @{ Name = "float_to_int_inline_compare"; Path = "tests/test_float_to_int_inline_compare.mettle"; ShouldSucceed = $true; Args = @("-O") },
   @{ Name = "many_jump_tables"; Path = "tests/test_many_jump_tables.mettle"; ShouldSucceed = $true },
   @{ Name = "many_parameters"; Path = "tests/test_many_parameters.mettle"; ShouldSucceed = $true },
+  @{ Name = "many_global_writes"; Path = "tests/test_many_global_writes.mettle"; ShouldSucceed = $true },
   @{ Name = "else_if_guard_prefix"; Path = "tests/test_else_if_guard_prefix.mettle"; ShouldSucceed = $true },
   @{ Name = "err_else_if_guard_prefix"; Path = "tests/err_else_if_guard_prefix.mettle"; ShouldSucceed = $false; Pattern = 'its range here is 0\.\.11' },
   @{ Name = "pointer_null"; Path = "tests/test_pointer_null.mettle"; ShouldSucceed = $true },

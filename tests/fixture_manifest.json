@@ -130,6 +130,11 @@
       "source": "tests/tmp_abi_float_symbol_args.mettle",
       "run": true,
       "exit": 0
+    },
+    {
+      "source": "tests/test_many_global_writes.mettle",
+      "run": true,
+      "exit": 0
     }
   ]
 }
