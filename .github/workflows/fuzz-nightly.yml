@@ -68,6 +68,11 @@ jobs:
       - name: Run differential fuzzer
         id: fuzz
         shell: pwsh
+        env:
+          METTLE_MIR_VERIFY: "1"
+          METTLE_REGALLOC_VERIFY: "1"
+          METTLE_RA_COALESCE_CHECK: "1"
+          METTLE_ICE_DIR: ${{ runner.temp }}/ice
         run: |
           python tools/fuzz/fuzz.py `
             --count ${{ steps.window.outputs.count }} `
@@ -80,7 +85,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: fuzz-repros-${{ steps.window.outputs.start }}
-          path: tools/fuzz/repros/**
+          path: |
+            tools/fuzz/repros/**
+            ${{ runner.temp }}/ice/**
           if-no-files-found: ignore
           retention-days: 30
 
@@ -134,3 +141,135 @@ jobs:
                 title, body, labels: [label],
               });
             }
+
+  selfcheck:
+    name: Self-checking generator (${{ matrix.gen }})
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gen: gen
+            count: 2000
+          - gen: gen2
+            count: 2000
+          - gen: gen3
+            count: 2000
+          - gen: gen4
+            count: 2000
+          - gen: loopk
+            count: 300
+    env:
+      METTLE_ICE_DIR: ${{ github.workspace }}/ice
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build compiler
+        shell: pwsh
+        env:
+          METTLE_NO_CODEVIEW: "1"
+        run: |
+          & cmd /c "build.bat gcc --skip-tests"
+          if (-not (Test-Path "bin\mettle.exe")) { throw "compiler build failed" }
+
+      - name: Compute seed window
+        id: window
+        shell: pwsh
+        run: |
+          $start = "${{ github.event.inputs.start }}"
+          if ([string]::IsNullOrWhiteSpace($start)) {
+            $start = (1 + (Get-Date).DayOfYear * ${{ matrix.count }}).ToString()
+          }
+          echo "start=$start" >> $env:GITHUB_OUTPUT
+
+      - name: Run the generator in every build mode with every verifier
+        shell: pwsh
+        run: |
+          python tools/fuzz/selfcheck/run.py --gen ${{ matrix.gen }} `
+            --start ${{ steps.window.outputs.start }} --count ${{ matrix.count }} `
+            --modes d,O,r,sr,s,sfr -j 4 --verify `
+            --comp (Resolve-Path "bin\mettle.exe").Path
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload failing seeds and ICE bundles
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: selfcheck-${{ matrix.gen }}-${{ steps.window.outputs.start }}
+          path: |
+            tools/fuzz/selfcheck/work/*.mettle
+            ice/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  selfcheck-exhaustive:
+    name: Operator matrix, C interop and determinism
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      METTLE_ICE_DIR: ${{ github.workspace }}/ice
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build compiler
+        shell: pwsh
+        env:
+          METTLE_NO_CODEVIEW: "1"
+        run: |
+          & cmd /c "build.bat gcc --skip-tests"
+          if (-not (Test-Path "bin\mettle.exe")) { throw "compiler build failed" }
+
+      - name: Operator matrix at every integer width
+        shell: pwsh
+        env:
+          METTLE_MIR_VERIFY: "1"
+          METTLE_REGALLOC_VERIFY: "1"
+          METTLE_RA_COALESCE_CHECK: "1"
+        run: |
+          python tools/fuzz/selfcheck/matrix.py (Resolve-Path "bin\mettle.exe").Path `
+            divmod,cmp,widecmp,shift,mulconst d,O,r,sr
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: C interop in both directions
+        if: always()
+        shell: pwsh
+        env:
+          METTLE_MIR_VERIFY: "1"
+          METTLE_REGALLOC_VERIFY: "1"
+          METTLE_RA_COALESCE_CHECK: "1"
+        run: |
+          python -m pip install numpy
+          $start = 1 + (Get-Date).DayOfYear * 300
+          python tools/fuzz/selfcheck/abifuzz.py (Resolve-Path "bin\mettle.exe").Path `
+            $start 300 ",-O,--release"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Two copies of the compiler build every test and example alike
+        if: always()
+        shell: pwsh
+        run: |
+          python tools/ci/oracles/twocopies.py --selftest --limit 20 -j 4
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python tools/ci/oracles/twocopies.py --modes d,O,r,safe,s -j 4
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload failing programs and ICE bundles
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: selfcheck-exhaustive
+          path: |
+            tools/fuzz/selfcheck/mwork/**
+            tools/fuzz/selfcheck/abiwork/**
+            ice/**
+          if-no-files-found: ignore
+          retention-days: 30

@@ -13,14 +13,20 @@ MODES = {
     "O": (["-O"], {}),
     "r": (["--release"], {}),
     "sr": (["-s", "--release"], {}),
-    "d0": ([], {"METTLE_MIR": "0"}),
-    "r0": (["--release"], {"METTLE_MIR": "0"}),
+    "s": (["--safe"], {}),
+    "sfr": (["--safe", "--release"], {}),
     "rv": (["--release"], {"METTLE_REGALLOC_VERIFY": "1", "METTLE_RA_COALESCE_CHECK": "1"}),
     "nossa": (["--release"], {"METTLE_IR_SSA": "0"}),
 }
 
+VERIFY_ENV = {
+    "METTLE_MIR_VERIFY": "1",
+    "METTLE_REGALLOC_VERIFY": "1",
+    "METTLE_RA_COALESCE_CHECK": "1",
+}
 
-def one(comp, gen, seed, modes, work, opts):
+
+def one(comp, gen, seed, modes, work, opts, verify):
     try:
         src, checks = gen.make(seed, opts)
     except RuntimeError as e:
@@ -33,6 +39,8 @@ def one(comp, gen, seed, modes, work, opts):
         args, envx = MODES[m]
         exe = os.path.join(work, f"s{seed}_{m}.exe")
         env = dict(os.environ)
+        if verify:
+            env.update(VERIFY_ENV)
         env.update(envx)
         try:
             p = subprocess.run([comp, "--build"] + args + [path, "-o", exe], capture_output=True, env=env, timeout=120)
@@ -72,11 +80,12 @@ def main():
     ap.add_argument("--gen", default="gen")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--count", type=int, default=100)
-    ap.add_argument("--modes", default="d,O,r,sr,d0,r0")
+    ap.add_argument("--modes", default="d,O,r,sr,s,sfr")
     ap.add_argument("-j", type=int, default=10)
     ap.add_argument("--comp", default=os.path.join(HERE, "..", "..", "..", "bin", "mettle.exe"))
     ap.add_argument("--work", default=os.path.join(HERE, "work"))
     ap.add_argument("--opt", action="append", default=[])
+    ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()
     a.comp = os.path.abspath(a.comp)
     gen = importlib.import_module(a.gen)
@@ -87,15 +96,20 @@ def main():
     os.makedirs(a.work, exist_ok=True)
     modes = a.modes.split(",")
     nbad = 0
+    ngen = 0
     with cf.ThreadPoolExecutor(a.j) as ex:
-        futs = [ex.submit(one, a.comp, gen, s, modes, a.work, opts) for s in range(a.start, a.start + a.count)]
+        futs = [ex.submit(one, a.comp, gen, s, modes, a.work, opts, a.verify) for s in range(a.start, a.start + a.count)]
         for f in cf.as_completed(futs):
             seed, bad = f.result()
-            if bad:
+            if bad and all(m == "gen" for m, _ in bad):
+                ngen += 1
+                print(seed, "generator declined:", bad[0][1], flush=True)
+            elif bad:
                 nbad += 1
                 print(seed, bad, flush=True)
-    print(f"done {a.count} seeds, {nbad} with failures", flush=True)
+    print(f"done {a.count} seeds, {nbad} with failures, {ngen} declined by the generator", flush=True)
+    return 1 if nbad else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -19,10 +19,20 @@ side is wrong.
 Run a sweep over several build modes:
 
 ```
-python run.py --gen gen4 --start 1 --count 300 -j 8 --modes d,O,r,sr
+python run.py --gen gen4 --start 1 --count 300 -j 8 --modes d,O,r,sr,s,sfr --verify
 python abifuzz.py ../../../bin/mettle.exe 1 200 ",-O,--release"
 python matrix.py ../../../bin/mettle.exe divmod,shift,cmp d,O,r
 ```
+
+Modes: `d` debug, `O`, `r` release, `sr` `-s --release`, `s` `--safe`, `sfr`
+`--safe --release`, `rv` release with the register allocation checks,
+`nossa` release with `METTLE_IR_SSA=0`. `--verify` sets `METTLE_MIR_VERIFY`,
+`METTLE_REGALLOC_VERIFY` and `METTLE_RA_COALESCE_CHECK` for every mode.
+`--check-overflow` is not a mode: the generators rely on signed wraparound,
+which that flag traps by design.
+
+All three scripts exit nonzero when any program fails, so CI can gate on them.
+A seed the generator itself declines is reported and does not count.
 
 Reduce a failing seed (the reducer re-runs the model after every edit, so the
 expected values stay right):

@@ -178,7 +178,8 @@ def main():
             bad += 1
             print(os.path.basename(path), m, r)
     print(f"{len(jobs)} runs, {bad} bad")
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

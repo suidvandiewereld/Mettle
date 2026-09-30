@@ -346,3 +346,4 @@ if __name__ == "__main__":
                 bad += 1
                 print(s, res, flush=True)
     print(f"done {count}, {bad} bad")
+    sys.exit(1 if bad else 0)

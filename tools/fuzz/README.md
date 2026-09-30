@@ -1,9 +1,15 @@
 # Differential miscompile fuzzer
 
 Makes Mettle hard to miscompile silently. Generates random, UB-free programs,
-builds each at **debug** and **release**, runs both, and flags any exit-code
-divergence. Debug is the trusted oracle (the optimizer only runs at
-`-O`/`--release`), so a divergence is a genuine miscompile, never generator UB.
+builds each at **debug**, **-O**, **release** and **--safe --release**, runs
+them, and flags any exit code that differs from debug. Debug is the trusted
+oracle (the optimizer only runs at `-O`/`--release`), so a divergence is a
+genuine miscompile, never generator UB. A program that builds at debug and
+fails to build in another mode is flagged too.
+
+The nightly job runs it with `METTLE_MIR_VERIFY`, `METTLE_REGALLOC_VERIFY` and
+`METTLE_RA_COALESCE_CHECK` set, so a malformed backend function fails the
+build and leaves a reproduction bundle in `METTLE_ICE_DIR`.
 
 ## Quick start
 
@@ -37,8 +43,9 @@ authoritative artifact.
   first group-skipping all SIMD passes, then all known passes, then
   bisecting to a single pass name. `[pass=simd_byte_map]` in the report
   means skipping exactly that pass makes release agree with debug;
-  `[backend/codegen]` means the divergence survives with every IR pass
-  disabled.
+  `[mir pass=mir_cse_loads]` names a MIR pass the same way;
+  `[backend/codegen]` means the divergence survives with every IR pass and
+  every optional MIR pass disabled.
 - **irexec.py** — reference interpreter for the `--dump-ir` sidecar (the v1
   int64 subset only). Run the **optimized** IR through it to split bug
   classes when pass attribution is inconclusive.
@@ -51,8 +58,10 @@ authoritative artifact.
 The compiler honors `METTLE_SKIP_PASS="sroa,simd_dot_i8,14"` (names or
 numeric fixpoint indices) and it now covers **both** fixpoint passes and the
 named-sequence stages (float vectorizers, auto_vectorize, outer_vectorize,
-SLP/dot passes, hoist_pure_calls). fuzz.py does this bisection automatically
-on every divergence.
+SLP/dot passes, hoist_pure_calls). The MIR passes between lowering and
+register allocation skip by name too (`mir_cse_loads`, `mir_rotate_loops`,
+and the rest listed in fuzz.py); `mir_place_const_pool` is required and never
+skips. fuzz.py does this bisection automatically on every divergence.
 
 ## History
 

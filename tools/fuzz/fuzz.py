@@ -48,22 +48,28 @@ OTHER_PASSES = [
     "memcpy_inline", "eliminate_load_symbol_copy", "fuse_rotate_add",
     "strength_reduce_rotate_loops",
 ]
+MIR_PASSES = [
+    "mir_fuse_mov_then_extend", "mir_fuse_extend_then_mov",
+    "mir_drop_dead_extensions", "mir_canonicalize_commutative",
+    "mir_narrow_zero_extended_ops", "mir_elide_guarded_sext",
+    "mir_fold_widening_of_canonical", "mir_fold_address_offsets",
+    "mir_fold_index_scale", "mir_cse_loads", "mir_slp_pair_f64",
+    "mir_build_jump_tables", "mir_rotate_loops", "mir_thread_branch_over_jump",
+    "mir_fuse_bit_test_branch", "mir_sink_cold_exits",
+]
 
 
-def build(compiler, src, out, release, skip=None, no_mir=False):
+def build(compiler, src, out, release, skip=None, extra=None):
     args = [compiler, "--build", "--emit-obj", "--linker", "internal"]
     if release:
         args.append("--release")
+    args += extra or []
     args += [src, "-o", out]
     env = dict(os.environ)
     if skip:
         env["METTLE_SKIP_PASS"] = ",".join(skip)
     else:
         env.pop("METTLE_SKIP_PASS", None)
-    if no_mir:
-        env["METTLE_MIR"] = "0"
-    else:
-        env.pop("METTLE_MIR", None)
     p = subprocess.run(args, capture_output=True, text=True, timeout=120,
                        env=env)
     return p.returncode, (p.stdout + p.stderr)
@@ -99,7 +105,10 @@ def attribute(compiler, src, rel_exe, debug_rc):
                 if rc_with([name]) == debug_rc:
                     return f"pass={name}"
             return f"pass-group={group_name} (no single pass; interaction?)"
-    return "backend/codegen (persists with all IR passes skipped)"
+    for name in MIR_PASSES:
+        if rc_with([name]) == debug_rc:
+            return f"mir pass={name}"
+    return "backend/codegen (persists with all IR and MIR passes skipped)"
 
 
 def main():
@@ -147,31 +156,27 @@ def main():
         dbg_rc, _ = run(dbg)
         rel_rc, _ = run(rel)
 
-        # Backend-vs-backend oracle: the same unoptimized IR through the MIR
-        # and fallback backends must agree. A mismatch is a definite codegen
-        # bug in one of them, independent of (and invisible to) the
-        # debug-vs-release comparison when the buggy backend wins both.
-        fbk_bc, _ = build(args.compiler, src, dbg, release=False, no_mir=True)
-        fbk_rc = run(dbg)[0] if fbk_bc == 0 else None
+        opt_bc, _ = build(args.compiler, src, dbg, release=False, extra=["-O"])
+        opt_rc = run(dbg)[0] if opt_bc == 0 else None
 
-        # Same again at release. The fallback emitter carries its own
-        # register promotion, and a global promoted there once lived in a
-        # register with no load at entry and no store at exit -- invisible
-        # to every comparison above, because MIR takes those functions
-        # whenever it can.
-        rfb_bc, _ = build(args.compiler, src, rel, release=True, no_mir=True)
-        rfb_rc = run(rel)[0] if rfb_bc == 0 else None
+        safe_bc, _ = build(args.compiler, src, rel, release=True,
+                           extra=["--safe"])
+        safe_rc = run(rel)[0] if safe_bc == 0 else None
 
         if dbg_rc != rel_rc:
             attr = attribute(args.compiler, src, rel, dbg_rc)
             save_repro(f"EXIT DIVERGENCE: debug={dbg_rc}, release={rel_rc}"
                        f" [{attr}]")
-        elif fbk_rc is not None and fbk_rc != dbg_rc:
-            save_repro(f"BACKEND DIVERGENCE at -O0: mir={dbg_rc},"
-                       f" fallback={fbk_rc}")
-        elif rfb_rc is not None and rfb_rc != rel_rc:
-            save_repro(f"BACKEND DIVERGENCE at --release: mir={rel_rc},"
-                       f" fallback={rfb_rc}")
+        elif opt_bc != 0:
+            save_repro(f"build divergence: debug rc=0, -O rc={opt_bc}")
+        elif opt_rc != dbg_rc:
+            save_repro(f"EXIT DIVERGENCE: debug={dbg_rc}, -O={opt_rc}")
+        elif safe_bc != 0:
+            save_repro(f"build divergence: debug rc=0,"
+                       f" --safe --release rc={safe_bc}")
+        elif safe_rc != dbg_rc:
+            save_repro(f"EXIT DIVERGENCE: debug={dbg_rc},"
+                       f" --safe --release={safe_rc}")
         elif is_crash(dbg_rc) and is_crash(rel_rc):
             save_repro(f"both crash (rc={dbg_rc}) -- possible UB in generator")
         elif args.keep:

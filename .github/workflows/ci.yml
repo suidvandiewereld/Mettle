@@ -137,6 +137,9 @@ jobs:
         # the .pdb-backed ICE backtraces that flag provides.
         env:
           METTLE_NO_CODEVIEW: "1"
+          METTLE_MIR_VERIFY: "1"
+          METTLE_REGALLOC_VERIFY: "1"
+          METTLE_RA_COALESCE_CHECK: "1"
         run: build.bat gcc
 
       # run_tests.ps1 writes generated .s/.ir output to $env:TEMP\Mettle-test-artifacts.
@@ -152,7 +155,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: failed-test-output
-          path: ${{ steps.artifacts.outputs.dir }}/**
+          path: ${{ steps.artifacts.outputs.dir }}*/**
           if-no-files-found: ignore
           retention-days: 7
 
@@ -237,7 +240,20 @@ jobs:
       # one case table and a test added for either lands on both.
       - name: Full test suite
         shell: bash
+        env:
+          METTLE_MIR_VERIFY: "1"
+          METTLE_REGALLOC_VERIFY: "1"
+          METTLE_RA_COALESCE_CHECK: "1"
         run: pwsh -NoProfile -File tests/run_tests.ps1 -CompilerPath ./bin/mettle
+
+      - name: Upload test artifacts and ICE bundles on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: failed-test-output-linux-${{ matrix.cc }}
+          path: /tmp/Mettle-test-artifacts*/**
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Native AArch64 gate for the DGX Spark toolchain path: compiler bootstrap,
   # relocatable host objects and external linking, the 11-argument CUDA launch
