@@ -3,8 +3,6 @@ import struct
 import sys
 import warnings
 
-import numpy as np
-
 import gen as G
 from gen import TYPES, TNAMES, wrap, lit, Env, Scope, Return
 
@@ -19,7 +17,19 @@ FDIVS = [2.0, 4.0, 0.5, 3.0, 10.0, -8.0, 0.1, 7.0]
 
 
 def f32(x):
-    return float(np.float32(x))
+    if math.isnan(x) or math.isinf(x):
+        return x
+    try:
+        return struct.unpack("<f", struct.pack("<f", x))[0]
+    except OverflowError:
+        return math.copysign(math.inf, x)
+
+
+def f32_toward_zero(x):
+    b = struct.unpack("<I", struct.pack("<f", x))[0]
+    if b & 0x7FFFFFFF == 0:
+        return x
+    return struct.unpack("<f", struct.pack("<I", b - 1))[0]
 
 
 def i2f32(n):
@@ -73,7 +83,7 @@ def f2i_bounds(it, ft="float64"):
     if ft == "float32":
         h = f32(hi)
         if h > hi:
-            h = float(np.nextafter(np.float32(h), np.float32(0)))
+            h = f32_toward_zero(h)
         hi = h
     return lo, hi
 

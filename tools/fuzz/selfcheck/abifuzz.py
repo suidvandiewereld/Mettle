@@ -4,8 +4,6 @@ import struct
 import subprocess
 import sys
 
-import numpy as np
-
 from gen import TYPES, wrap, lit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -16,7 +14,7 @@ M = 2 ** 64
 
 
 def f32(x):
-    return float(np.float32(x))
+    return struct.unpack("<f", struct.pack("<f", x))[0]
 
 
 def bits(v, t):
