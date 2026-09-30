@@ -16,6 +16,52 @@ void mettle_crash_write_stderr(const char *text) {
   mettle_crash_write_stderr_bytes(text, strlen(text));
 }
 
+int mettle_path_exists(const char *path);
+int mettle_path_is_directory(const char *path);
+int mettle_make_directory(const char *path);
+long long mettle_executable_path(char *buffer, unsigned long long size);
+int mettle_getcwd(char *buffer, int size);
+unsigned long long mettle_environment_write(char *buffer,
+                                            unsigned long long size,
+                                            const char *prefix);
+
+int mettle_path_exists(const char *path) {
+  (void)path;
+  return 0;
+}
+
+int mettle_path_is_directory(const char *path) {
+  (void)path;
+  return 0;
+}
+
+int mettle_make_directory(const char *path) {
+  (void)path;
+  return -1;
+}
+
+long long mettle_executable_path(char *buffer, unsigned long long size) {
+  (void)buffer;
+  (void)size;
+  return -1;
+}
+
+int mettle_getcwd(char *buffer, int size) {
+  (void)buffer;
+  (void)size;
+  return -1;
+}
+
+unsigned long long mettle_environment_write(char *buffer,
+                                            unsigned long long size,
+                                            const char *prefix) {
+  (void)prefix;
+  if (buffer && size > 0) {
+    buffer[0] = '\0';
+  }
+  return 0;
+}
+
 #if !defined(_WIN32) && !defined(_WIN64)
 
 #include <signal.h>

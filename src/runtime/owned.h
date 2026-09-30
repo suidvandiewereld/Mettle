@@ -12,6 +12,9 @@ int mettle_make_directory(const char *path);
 long long mettle_executable_path(char *buffer, unsigned long long size);
 char *mettle_realpath(const char *path, char *resolved);
 int mettle_getcwd(char *buffer, int size);
+unsigned long long mettle_environment_write(char *buffer,
+                                            unsigned long long size,
+                                            const char *prefix);
 long long mettle_readlink(const char *path, char *buffer,
                           unsigned long long size);
 

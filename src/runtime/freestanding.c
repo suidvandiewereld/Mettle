@@ -439,6 +439,26 @@ static int mt_is_markdown_name(const char *name) {
   return length >= 3 && strcasecmp(name + length - 3, ".md") == 0;
 }
 
+static unsigned long long mt_environment_append_entry(
+    char *buffer, unsigned long long size, unsigned long long used,
+    const char *name, mt_size name_length, const char *value) {
+  mt_size value_length = value ? strlen(value) : 0;
+  unsigned long long need = (unsigned long long)name_length + value_length + 2;
+  if (used + need >= size) {
+    return used;
+  }
+  memcpy(buffer + used, name, name_length);
+  used += name_length;
+  buffer[used++] = '=';
+  if (value_length) {
+    memcpy(buffer + used, value, value_length);
+    used += value_length;
+  }
+  buffer[used++] = '\n';
+  buffer[used] = '\0';
+  return used;
+}
+
 #if defined(_WIN32)
 
 #define MT_DLLIMPORT __declspec(dllimport)
@@ -642,6 +662,26 @@ char *getenv(const char *name) {
     mt_environment_slot_count++;
   }
   return mt_environment_slots[slot].value;
+}
+
+unsigned long long mettle_environment_write(char *buffer,
+                                            unsigned long long size,
+                                            const char *prefix) {
+  unsigned long long used = 0;
+  mt_size prefix_length = prefix ? strlen(prefix) : 0;
+  if (!buffer || size == 0) {
+    return 0;
+  }
+  buffer[0] = '\0';
+  for (mt_size i = 0; i < mt_environment_slot_count; i++) {
+    const char *name = mt_environment_slots[i].name;
+    if (prefix_length && strncmp(name, prefix, prefix_length) != 0) {
+      continue;
+    }
+    used = mt_environment_append_entry(buffer, size, used, name, strlen(name),
+                                       getenv(name));
+  }
+  return used;
 }
 
 int putenv(char *setting) {
@@ -1811,6 +1851,39 @@ char *getenv(const char *name) {
   }
 
   return mt_read_environment_value(name, name_length);
+}
+
+static unsigned long long mt_environment_write_list(
+    char *buffer, unsigned long long size, unsigned long long used,
+    char *const *items, mt_size count, const char *prefix,
+    mt_size prefix_length) {
+  for (mt_size i = 0; items && (count ? i < count : items[i] != MT_NULL); i++) {
+    const char *item = items[i];
+    const char *equals = item ? strchr(item, '=') : MT_NULL;
+    if (!equals || (prefix_length && strncmp(item, prefix, prefix_length) != 0)) {
+      continue;
+    }
+    used = mt_environment_append_entry(buffer, size, used, item,
+                                       (mt_size)(equals - item), equals + 1);
+  }
+  return used;
+}
+
+unsigned long long mettle_environment_write(char *buffer,
+                                            unsigned long long size,
+                                            const char *prefix) {
+  unsigned long long used = 0;
+  mt_size prefix_length = prefix ? strlen(prefix) : 0;
+  if (!buffer || size == 0) {
+    return 0;
+  }
+  buffer[0] = '\0';
+  used = mt_environment_write_list(buffer, size, used, mt_environment_overrides,
+                                   mt_environment_override_count, prefix,
+                                   prefix_length);
+  used = mt_environment_write_list(buffer, size, used, mt_environment, 0, prefix,
+                                   prefix_length);
+  return used;
 }
 
 #if defined(__x86_64__)

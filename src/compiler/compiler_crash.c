@@ -21,8 +21,20 @@
 #define MAX_BACKTRACE_FRAMES 64
 #define MAX_SYM_NAME_LEN 1024
 
+#if defined(_WIN32) || defined(_WIN64)
+#define METTLE_ICE_SEP '\\'
+#else
+#define METTLE_ICE_SEP '/'
+#endif
+
 static int g_compiler_crash_installed = 0;
 static int g_compiler_in_ice_handler = 0;
+static int g_compiler_argc = 0;
+static char **g_compiler_argv = NULL;
+static int g_ice_bundle_state = 0;
+static char g_ice_bundle_dir[1024];
+static MettleIceBackendDump g_ice_backend_dump = NULL;
+static const void *g_ice_backend_arg = NULL;
 #if defined(_WIN32) || defined(_WIN64)
 static int g_sym_initialized = 0;
 static CONTEXT *g_compiler_crash_context = NULL;
@@ -239,7 +251,201 @@ static void mettle_compiler_write_backtrace(FILE *output) {
 #endif
 }
 
+static void mettle_compiler_write_backtrace_copy(FILE *output) {
+#if defined(_WIN32) || defined(_WIN64)
+  if (g_compiler_crash_context) {
+    CONTEXT copy = *g_compiler_crash_context;
+    mettle_compiler_write_backtrace_with_context(output, &copy);
+    return;
+  }
+#endif
+  mettle_compiler_write_backtrace_with_context(output, NULL);
+}
+
+static const char *mettle_ice_base_dir(void) {
+  static const char *const names[] = {"METTLE_ICE_DIR", "TEMP", "TMP",
+                                      "TMPDIR"};
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    const char *value = getenv(names[i]);
+    if (value && value[0] != '\0') {
+      return value;
+    }
+  }
+#if defined(_WIN32) || defined(_WIN64)
+  return ".";
+#else
+  return "/tmp";
+#endif
+}
+
+static const char *mettle_ice_basename(const char *path) {
+  const char *start = path;
+  for (const char *p = path; *p; p++) {
+    if (*p == '/' || *p == '\\') {
+      start = p + 1;
+    }
+  }
+  return start;
+}
+
+const char *mettle_compiler_ice_bundle_dir(void) {
+  const char *input = mettle_compiler_ctx()->input_filename;
+  const char *base = NULL;
+  char stem[128];
+  size_t n = 0;
+
+  if (g_ice_bundle_state != 0) {
+    return g_ice_bundle_state > 0 ? g_ice_bundle_dir : NULL;
+  }
+  g_ice_bundle_state = -1;
+  if (getenv("METTLE_NO_ICE_BUNDLE")) {
+    return NULL;
+  }
+  base = mettle_ice_base_dir();
+  if (!mettle_path_is_directory(base)) {
+    (void)mettle_make_directory(base);
+  }
+  if (input) {
+    const char *name = mettle_ice_basename(input);
+    while (name[n] && name[n] != '.' && n + 1 < sizeof(stem)) {
+      stem[n] = name[n];
+      n++;
+    }
+  }
+  stem[n] = '\0';
+  for (int k = 1; k < 10000; k++) {
+    snprintf(g_ice_bundle_dir, sizeof(g_ice_bundle_dir), "%s%c%s-ice-%d", base,
+             METTLE_ICE_SEP, n ? stem : "mettle", k);
+    if (mettle_path_exists(g_ice_bundle_dir)) {
+      continue;
+    }
+    if (mettle_make_directory(g_ice_bundle_dir) != 0) {
+      return NULL;
+    }
+    g_ice_bundle_state = 1;
+    return g_ice_bundle_dir;
+  }
+  return NULL;
+}
+
+FILE *mettle_compiler_ice_bundle_open(const char *name) {
+  char path[1200];
+  const char *dir = mettle_compiler_ice_bundle_dir();
+  if (!dir || !name) {
+    return NULL;
+  }
+  snprintf(path, sizeof(path), "%s%c%s", dir, METTLE_ICE_SEP, name);
+  return fopen(path, "wb");
+}
+
+void mettle_compiler_ice_set_backend_dump(MettleIceBackendDump dump,
+                                          const void *arg) {
+  g_ice_backend_dump = dump;
+  g_ice_backend_arg = arg;
+}
+
+void mettle_compiler_ice_capture_backend(void) {
+  MettleIceBackendDump dump = g_ice_backend_dump;
+  const void *arg = g_ice_backend_arg;
+  FILE *output = NULL;
+
+  g_ice_backend_dump = NULL;
+  g_ice_backend_arg = NULL;
+  if (!dump) {
+    return;
+  }
+  output = mettle_compiler_ice_bundle_open("mir.txt");
+  if (!output) {
+    return;
+  }
+  dump(arg, output);
+  fclose(output);
+}
+
+static void mettle_ice_write_command(FILE *output) {
+  char path[1024];
+  char *environment = NULL;
+
+  fprintf(output, "compiler: %s\n",
+          mettle_executable_path(path, sizeof(path)) > 0 ? path : "?");
+  fprintf(output, "directory: %s\n",
+          mettle_getcwd(path, (int)sizeof(path)) == 0 ? path : "?");
+  fprintf(output, "command:");
+  for (int i = 0; i < g_compiler_argc; i++) {
+    const char *arg = g_compiler_argv[i] ? g_compiler_argv[i] : "";
+    fprintf(output, (arg[0] == '\0' || strpbrk(arg, " \t")) ? " \"%s\"" : " %s",
+            arg);
+  }
+  fprintf(output, "\nenvironment:\n");
+  environment = (char *)malloc(65536);
+  if (environment) {
+    (void)mettle_environment_write(environment, 65536, "METTLE_");
+    fputs(environment, output);
+    free(environment);
+  }
+}
+
+static void mettle_ice_copy_input(const char *input) {
+  char buffer[8192];
+  FILE *source = NULL;
+  FILE *copy = NULL;
+  size_t n = 0;
+
+  if (!input) {
+    return;
+  }
+  source = fopen(input, "rb");
+  if (!source) {
+    return;
+  }
+  copy = mettle_compiler_ice_bundle_open(mettle_ice_basename(input));
+  if (copy) {
+    while ((n = fread(buffer, 1, sizeof(buffer), source)) > 0) {
+      fwrite(buffer, 1, n, copy);
+    }
+    fclose(copy);
+  }
+  fclose(source);
+}
+
+static int mettle_ice_bundle_begin(const char *reason, const char *detail) {
+  MettleCompilerContext *ctx = mettle_compiler_ctx();
+  FILE *output = mettle_compiler_ice_bundle_open("report.txt");
+
+  if (!output) {
+    return 0;
+  }
+  mettle_compiler_ctx_write_report(output, reason, detail);
+  mettle_compiler_write_backtrace_copy(output);
+  fclose(output);
+  output = mettle_compiler_ice_bundle_open("command.txt");
+  if (output) {
+    mettle_ice_write_command(output);
+    fclose(output);
+  }
+  mettle_ice_copy_input(ctx->input_filename);
+  fprintf(stderr, "\nReproduction bundle: %s\n", g_ice_bundle_dir);
+  return 1;
+}
+
+static void mettle_ice_bundle_finish(void) {
+  MettleCompilerContext *ctx = mettle_compiler_ctx();
+  FILE *output = NULL;
+
+  mettle_compiler_ice_capture_backend();
+  if (!ctx->ir_program) {
+    return;
+  }
+  output = mettle_compiler_ice_bundle_open("ir.txt");
+  if (output) {
+    (void)ir_program_dump(ctx->ir_program, output);
+    fclose(output);
+  }
+}
+
 void mettle_compiler_ice_report(const char *reason, const char *detail) {
+  int bundle = 0;
+
   if (g_compiler_in_ice_handler) {
     fprintf(stderr, "Mettle internal compiler error (recursive)\n");
     return;
@@ -248,7 +454,11 @@ void mettle_compiler_ice_report(const char *reason, const char *detail) {
   g_compiler_in_ice_handler = 1;
   mettle_compiler_ctx_write_snapshot();
   mettle_compiler_ctx_write_report(stderr, reason, detail);
+  bundle = mettle_ice_bundle_begin(reason, detail);
   mettle_compiler_write_backtrace(stderr);
+  if (bundle) {
+    mettle_ice_bundle_finish();
+  }
   g_compiler_in_ice_handler = 0;
 }
 
@@ -329,8 +539,8 @@ void mettle_compiler_crash_install(int argc, char **argv) {
     return;
   }
   g_compiler_crash_installed = 1;
-  (void)argc;
-  (void)argv;
+  g_compiler_argc = argc;
+  g_compiler_argv = argv;
 
 #if defined(_WIN32) || defined(_WIN64)
   SetUnhandledExceptionFilter(mettle_compiler_unhandled_exception_filter);

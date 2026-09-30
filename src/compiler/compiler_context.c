@@ -129,7 +129,12 @@ void mettle_compiler_ctx_reset(void) {
 }
 
 void mettle_compiler_ctx_set_phase(MettleCompilerPhase phase) {
-  mettle_compiler_ctx()->phase = phase;
+  MettleCompilerContext *ctx = mettle_compiler_ctx();
+  if (ctx->phase != phase) {
+    ctx->pass_name = NULL;
+    ctx->fixpoint_iteration = 0;
+  }
+  ctx->phase = phase;
 }
 
 void mettle_compiler_ctx_set_input_filename(const char *filename) {
