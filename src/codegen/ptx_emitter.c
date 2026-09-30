@@ -29,6 +29,11 @@ typedef struct {
 } PtxBinding;
 
 typedef struct {
+  const char *name;
+  int count;
+} PtxDefCount;
+
+typedef struct {
   uint32_t id;
   IRTensorResidencyScope scope;
   int resident;
@@ -50,6 +55,8 @@ typedef struct {
   int count[8];
   PtxBinding *binds;
   size_t nbinds, capbinds;
+  PtxDefCount *def_counts;
+  size_t def_capacity;
   PtxTensorResidency *tensor_residencies;
   size_t tensor_residency_count, tensor_residency_capacity;
   IRProgram *program;
@@ -176,8 +183,91 @@ static PtxBinding *named_binding(PtxFn *fn, const IROperand *op) {
   return find_binding(fn, op->name);
 }
 
+static size_t ptx_name_hash(const char *s) {
+  size_t h = (size_t)1469598103934665603ull;
+  for (; *s; s++) {
+    h ^= (unsigned char)*s;
+    h *= (size_t)1099511628211ull;
+  }
+  return h;
+}
+
+static PtxDefCount *ptx_def_slot(PtxFn *fn, const char *name) {
+  if (!fn->def_capacity || !name) {
+    return NULL;
+  }
+  size_t mask = fn->def_capacity - 1;
+  size_t i = ptx_name_hash(name) & mask;
+  while (fn->def_counts[i].name && strcmp(fn->def_counts[i].name, name) != 0) {
+    i = (i + 1) & mask;
+  }
+  return &fn->def_counts[i];
+}
+
+static int ptx_name_is_redefined(PtxFn *fn, const char *name) {
+  PtxDefCount *slot = ptx_def_slot(fn, name);
+  return slot && slot->name && slot->count > 1;
+}
+
+static PtxVal *ptx_append_binding(PtxFn *fn, const char *name, PtxVal v) {
+  if (fn->nbinds == fn->capbinds) {
+    fn->capbinds = fn->capbinds ? fn->capbinds * 2 : 16;
+    fn->binds = realloc(fn->binds, fn->capbinds * sizeof(PtxBinding));
+  }
+  fn->binds[fn->nbinds].name = strdup(name);
+  fn->binds[fn->nbinds].val = v;
+  return &fn->binds[fn->nbinds++].val;
+}
+
+static int ptx_register_is_bound(PtxFn *fn, PtxClass cls, int idx) {
+  for (size_t i = 0; i < fn->nbinds; i++) {
+    const PtxVal *val = &fn->binds[i].val;
+    if (val->mem_local || val->mem_aggregate) {
+      if (cls == PC_B64 && val->mem_addr == idx) {
+        return 1;
+      }
+      continue;
+    }
+    if (val->cls == cls && val->idx == idx) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static PtxVal *ptx_bind_into_home(PtxFn *fn, PtxBinding *b, const char *name,
+                                  PtxVal v) {
+  PtxVal home = v;
+  if (b) {
+    home.cls = b->val.cls;
+    home.idx = b->val.idx;
+  } else if (!ptx_register_is_bound(fn, v.cls, v.idx)) {
+    return ptx_append_binding(fn, name, v);
+  } else {
+    home.idx = new_reg(fn, v.cls);
+  }
+  char src[24], use[24], dst[24];
+  reg_name(v.cls, v.idx, src);
+  coerce(fn, v.cls, v.is_unsigned, src, home.cls, use);
+  reg_name(home.cls, home.idx, dst);
+  if (strcmp(dst, use) != 0) {
+    sb_printf(&fn->body, "\tmov%s %s, %s;\n", cls_regtype(home.cls), dst, use);
+  }
+  if (b) {
+    b->val = home;
+    return &b->val;
+  }
+  return ptx_append_binding(fn, name, home);
+}
+
 static PtxVal *bind_value(PtxFn *fn, const char *name, PtxVal v) {
   PtxBinding *b = find_binding(fn, name);
+  if (!v.mem_local && !v.mem_aggregate && v.cls != PC_NONE &&
+      (!b || (!b->val.mem_local && !b->val.mem_aggregate &&
+              b->val.cls != PC_NONE)) &&
+      ptx_name_is_redefined(fn, name)) {
+    return ptx_bind_into_home(fn, b, name, v);
+  }
   if (b) {
     if (b->val.mem_local && !v.mem_local) {
       if (!b->val.mem_aggregate) {
@@ -195,13 +285,7 @@ static PtxVal *bind_value(PtxFn *fn, const char *name, PtxVal v) {
     b->val = v;
     return &b->val;
   }
-  if (fn->nbinds == fn->capbinds) {
-    fn->capbinds = fn->capbinds ? fn->capbinds * 2 : 16;
-    fn->binds = realloc(fn->binds, fn->capbinds * sizeof(PtxBinding));
-  }
-  fn->binds[fn->nbinds].name = strdup(name);
-  fn->binds[fn->nbinds].val = v;
-  return &fn->binds[fn->nbinds++].val;
+  return ptx_append_binding(fn, name, v);
 }
 
 static PtxVal destination_value(PtxFn *fn, const IROperand *dest,
@@ -8774,7 +8858,44 @@ static void ptx_emit_release(PtxEmit *e) {
     free(e->fn.binds[i].name);
   }
   free(e->fn.binds);
+  free(e->fn.def_counts);
   free(e->fn.tensor_residencies);
+}
+
+static void ptx_count_one_definition(PtxFn *fn, const char *name) {
+  PtxDefCount *slot = ptx_def_slot(fn, name);
+  if (!slot) {
+    return;
+  }
+  slot->name = name;
+  slot->count++;
+}
+
+static void ptx_count_definitions(PtxFn *fn, const IRFunction *func) {
+  size_t needed = (func->instruction_count + func->parameter_count + 1) * 2;
+  size_t capacity = 16;
+  while (capacity < needed) {
+    capacity *= 2;
+  }
+  fn->def_counts = calloc(capacity, sizeof(PtxDefCount));
+  if (!fn->def_counts) {
+    return;
+  }
+  fn->def_capacity = capacity;
+  for (size_t p = 0; p < func->parameter_count; p++) {
+    if (func->parameter_names && func->parameter_names[p]) {
+      ptx_count_one_definition(fn, func->parameter_names[p]);
+    }
+  }
+  for (size_t i = 0; i < func->instruction_count; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    if (!ir_instruction_writes_destination(in) || !in->dest.name ||
+        (in->dest.kind != IR_OPERAND_TEMP &&
+         in->dest.kind != IR_OPERAND_SYMBOL)) {
+      continue;
+    }
+    ptx_count_one_definition(fn, in->dest.name);
+  }
 }
 
 static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
@@ -8794,6 +8915,7 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   e.fn.isa_major = isa_major;
   e.fn.isa_minor = isa_minor;
   e.fn.tensor_tuple_budget = tensor_tuple_budget;
+  ptx_count_definitions(&e.fn, e.func);
   ptx_emit_return_descriptor(&e);
   sanitize_into(e.func->name ? e.func->name : "kernel", e.ename,
                 sizeof(e.ename));

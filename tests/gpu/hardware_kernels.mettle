@@ -109,6 +109,20 @@ kernel saxpy_odd(alpha: float32, x: float32*, y: float32*, n: int32) {
   }
 }
 
+fn pick_activation(v: float32, kind: int32) -> float32 {
+  if (kind == 0) { return v * ((float32)1.0 / ((float32)1.0 + expf((float32)0.0 - v))); }
+  if (kind == 1) { return v * (float32)0.5; }
+  if (v > (float32)0.0) { return v; }
+  return (float32)0.0;
+}
+
+kernel branch_return_join(x: float32*, y: float32*, kinds: int32*, out: float32*, n: int32) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  if (i < n) {
+    out[i] = pick_activation(x[i], kinds[i]) * y[i];
+  }
+}
+
 kernel row_norm(inp: float32*, out: float32*, rows: int32, cols: int32) {
   var row: int32 = block.x * block_dim.x + thread.x;
   if (row < rows) {

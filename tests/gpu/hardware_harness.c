@@ -344,6 +344,63 @@ cleanup:
   return ok;
 }
 
+static float pick_activation_reference(float v, int32_t kind) {
+  if (kind == 0) return v * (1.0f / (1.0f + expf(0.0f - v)));
+  if (kind == 1) return v * 0.5f;
+  if (v > 0.0f) return v;
+  return 0.0f;
+}
+
+static int test_branch_return_join(Harness *h) {
+  enum { N = 997 };
+  float *x = (float *)malloc(sizeof(float) * N);
+  float *y = (float *)malloc(sizeof(float) * N);
+  int32_t *kinds = (int32_t *)malloc(sizeof(int32_t) * N);
+  float *out = (float *)malloc(sizeof(float) * N);
+  CUdeviceptr dx = 0, dy = 0, dk = 0, dout = 0;
+  int32_t n = N;
+  void *parameters[] = {&dx, &dy, &dk, &dout, &n};
+  int ok = 0;
+  if (!x || !y || !kinds || !out) goto cleanup;
+  for (int i = 0; i < N; i++) {
+    x[i] = (float)((i % 17) - 8) * 0.5f;
+    y[i] = 0.5f + (float)(i % 5) * 0.25f;
+    kinds[i] = (i / 7) % 3;
+    out[i] = -12345.0f;
+  }
+  if (!alloc_device(h, &dx, x, sizeof(float) * N) ||
+      !alloc_device(h, &dy, y, sizeof(float) * N) ||
+      !alloc_device(h, &dk, kinds, sizeof(int32_t) * N) ||
+      !alloc_device(h, &dout, out, sizeof(float) * N) ||
+      !launch(h, "branch_return_join", (N + 127) / 128, 1, 1, 128, 1, 1,
+              parameters) ||
+      !copy_from_device(h, out, dout, sizeof(float) * N))
+    goto cleanup;
+  for (int i = 0; i < N; i++) {
+    float expected = pick_activation_reference(x[i], kinds[i]) * y[i];
+    float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
+    if (fabsf(out[i] - expected) > 1e-5f * scale) {
+      fprintf(stderr,
+              "branch_return_join mismatch i=%d kind=%d: got %.9g expected %.9g\n",
+              i, (int)kinds[i], out[i], expected);
+      goto cleanup;
+    }
+  }
+  ok = 1;
+cleanup:
+  free_device(h, &dx);
+  free_device(h, &dy);
+  free_device(h, &dk);
+  free_device(h, &dout);
+  free(x);
+  free(y);
+  free(kinds);
+  free(out);
+  printf("[%s] inlined helper returning from three branches\n",
+         ok ? "PASS" : "FAIL");
+  return ok;
+}
+
 typedef struct {
   int32_t count;
   float alpha;
@@ -2656,7 +2713,7 @@ int main(int argc, char **argv) {
             "--tensor-transfer-only requires exactly one --tensor-transfer module and rejects ordinary extension modules\n");
     return 2;
   }
-  total = tensor_transfer_only ? 2 : 24;
+  total = tensor_transfer_only ? 2 : 25;
   if (!tensor_transfer_only && mxfp4_path) total += 6;
   if (!tensor_transfer_only && mxfp6_path) total += 3;
   if (tensor_transfer_path &&
@@ -2727,6 +2784,7 @@ int main(int argc, char **argv) {
 
     passed += test_index_3d(&h);
     passed += test_saxpy_odd(&h);
+    passed += test_branch_return_join(&h);
     passed += test_row_norm(&h);
     passed += test_record_pipeline(&h);
     passed += test_staged_copy(&h);
