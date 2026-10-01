@@ -68,12 +68,18 @@ typedef enum {
   MTLC_TENSOR_SCALE_NONE = 0,
   MTLC_TENSOR_SCALE_PER_TENSOR,
   MTLC_TENSOR_SCALE_BLOCK_16,
-  MTLC_TENSOR_SCALE_BLOCK_32
+  MTLC_TENSOR_SCALE_BLOCK_32,
+  MTLC_TENSOR_SCALE_PER_ROW
 } MtlcTensorScaleMode;
 
+/* HALVES packs 4-bit elements in 16-byte groups of 32 by linear storage
+   position p: element p is in byte 16 * (p / 32) + p % 16, in its low
+   nibble when p % 32 < 16 and its high nibble otherwise -- the block layout
+   of GGML's Q4_0/Q4_1/IQ4_NL. */
 typedef enum {
   MTLC_TENSOR_PACKING_LOGICAL = 0,
-  MTLC_TENSOR_PACKING_DENSE_SUBBYTE
+  MTLC_TENSOR_PACKING_DENSE_SUBBYTE,
+  MTLC_TENSOR_PACKING_HALVES
 } MtlcTensorPacking;
 
 typedef enum {
@@ -155,6 +161,14 @@ typedef struct {
   uint8_t transpose_a;
   uint8_t transpose_b;
   MtlcMemoryScope scope;
+  /* An unsigned operand's value is its stored integer minus its zero
+     point (UINT4 and UINT8 only; 0 elsewhere). */
+  uint8_t a_zero_point;
+  uint8_t b_zero_point;
+  /* PER_ROW: D = A * B + diag(c_scale) * C, with c_scale an f32 vector of
+     M row factors -- the online-softmax rescale of a running accumulator.
+     Its pointer is the last operand. NONE: D = A * B + C. */
+  MtlcTensorScaleMode c_scale_mode;
 } MtlcTensorMmaDesc;
 
 typedef struct {

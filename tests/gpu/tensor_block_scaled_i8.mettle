@@ -1,0 +1,139 @@
+// Block-scaled int8 tensor MMA: one exact int32 dot per K32 block, times
+// scale_A[row] * scale_B[column] (f32 or f16, block32), added in f32.
+// B may also be 4-bit in the halves packing (byte j of a 32-element group
+// holds elements j and j + 16), unsigned with a zero point or signed,
+// widened to bytes in registers.
+
+// One tile.
+kernel(block = 32) s8_scaled_tile(a: int8*, b: int8*, c: float32*, d: float32*,
+                                  sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+}
+
+// A runtime K loop with nothing else in it: loop residency.
+kernel(block = 32) s8_scaled_loop(a: int8*, b: int8*, c: float32*, d: float32*,
+                                  sa: float32*, sb: uint16*, nb: int32) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+  var kb: int32 = 1;
+  while (kb < nb) {
+    tensor_mma(a + kb * 32, b + kb * 32, d, d, shape: m32n32k32,
+               a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+               a_scale_mode: block32, b_scale_mode: block32,
+               a_scale_type: f32, b_scale_type: f16,
+               a_scale: sa + kb, b_scale: sb + kb,
+               a_layout: row, b_layout: col,
+               lda: 128, ldb: 128, ldc: 32, ldd: 32,
+               a_scale_ld: 4, b_scale_ld: 4);
+    kb = kb + 1;
+  }
+}
+
+// The K loop staged through workgroup memory -- A by plain loads and
+// stores, B by asynchronous copies, barriers around the update: region
+// residency keeps the accumulator in registers across all of it, since
+// every write in the loop is to workgroup memory and D is global.
+kernel(block = 32) s8_scaled_region(a: int8*, b: int8*, c: float32*, d: float32*,
+                                    sa: float32*, sb: uint16*, nb: int32) {
+  workgroup var s32: uint32*;
+  var lane: int32 = thread.x;
+  var aw: uint32* = (uint32*)a;
+  var as: int8 shared* = (int8 shared*)s32;
+  var bs: int8 shared* = (int8 shared*)(s32 + 256);
+  var w: int32 = 0;
+  while (w < 8) {
+    s32[lane * 8 + w] = aw[lane * 32 + w];
+    w = w + 1;
+  }
+  async_copy_workgroup(&s32[256 + lane * 8], (uint32*)b + lane * 32, 8,
+                       transaction: 16, cache: global);
+  async_copy_commit();
+  async_copy_wait(0);
+  barrier(workgroup, acq_rel);
+  tensor_mma(as, bs, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 32, ldb: 32, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+  var kb: int32 = 1;
+  while (kb < nb) {
+    barrier(workgroup, acq_rel);
+    w = 0;
+    while (w < 8) {
+      s32[lane * 8 + w] = aw[lane * 32 + kb * 8 + w];
+      w = w + 1;
+    }
+    async_copy_workgroup(&s32[256 + lane * 8], (uint32*)b + lane * 32 + kb * 8, 8,
+                         transaction: 16, cache: global);
+    async_copy_commit();
+    async_copy_wait(0);
+    barrier(workgroup, acq_rel);
+    tensor_mma(as, bs, d, d, shape: m32n32k32,
+               a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+               a_scale_mode: block32, b_scale_mode: block32,
+               a_scale_type: f32, b_scale_type: f16,
+               a_scale: sa + kb, b_scale: sb + kb,
+               a_layout: row, b_layout: col,
+               lda: 32, ldb: 32, ldc: 32, ldd: 32,
+               a_scale_ld: 4, b_scale_ld: 4);
+    kb = kb + 1;
+  }
+}
+
+// 4-bit B in the halves packing: unsigned with zero point 8 (GGML Q4_0),
+// over a runtime K loop.
+kernel(block = 32) q4_halves_loop(a: int8*, b: uint8*, c: float32*, d: float32*,
+                                  sa: float32*, sb: uint16*, nb: int32) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+  var kb: int32 = 1;
+  while (kb < nb) {
+    tensor_mma(a + kb * 32, b + kb * 16, d, d, shape: m32n32k32,
+               a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+               accumulator_type: f32, result_type: f32,
+               a_scale_mode: block32, b_scale_mode: block32,
+               a_scale_type: f32, b_scale_type: f16,
+               a_scale: sa + kb, b_scale: sb + kb,
+               a_layout: row, b_layout: col,
+               lda: 128, ldb: 128, ldc: 32, ldd: 32,
+               a_scale_ld: 4, b_scale_ld: 4);
+    kb = kb + 1;
+  }
+}
+
+// Signed 4-bit B in the halves packing, one tile.
+kernel(block = 32) s4_halves_tile(a: int8*, b: uint8*, c: float32*, d: float32*,
+                                  sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i4, b_packing: halves,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+}

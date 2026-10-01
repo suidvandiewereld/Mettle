@@ -282,6 +282,7 @@ typedef struct {
   size_t tensor_b_stride_argument;
   size_t tensor_c_stride_argument;
   size_t tensor_d_stride_argument;
+  size_t tensor_c_scale_argument;
   int is_tensor_epilogue;
   MtlcTensorEpilogueDesc tensor_epilogue_desc;
   size_t tensor_epilogue_bias_argument;
@@ -331,6 +332,8 @@ typedef enum {
 typedef struct {
   unsigned memory_regions;
   AstMemoryOrder memory_order;
+  /* Execution scope: 0 for the whole workgroup, 1 for the subgroup. */
+  int subgroup;
 } BarrierStatement;
 
 typedef struct {

@@ -1140,6 +1140,8 @@ static int ir_lower_tensor_call(IRLoweringContext *context, IRFunction *function
       source_indices[source_count++] = call->tensor_c_stride_argument;
     if (call->tensor_d_stride_argument != SIZE_MAX)
       source_indices[source_count++] = call->tensor_d_stride_argument;
+    if (call->tensor_c_scale_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_c_scale_argument;
     if (call->is_tensor_matmul) {
       for (size_t i = 4; i < 9; i++) source_indices[source_count++] = i;
     }

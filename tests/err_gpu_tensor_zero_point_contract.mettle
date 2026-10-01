@@ -1,0 +1,12 @@
+// A zero point offsets unsigned storage; a signed operand has none.
+kernel tensor_zero_point_on_signed(a: int8*, b: int8*, c: float32*, d: float32*,
+                                   sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, b_zero_point: 3,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             a_scale_ld: 1, b_scale_ld: 1);
+}

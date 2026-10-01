@@ -1659,6 +1659,8 @@ static int type_checker_tensor_scope_option(TypeChecker *checker,
     call->tensor_a_scale_argument = i;
   } else if (!strcmp(option, "b_scale")) {
     call->tensor_b_scale_argument = i;
+  } else if (!strcmp(option, "c_scale")) {
+    call->tensor_c_scale_argument = i;
   } else {
     type_checker_set_error_at_location(checker, value->location,
                                        "Unknown tensor option '%s'", option);
@@ -1693,14 +1695,27 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
     }
     if (option[0] == 'a') desc->a_scale_mode = mode;
     else desc->b_scale_mode = mode;
+  } else if (!strcmp(option, "c_scale_mode")) {
+    if (identifier && !strcmp(identifier, "none"))
+      desc->c_scale_mode = MTLC_TENSOR_SCALE_NONE;
+    else if (identifier && !strcmp(identifier, "per_row"))
+      desc->c_scale_mode = MTLC_TENSOR_SCALE_PER_ROW;
+    else {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor C scale mode must be none or per_row");
+      return 0;
+    }
   } else if (!strcmp(option, "a_scale_type") ||
              !strcmp(option, "b_scale_type")) {
     MtlcTensorElement element = type_checker_tensor_element_name(identifier);
     if (element != MTLC_TENSOR_ELEMENT_SCALE_UE8M0 &&
-        element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3) {
+        element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3 &&
+        element != MTLC_TENSOR_ELEMENT_FLOAT32 &&
+        element != MTLC_TENSOR_ELEMENT_FLOAT16) {
       type_checker_set_error_at_location(
           checker, value->location,
-          "Tensor scale type must be ue8m0 or ue4m3");
+          "Tensor scale type must be ue8m0, ue4m3, f32 or f16");
       return 0;
     }
     if (option[0] == 'a') desc->a_scale_element = element;
@@ -1714,10 +1729,12 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
     else if (identifier && (!strcmp(identifier, "packed") ||
                             !strcmp(identifier, "dense_subbyte")))
       packing = MTLC_TENSOR_PACKING_DENSE_SUBBYTE;
+    else if (identifier && !strcmp(identifier, "halves"))
+      packing = MTLC_TENSOR_PACKING_HALVES;
     else {
       type_checker_set_error_at_location(
           checker, value->location,
-          "Tensor packing must be logical or dense_subbyte");
+          "Tensor packing must be logical, dense_subbyte or halves");
       return 0;
     }
     if (option[0] == 'a') desc->a_packing = packing;
@@ -1733,6 +1750,14 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
       desc->a_scale_leading_dimension = dimension;
     else
       desc->b_scale_leading_dimension = dimension;
+  } else if (!strcmp(option, "a_zero_point") ||
+             !strcmp(option, "b_zero_point")) {
+    uint32_t zero_point = 0;
+    if (!type_checker_tensor_option_u32(checker, value, option, 255,
+                                        &zero_point))
+      return 0;
+    if (option[0] == 'a') desc->a_zero_point = (uint8_t)zero_point;
+    else desc->b_zero_point = (uint8_t)zero_point;
   } else if (!strcmp(option, "transpose_a") ||
              !strcmp(option, "transpose_b")) {
     uint8_t transpose = 0;
@@ -1881,7 +1906,10 @@ static int type_checker_tensor_type_option(TypeChecker *checker,
         : slot == 2 ? &call->tensor_c_stride_argument
                     : &call->tensor_d_stride_argument;
     have->stride[slot] = 1;
-    if (type_checker_eval_integer_constant(value, &constant)) {
+    // A named constant is as static as a literal: fold it, so the backend
+    // sees the stride (immediate offsets, ldmatrix eligibility).
+    if (type_checker_eval_integer_constant_with_checker(checker, value,
+                                                        &constant)) {
       if (constant <= 0 || (unsigned long long)constant > UINT32_MAX) {
         type_checker_set_error_at_location(
             checker, value->location,
@@ -2052,6 +2080,7 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
   call->tensor_metadata_argument = SIZE_MAX;
   call->tensor_a_scale_argument = SIZE_MAX;
   call->tensor_b_scale_argument = SIZE_MAX;
+  call->tensor_c_scale_argument = SIZE_MAX;
   call->tensor_a_stride_argument = SIZE_MAX;
   call->tensor_b_stride_argument = SIZE_MAX;
   call->tensor_c_stride_argument = SIZE_MAX;
@@ -2145,6 +2174,30 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
       type_checker_set_error_at_location(
           checker, call->arguments[call->tensor_metadata_argument]->location,
           "Tensor metadata operand must be a uint8 pointer");
+      return NULL;
+    }
+  }
+  int needs_c_scale = desc.c_scale_mode != MTLC_TENSOR_SCALE_NONE;
+  if (needs_c_scale != (call->tensor_c_scale_argument != SIZE_MAX)) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "Tensor c_scale must be given exactly when c_scale_mode is per_row");
+    return NULL;
+  }
+  if (needs_c_scale && is_matmul) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "tensor_matmul has no C row scale; use tensor_mma");
+    return NULL;
+  }
+  if (needs_c_scale) {
+    Type *type = type_checker_infer_type(
+        checker, call->arguments[call->tensor_c_scale_argument]);
+    if (!type_checker_tensor_pointer_matches(type,
+                                             MTLC_TENSOR_ELEMENT_FLOAT32)) {
+      type_checker_set_error_at_location(
+          checker, call->arguments[call->tensor_c_scale_argument]->location,
+          "Tensor C row scale must be a float32 pointer");
       return NULL;
     }
   }

@@ -2711,6 +2711,9 @@ $cases = @(
   @{ Name = "err_gpu_tensor_scale_contract"; Path = "tests/err_gpu_tensor_scale_contract.mettle"; ShouldSucceed = $false; Pattern = "Invalid tensor MMA descriptor" },
   @{ Name = "err_gpu_tensor_scale_storage"; Path = "tests/err_gpu_tensor_scale_storage.mettle"; ShouldSucceed = $false; Pattern = "Tensor A scale has storage type 'uint32\*' incompatible with its scale format" },
   @{ Name = "err_gpu_tensor_packing_contract"; Path = "tests/err_gpu_tensor_packing_contract.mettle"; ShouldSucceed = $false; Pattern = "Invalid tensor MMA descriptor" },
+  @{ Name = "err_gpu_tensor_halves_contract"; Path = "tests/err_gpu_tensor_halves_contract.mettle"; ShouldSucceed = $false; Pattern = "Invalid tensor MMA descriptor" },
+  @{ Name = "err_gpu_tensor_zero_point_contract"; Path = "tests/err_gpu_tensor_zero_point_contract.mettle"; ShouldSucceed = $false; Pattern = "Invalid tensor MMA descriptor" },
+  @{ Name = "err_gpu_tensor_zero_point_range"; Path = "tests/err_gpu_tensor_zero_point_range.mettle"; ShouldSucceed = $false; Pattern = "Invalid tensor MMA descriptor" },
   @{ Name = "err_gpu_divergent_tensor"; Path = "tests/err_gpu_divergent_tensor.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "tensor MMA is control-dependent on a work-item-varying condition" },
   @{ Name = "err_gpu_varying_tensor_pointer"; Path = "tests/err_gpu_varying_tensor_pointer.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "tensor MMA pointer operand 0 is not subgroup-uniform" },
   @{ Name = "err_gpu_varying_tensor_stride"; Path = "tests/err_gpu_varying_tensor_stride.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "tensor MMA runtime stride operand 4 is not subgroup-uniform" },
@@ -16686,6 +16689,110 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "ptx_emit_gb10_tensor_fp4" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  # Block-scaled i8 tensor MMA: exact int32 K32 dots scaled per block into
+  # f32, 4-bit halves-packed B widened in registers, and region residency
+  # across a K loop staged through workgroup memory.
+  $bsPtx = Join-Path $tmpDir "ptx_emit_gb10_tensor_block_scaled_i8.ptx"
+  $bsCubin = Join-Path $tmpDir "ptx_emit_gb10_tensor_block_scaled_i8.cubin"
+  $bsOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_block_scaled_i8.mettle -o $bsPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "block-scaled i8 tensor emit failed: $bsOut" }
+  $bsText = Get-Content -Raw $bsPtx
+  $bsMma = 'mma\.sync\.aligned\.m16n8k32\.row\.col\.s32\.s8\.s8\.s32'
+  $bsExpect = @(
+    @{ Name = 's8_scaled_tile'; Note = 'mtlc\.tensor_mma native-mma s8-block-scaled whole-tile lowering'; Mma = 8; Stores = 32; Widen = 0; Sign = 0 },
+    @{ Name = 's8_scaled_loop'; Note = 'mtlc\.tensor_loop resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Widen = 0; Sign = 0 },
+    @{ Name = 's8_scaled_region'; Note = 'mtlc\.tensor_region resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Widen = 0; Sign = 0 },
+    @{ Name = 'q4_halves_loop'; Note = 'mtlc\.tensor_loop resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Widen = 16; Sign = 0 },
+    @{ Name = 's4_halves_tile'; Note = 'mtlc\.tensor_mma native-mma s8-block-scaled whole-tile lowering'; Mma = 8; Stores = 32; Widen = 8; Sign = 8 })
+  foreach ($bsCase in $bsExpect) {
+    $bsEntry = [regex]::Match(
+      $bsText,
+      "(?s)\.visible \.entry $($bsCase.Name)\(.*?(?=\.visible \.entry|\z)"
+    ).Value
+    if (-not $bsEntry -or
+        $bsEntry -notmatch $bsCase.Note -or
+        [regex]::Matches($bsEntry, $bsMma).Count -ne $bsCase.Mma -or
+        [regex]::Matches($bsEntry, 'st\.global\.f32').Count -ne $bsCase.Stores -or
+        [regex]::Matches($bsEntry, '0x78787878').Count -ne $bsCase.Widen -or
+        [regex]::Matches($bsEntry, '0x08080808').Count -ne $bsCase.Sign -or
+        $bsEntry -notmatch 'mov\.b32 %r[0-9]+, 0x4B400000' -or
+        $bsEntry -match 'cvt\.rn\.f32\.s32') {
+      throw "block-scaled i8 contract mismatch in $($bsCase.Name)"
+    }
+  }
+  $bsExplain = & $CompilerPath -O --explain-all --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_block_scaled_i8.mettle -o $bsPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or
+      $bsExplain -notmatch "formed a region-resident tensor accumulator") {
+    throw "--explain omitted the region residency decision: $bsExplain"
+  }
+  $bsDumped = Join-Path $tmpDir "ptx_emit_gb10_tensor_block_scaled_i8_dumped.ptx"
+  $bsDumpOut = & $CompilerPath -O --dump-ir --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_block_scaled_i8.mettle -o $bsDumped 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path ($bsDumped + ".ir"))) {
+    throw "GPU --dump-ir failed for block-scaled i8: $bsDumpOut"
+  }
+  $bsDump = Get-Content -Raw ($bsDumped + ".ir")
+  foreach ($regionContract in @("residency\.region\.start#",
+                                 "residency\.region\.update#",
+                                 "residency\.region\.commit#",
+                                 "zp\(0,8\)")) {
+    if ($bsDump -notmatch $regionContract) {
+      throw "GPU --dump-ir omitted block-scaled contract: $regionContract"
+    }
+  }
+  $nrPtx = Join-Path $tmpDir "ptx_emit_gb10_tensor_region_no_residency.ptx"
+  $nrOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_region_no_residency.mettle -o $nrPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "region no-residency emit failed: $nrOut" }
+  $nrText = Get-Content -Raw $nrPtx
+  if ($nrText -match 'mtlc\.tensor_(region|loop)' -or
+      [regex]::Matches($nrText, 'st\.global\.f32').Count -lt 128) {
+    throw "region residency formed over a loop that can reach D"
+  }
+  $bsPortable = Join-Path $tmpDir "ptx_emit_portable_tensor_block_scaled_i8.ptx"
+  $bsPortableOut = & $CompilerPath -O --emit-ptx --gpu-arch=portable `
+    tests/gpu/tensor_block_scaled_i8.mettle -o $bsPortable 2>&1 | Out-String
+  if ($bsPortableOut -notmatch 'requires PTX 7\.0 and sm_80 or newer') {
+    throw "portable PTX did not reject block-scaled i8 MMA: $bsPortableOut"
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $bsAsmOut = & $ptxas.Source -v -arch=sm_121a $bsPtx -o $bsCubin 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) {
+        throw "ptxas rejected block-scaled i8 tensor PTX: $bsAsmOut"
+      }
+      if ($bsAsmOut -match '(?m)^\s*[1-9][0-9]* bytes spill (stores|loads)') {
+        throw "block-scaled i8 kernels spilled registers: $bsAsmOut"
+      }
+      foreach ($bsName in @('s8_scaled_tile', 's8_scaled_loop', 's8_scaled_region',
+                            'q4_halves_loop', 's4_halves_tile')) {
+        $bsRegs = [regex]::Match(
+          $bsAsmOut,
+          "(?s)Function properties for $bsName.*?Used ([0-9]+) registers")
+        if (-not $bsRegs.Success -or [int]$bsRegs.Groups[1].Value -gt 128) {
+          throw "block-scaled i8 register ceiling exceeded for ${bsName}: $bsAsmOut"
+        }
+      }
+    } else {
+      Write-Host "[SKIP] ptx_emit_gb10_tensor_block_scaled_i8 ptxas assembly (toolkit lacks sm_121a)"
+    }
+  } else {
+    Write-Host "[SKIP] ptx_emit_gb10_tensor_block_scaled_i8 ptxas assembly (ptxas not found)"
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_tensor_block_scaled_i8" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_tensor_block_scaled_i8" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++

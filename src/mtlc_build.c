@@ -1148,7 +1148,7 @@ void mtlc_tensor_transfer_workgroup(
 
 static int mtlc_tensor_mma_handles(const MtlcTensorMmaDesc *desc,
                                    const MtlcTensorMmaOperands *operands,
-                                   MtlcValue handles[11], size_t *out_count) {
+                                   MtlcValue handles[12], size_t *out_count) {
   size_t count = 0;
   size_t expected = ir_tensor_mma_operand_count(desc);
   int needs_metadata = desc &&
@@ -1178,6 +1178,10 @@ static int mtlc_tensor_mma_handles(const MtlcTensorMmaDesc *desc,
     handles[count++] = operands->c_leading_dimension;
   if (runtime_strides & MTLC_TENSOR_RUNTIME_STRIDE_D)
     handles[count++] = operands->d_leading_dimension;
+  if (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE) {
+    if (operands->c_scale == MTLC_NO_VALUE) return 0;
+    handles[count++] = operands->c_scale;
+  }
   if (count != expected) {
     return 0;
   }
@@ -1233,7 +1237,7 @@ void mtlc_tensor_mma_chain(MtlcFn *fn, const MtlcTensorMmaDesc *desc,
     return;
   }
   for (size_t tile = 0; tile < tile_count; tile++) {
-    MtlcValue handles[11];
+    MtlcValue handles[12];
     size_t count = 0;
     if (!mtlc_tensor_mma_handles(desc, &tiles[tile], handles, &count) ||
         count != per_tile) {

@@ -33,6 +33,8 @@ typedef struct {
   MtlcValue b_leading_dimension;
   MtlcValue c_leading_dimension;
   MtlcValue d_leading_dimension;
+  /* Read only when the descriptor's c_scale_mode is PER_ROW. */
+  MtlcValue c_scale;
 } MtlcTensorMmaOperands;
 
 typedef struct {

@@ -309,6 +309,7 @@ static ASTNode *ast_clone_function_call(ASTNode *clone, const ASTNode *node) {
   dst->tensor_b_stride_argument = src->tensor_b_stride_argument;
   dst->tensor_c_stride_argument = src->tensor_c_stride_argument;
   dst->tensor_d_stride_argument = src->tensor_d_stride_argument;
+  dst->tensor_c_scale_argument = src->tensor_c_scale_argument;
   dst->is_tensor_epilogue = src->is_tensor_epilogue;
   dst->tensor_epilogue_desc = src->tensor_epilogue_desc;
   dst->tensor_epilogue_bias_argument =
@@ -517,6 +518,8 @@ static ASTNode *ast_clone_barrier_statement(ASTNode *clone, const ASTNode *node)
                              src->memory_regions, src->memory_order,
                              node->location)
                        : NULL;
+  if (built && built->data)
+    ((BarrierStatement *)built->data)->subgroup = src->subgroup;
   free(clone);
   return built;
 }
@@ -2218,6 +2221,7 @@ ASTNode *ast_create_call_expression(const char *function_name,
   call_expr->tensor_b_stride_argument = SIZE_MAX;
   call_expr->tensor_c_stride_argument = SIZE_MAX;
   call_expr->tensor_d_stride_argument = SIZE_MAX;
+  call_expr->tensor_c_scale_argument = SIZE_MAX;
   call_expr->is_tensor_epilogue = 0;
   call_expr->tensor_epilogue_desc = (MtlcTensorEpilogueDesc){0};
   call_expr->tensor_epilogue_bias_argument = SIZE_MAX;
@@ -2342,6 +2346,7 @@ ASTNode *ast_create_barrier_statement(unsigned memory_regions,
   }
   barrier->memory_regions = memory_regions;
   barrier->memory_order = memory_order;
+  barrier->subgroup = 0;
   node->data = barrier;
   return node;
 }
@@ -2691,6 +2696,7 @@ ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
   call_expr->tensor_b_stride_argument = SIZE_MAX;
   call_expr->tensor_c_stride_argument = SIZE_MAX;
   call_expr->tensor_d_stride_argument = SIZE_MAX;
+  call_expr->tensor_c_scale_argument = SIZE_MAX;
   call_expr->is_tensor_epilogue = 0;
   call_expr->tensor_epilogue_desc = (MtlcTensorEpilogueDesc){0};
   call_expr->tensor_epilogue_bias_argument = SIZE_MAX;

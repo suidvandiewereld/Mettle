@@ -1,0 +1,60 @@
+// Region residency must not form when the K loop can reach D's memory.
+
+// A global store in the loop: D is global too, so the store may land in
+// D's tile, and every update keeps its exact load/MMA/store.
+kernel(block = 32) region_global_store(a: int8*, b: int8*, c: float32*, d: float32*,
+                                       sa: float32*, sb: uint16*, flag: uint32*,
+                                       nb: int32) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+  var kb: int32 = 1;
+  while (kb < nb) {
+    flag[kb] = (uint32)1;
+    tensor_mma(a + kb * 32, b + kb * 32, d, d, shape: m32n32k32,
+               a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+               a_scale_mode: block32, b_scale_mode: block32,
+               a_scale_type: f32, b_scale_type: f16,
+               a_scale: sa + kb, b_scale: sb + kb,
+               a_layout: row, b_layout: col,
+               lda: 128, ldb: 128, ldc: 32, ldd: 32,
+               a_scale_ld: 4, b_scale_ld: 4);
+    kb = kb + 1;
+  }
+}
+
+// A read of D's own parameter through another name: it would see the
+// partial sums, so it observes D even though it never names it.
+kernel(block = 32) region_reads_d(a: int8*, b: int8*, c: float32*, d: float32*,
+                                  sa: float32*, sb: uint16*, out: float32*,
+                                  nb: int32) {
+  workgroup var sf: float32*;
+  var alias: float32* = d;
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldc: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+  var kb: int32 = 1;
+  while (kb < nb) {
+    sf[kb] = alias[kb];
+    tensor_mma(a + kb * 32, b + kb * 32, d, d, shape: m32n32k32,
+               a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+               a_scale_mode: block32, b_scale_mode: block32,
+               a_scale_type: f32, b_scale_type: f16,
+               a_scale: sa + kb, b_scale: sb + kb,
+               a_layout: row, b_layout: col,
+               lda: 128, ldb: 128, ldc: 32, ldd: 32,
+               a_scale_ld: 4, b_scale_ld: 4);
+    kb = kb + 1;
+  }
+  out[thread.x] = sf[thread.x];
+}

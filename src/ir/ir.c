@@ -411,7 +411,9 @@ static int ir_tensor_scale_valid(MtlcTensorScaleMode mode,
   if (mode == MTLC_TENSOR_SCALE_NONE)
     return element == MTLC_TENSOR_ELEMENT_INVALID && leading_dimension == 0;
   if (element != MTLC_TENSOR_ELEMENT_SCALE_UE8M0 &&
-      element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3)
+      element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3 &&
+      element != MTLC_TENSOR_ELEMENT_FLOAT32 &&
+      element != MTLC_TENSOR_ELEMENT_FLOAT16)
     return 0;
   uint32_t columns =
       mode == MTLC_TENSOR_SCALE_PER_TENSOR
@@ -458,9 +460,9 @@ int mtlc_tensor_mma_desc_is_valid(const MtlcTensorMmaDesc *desc) {
       desc->b_scale_mode < MTLC_TENSOR_SCALE_NONE ||
       desc->b_scale_mode > MTLC_TENSOR_SCALE_BLOCK_32 ||
       desc->a_packing < MTLC_TENSOR_PACKING_LOGICAL ||
-      desc->a_packing > MTLC_TENSOR_PACKING_DENSE_SUBBYTE ||
+      desc->a_packing > MTLC_TENSOR_PACKING_HALVES ||
       desc->b_packing < MTLC_TENSOR_PACKING_LOGICAL ||
-      desc->b_packing > MTLC_TENSOR_PACKING_DENSE_SUBBYTE ||
+      desc->b_packing > MTLC_TENSOR_PACKING_HALVES ||
       desc->transpose_a > 1 || desc->transpose_b > 1 ||
       (desc->scope != MTLC_MEMORY_SCOPE_SUBGROUP &&
        desc->scope != MTLC_MEMORY_SCOPE_WORKGROUP)) {
@@ -473,6 +475,29 @@ int mtlc_tensor_mma_desc_is_valid(const MtlcTensorMmaDesc *desc) {
        desc->result_element != MTLC_TENSOR_ELEMENT_INT32)) {
     return 0;
   }
+  if ((desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE &&
+       desc->c_scale_mode != MTLC_TENSOR_SCALE_PER_ROW) ||
+      (desc->c_scale_mode == MTLC_TENSOR_SCALE_PER_ROW &&
+       (desc->accumulator_element != MTLC_TENSOR_ELEMENT_FLOAT32 ||
+        desc->result_element != MTLC_TENSOR_ELEMENT_FLOAT32)))
+    return 0;
+  int a_nibbles = desc->a_element == MTLC_TENSOR_ELEMENT_INT4 ||
+                  desc->a_element == MTLC_TENSOR_ELEMENT_UINT4;
+  int b_nibbles = desc->b_element == MTLC_TENSOR_ELEMENT_INT4 ||
+                  desc->b_element == MTLC_TENSOR_ELEMENT_UINT4;
+  if ((desc->a_packing == MTLC_TENSOR_PACKING_HALVES &&
+       (!a_nibbles || desc->k % 32u != 0)) ||
+      (desc->b_packing == MTLC_TENSOR_PACKING_HALVES &&
+       (!b_nibbles || desc->k % 32u != 0)) ||
+      (desc->a_zero_point &&
+       !(desc->a_element == MTLC_TENSOR_ELEMENT_UINT8 ||
+         (desc->a_element == MTLC_TENSOR_ELEMENT_UINT4 &&
+          desc->a_zero_point <= 15))) ||
+      (desc->b_zero_point &&
+       !(desc->b_element == MTLC_TENSOR_ELEMENT_UINT8 ||
+         (desc->b_element == MTLC_TENSOR_ELEMENT_UINT4 &&
+          desc->b_zero_point <= 15))))
+    return 0;
   if ((desc->a_packing == MTLC_TENSOR_PACKING_DENSE_SUBBYTE &&
        !ir_tensor_subbyte_element(desc->a_element)) ||
       (desc->b_packing == MTLC_TENSOR_PACKING_DENSE_SUBBYTE &&
@@ -576,7 +601,8 @@ size_t ir_tensor_mma_operand_count(const MtlcTensorMmaDesc *desc) {
          (desc->a_leading_dimension == 0 ? 1u : 0u) +
          (desc->b_leading_dimension == 0 ? 1u : 0u) +
          (desc->c_leading_dimension == 0 ? 1u : 0u) +
-         (desc->d_leading_dimension == 0 ? 1u : 0u);
+         (desc->d_leading_dimension == 0 ? 1u : 0u) +
+         (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE ? 1u : 0u);
 }
 
 size_t ir_tensor_matmul_operand_count(const MtlcTensorMmaDesc *desc) {
@@ -624,7 +650,10 @@ int ir_tensor_mma_desc_equal(const MtlcTensorMmaDesc *a,
          a->a_scale_leading_dimension == b->a_scale_leading_dimension &&
          a->b_scale_leading_dimension == b->b_scale_leading_dimension &&
          a->transpose_a == b->transpose_a &&
-         a->transpose_b == b->transpose_b && a->scope == b->scope;
+         a->transpose_b == b->transpose_b && a->scope == b->scope &&
+         a->a_zero_point == b->a_zero_point &&
+         a->b_zero_point == b->b_zero_point &&
+         a->c_scale_mode == b->c_scale_mode;
 }
 
 int ir_operand_same(const IROperand *a, const IROperand *b) {
@@ -2688,7 +2717,10 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
         : (instruction->memory_regions & MTLC_MEMORY_REGION_GLOBAL)
             ? "global"
             : "none";
-    written = snprintf(buffer, buffer_size, "barrier.workgroup %s %s",
+    written = snprintf(buffer, buffer_size, "barrier.%s %s %s",
+                       instruction->memory_scope == MTLC_MEMORY_SCOPE_SUBGROUP
+                           ? "subgroup"
+                           : "workgroup",
                        ir_memory_order_name(instruction->memory_order), regions);
     break;
   }
@@ -2739,7 +2771,7 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
   }
   case IR_OP_TENSOR_MMA:
     {
-    char residency[64] = {0};
+    char residency[96] = {0};
     const char *scope =
         instruction->tensor_residency_scope ==
                 IR_TENSOR_RESIDENCY_SCOPE_PIPELINE
@@ -2747,7 +2779,10 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
             : instruction->tensor_residency_scope ==
                       IR_TENSOR_RESIDENCY_SCOPE_LOOP
                   ? "loop."
-                  : "";
+                  : instruction->tensor_residency_scope ==
+                            IR_TENSOR_RESIDENCY_SCOPE_REGION
+                        ? "region."
+                        : "";
     if (instruction->tensor_residency_role == IR_TENSOR_RESIDENCY_START) {
       snprintf(residency, sizeof(residency), " residency.%sstart#%u", scope,
                instruction->tensor_residency_id);
@@ -2755,6 +2790,18 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
                IR_TENSOR_RESIDENCY_UPDATE) {
       snprintf(residency, sizeof(residency), " residency.%supdate#%u", scope,
                instruction->tensor_residency_id);
+    }
+    if (IR_TENSOR_MMA(instruction).a_zero_point ||
+        IR_TENSOR_MMA(instruction).b_zero_point) {
+      size_t used = strlen(residency);
+      snprintf(residency + used, sizeof(residency) - used, " zp(%u,%u)",
+               (unsigned)IR_TENSOR_MMA(instruction).a_zero_point,
+               (unsigned)IR_TENSOR_MMA(instruction).b_zero_point);
+    }
+    if (IR_TENSOR_MMA(instruction).c_scale_mode ==
+        MTLC_TENSOR_SCALE_PER_ROW) {
+      size_t used = strlen(residency);
+      snprintf(residency + used, sizeof(residency) - used, " cscale(row)");
     }
     written = snprintf(
         buffer, buffer_size,
@@ -2841,7 +2888,10 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
                            : instruction->tensor_residency_scope ==
                                      IR_TENSOR_RESIDENCY_SCOPE_LOOP
                                  ? "loop."
-                                 : "",
+                                 : instruction->tensor_residency_scope ==
+                                           IR_TENSOR_RESIDENCY_SCOPE_REGION
+                                       ? "region."
+                                       : "",
                        instruction->tensor_residency_id,
                        (unsigned)IR_TENSOR_MMA(instruction).m,
                        (unsigned)IR_TENSOR_MMA(instruction).n,
@@ -3908,6 +3958,270 @@ static MtlcAddressSpace ir_gpu_operand_address_space(
   return ir_gpu_operand_address_space_impl(program, function, operand, 0);
 }
 
+// The kernel pointer parameters `operand` may derive from through copies,
+// casts and pointer +/- offset, over every definition: a pointer chosen
+// from several parameters (say Q, K or V by block index) roots in all of
+// them. Returns 0 when that is not known -- no parameter found, more than
+// IR_GPU_ROOTS_MAX, or a pointer from anywhere else.
+#define IR_GPU_ROOTS_MAX 8
+
+typedef struct {
+  const char *names[IR_GPU_ROOTS_MAX];
+  int count;
+} IRGpuRoots;
+
+static int ir_gpu_roots_add(IRGpuRoots *roots, const char *name) {
+  for (int i = 0; i < roots->count; i++)
+    if (strcmp(roots->names[i], name) == 0) return 1;
+  if (roots->count == IR_GPU_ROOTS_MAX) return 0;
+  roots->names[roots->count++] = name;
+  return 1;
+}
+
+static int ir_gpu_operand_parameter_roots(const IRProgram *program,
+                                          const IRFunction *function,
+                                          const IROperand *operand,
+                                          unsigned depth, IRGpuRoots *out) {
+  if (!program || !function || !function->is_kernel || !operand ||
+      depth > 16 ||
+      (operand->kind != IR_OPERAND_SYMBOL &&
+       operand->kind != IR_OPERAND_TEMP) ||
+      !operand->name)
+    return 0;
+  const IRModuleSymbol *function_symbol =
+      ir_program_lookup_symbol(program, function->name);
+  if (operand->kind == IR_OPERAND_SYMBOL && function_symbol &&
+      function_symbol->kind == IR_MODSYM_FUNCTION) {
+    for (size_t p = 0; p < function->parameter_count &&
+                       p < function_symbol->param_count;
+         p++) {
+      if (!function->parameter_names || !function->parameter_names[p] ||
+          strcmp(function->parameter_names[p], operand->name) != 0)
+        continue;
+      const MtlcType *type = function_symbol->param_types
+                                 ? function_symbol->param_types[p]
+                                 : NULL;
+      if (!type || type->kind != MTLC_TYPE_POINTER) return 0;
+      return ir_gpu_roots_add(out, function->parameter_names[p]);
+    }
+  }
+  int defined = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *producer = &function->instructions[i];
+    if (!producer->dest.name ||
+        strcmp(producer->dest.name, operand->name) != 0 ||
+        !ir_gpu_instruction_defines_dest(producer) ||
+        producer->op == IR_OP_DECLARE_LOCAL)
+      continue;
+    if (producer->op == IR_OP_ASSIGN || producer->op == IR_OP_CAST) {
+      if (producer->lhs.name &&
+          strcmp(producer->lhs.name, operand->name) == 0)
+        continue;
+      if (!ir_gpu_operand_parameter_roots(program, function, &producer->lhs,
+                                          depth + 1, out))
+        return 0;
+    } else if (producer->op == IR_OP_BINARY && producer->text &&
+               (strcmp(producer->text, "+") == 0 ||
+                strcmp(producer->text, "-") == 0)) {
+      int lhs_self = producer->lhs.name &&
+                     strcmp(producer->lhs.name, operand->name) == 0;
+      int rhs_self = producer->rhs.name &&
+                     strcmp(producer->rhs.name, operand->name) == 0;
+      if (lhs_self && rhs_self) return 0;
+      // Exactly one side is the pointer; the other, the offset, has no
+      // parameter root (p = p +/- offset keeps p's roots).
+      IRGpuRoots lhs = {{0}, 0}, rhs = {{0}, 0};
+      int lhs_known = !lhs_self &&
+                      ir_gpu_operand_parameter_roots(program, function,
+                                                     &producer->lhs,
+                                                     depth + 1, &lhs);
+      int rhs_known = !rhs_self &&
+                      ir_gpu_operand_parameter_roots(program, function,
+                                                     &producer->rhs,
+                                                     depth + 1, &rhs);
+      if (lhs_known && rhs_known) return 0;
+      if (lhs_self || rhs_self) {
+        if (lhs_known || rhs_known) return 0;
+        continue;
+      }
+      if (!lhs_known && !rhs_known) return 0;
+      const IRGpuRoots *side = lhs_known ? &lhs : &rhs;
+      for (int r = 0; r < side->count; r++)
+        if (!ir_gpu_roots_add(out, side->names[r])) return 0;
+    } else {
+      return 0;
+    }
+    defined = 1;
+  }
+  return defined && out->count > 0;
+}
+
+static int ir_gpu_address_space_known(MtlcAddressSpace space) {
+  return space != MTLC_ADDRESS_SPACE_DEFAULT &&
+         space != MTLC_ADDRESS_SPACE_GENERIC;
+}
+
+// Whether a memory access through `pointer` inside a tensor region leaves
+// the region's accumulator D (`output`) alone. A write must be proved
+// disjoint: a different address space. A read may also come from other
+// kernel pointer parameters than D's -- the assumption the loop and
+// pipeline forms already make for MMA operands and asynchronous copy
+// sources: D's tile is not read through a second parameter while the
+// accumulator is resident.
+static int ir_tensor_region_access_disjoint(const IRProgram *program,
+                                            const IRFunction *function,
+                                            const IROperand *pointer,
+                                            const IROperand *output,
+                                            int is_write) {
+  MtlcAddressSpace pointer_space =
+      ir_gpu_operand_address_space(program, function, pointer);
+  MtlcAddressSpace output_space =
+      ir_gpu_operand_address_space(program, function, output);
+  if (ir_gpu_address_space_known(pointer_space) &&
+      ir_gpu_address_space_known(output_space) &&
+      pointer_space != output_space)
+    return 1;
+  if (is_write) return 0;
+  IRGpuRoots pointer_roots = {{0}, 0}, output_roots = {{0}, 0};
+  if (!ir_gpu_operand_parameter_roots(program, function, pointer, 0,
+                                      &pointer_roots) ||
+      !ir_gpu_operand_parameter_roots(program, function, output, 0,
+                                      &output_roots))
+    return 0;
+  for (int i = 0; i < pointer_roots.count; i++)
+    for (int j = 0; j < output_roots.count; j++)
+      if (strcmp(pointer_roots.names[i], output_roots.names[j]) == 0)
+        return 0;
+  return 1;
+}
+
+static int ir_gpu_tensor_residency_mentions_operand(
+    const IRInstruction *instruction, const IROperand *operand);
+
+// Whether a tensor MMA or matmul outside any residency group leaves a
+// region's D alone: its own D is written, so it must be provably elsewhere
+// (another address space); its A, B, C, metadata and scales are read.
+static int ir_tensor_region_tensor_op_disjoint(const IRProgram *program,
+                                               const IRFunction *function,
+                                               const IRInstruction *op,
+                                               const IROperand *output) {
+  const MtlcTensorMmaDesc *desc = &IR_TENSOR_MMA(op);
+  size_t per_tile = op->op == IR_OP_TENSOR_MATMUL
+                        ? ir_tensor_matmul_operand_count(desc)
+                        : ir_tensor_mma_operand_count(desc);
+  size_t tiles = op->op == IR_OP_TENSOR_MATMUL
+                     ? 1u
+                     : ir_tensor_mma_instruction_count(op);
+  if (!per_tile || !tiles || op->argument_count != per_tile * tiles)
+    return 0;
+  size_t pointers =
+      4u + (desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE ? 1u : 0u) +
+      (desc->a_scale_mode != MTLC_TENSOR_SCALE_NONE ? 1u : 0u) +
+      (desc->b_scale_mode != MTLC_TENSOR_SCALE_NONE ? 1u : 0u);
+  for (size_t tile = 0; tile < tiles; tile++) {
+    size_t base = tile * per_tile;
+    for (size_t i = 0; i < pointers; i++) {
+      if (!ir_tensor_region_access_disjoint(program, function,
+                                            &op->arguments[base + i], output,
+                                            i == 3))
+        return 0;
+    }
+    if (op->op == IR_OP_TENSOR_MMA &&
+        desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE &&
+        !ir_tensor_region_access_disjoint(
+            program, function, &op->arguments[base + per_tile - 1u], output,
+            0))
+      return 0;
+  }
+  return 1;
+}
+
+// Whether `instruction` may sit between a region-resident accumulator's
+// start and commit: it neither names D nor reaches D's memory, and it
+// leaves control inside the function (no call, return or launch).
+int ir_tensor_region_instruction_allowed(const IRProgram *program,
+                                         const IRFunction *function,
+                                         const IRInstruction *instruction,
+                                         const IROperand *output) {
+  if (!program || !function || !instruction || !output ||
+      instruction->tensor_residency_role != IR_TENSOR_RESIDENCY_NONE ||
+      ir_gpu_tensor_residency_mentions_operand(instruction, output))
+    return 0;
+  switch (instruction->op) {
+  case IR_OP_NOP:
+  case IR_OP_LABEL:
+  case IR_OP_JUMP:
+  case IR_OP_BRANCH_ZERO:
+  case IR_OP_BRANCH_EQ:
+  case IR_OP_DECLARE_LOCAL:
+  case IR_OP_ADDRESS_SPACE_ALLOC:
+  case IR_OP_ADDRESS_OF:
+  case IR_OP_ASSIGN:
+  case IR_OP_BINARY:
+  case IR_OP_UNARY:
+  case IR_OP_ROTATE_ADD:
+  case IR_OP_CAST:
+  case IR_OP_SELECT:
+  case IR_OP_PHI:
+  case IR_OP_BARRIER:
+  case IR_OP_ASYNC_COMMIT:
+  case IR_OP_ASYNC_WAIT:
+  case IR_OP_PREFETCH:
+  case IR_OP_SAFETY_CHECK:
+    return 1;
+  case IR_OP_LOAD:
+    return ir_tensor_region_access_disjoint(program, function,
+                                            &instruction->lhs, output, 0);
+  case IR_OP_STORE:
+    return ir_tensor_region_access_disjoint(program, function,
+                                            &instruction->dest, output, 1);
+  case IR_OP_ASYNC_COPY:
+    return instruction->argument_count >= 2 &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[0], output, 1) &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[1], output, 0);
+  case IR_OP_TENSOR_MMA:
+  case IR_OP_TENSOR_MATMUL:
+    return ir_tensor_region_tensor_op_disjoint(program, function,
+                                               instruction, output);
+  case IR_OP_CALL:
+    if (instruction->intrinsic == MTLC_INTRINSIC_NONE ||
+        ir_intrinsic_is_atomic(instruction->intrinsic))
+      return 0;
+    if (instruction->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
+        instruction->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32 ||
+        instruction->intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
+        instruction->intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32)
+      return instruction->argument_count >= 2 &&
+             ir_tensor_region_access_disjoint(
+                 program, function, &instruction->arguments[0], output, 1) &&
+             ir_tensor_region_access_disjoint(
+                 program, function, &instruction->arguments[1], output, 1);
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+// A region update names D only as its C and D operands (and their
+// strides): A, B and the scales never read the accumulator's memory.
+int ir_tensor_region_update_operands_clean(const IRInstruction *update,
+                                           const IROperand *output) {
+  if (!update || !output || update->op != IR_OP_TENSOR_MMA ||
+      update->argument_count < 4)
+    return 0;
+  if (ir_operand_same(&update->dest, output) ||
+      ir_operand_same(&update->lhs, output) ||
+      ir_operand_same(&update->rhs, output))
+    return 0;
+  for (size_t i = 0; i < update->argument_count; i++) {
+    if (i == 2 || i == 3) continue;
+    if (ir_operand_same(&update->arguments[i], output)) return 0;
+  }
+  return 1;
+}
+
 static int ir_gpu_async_copy_signature_matches(
     const IRProgram *program, const IRFunction *function,
     const IRInstruction *instruction) {
@@ -4222,6 +4536,11 @@ static int ir_gpu_tensor_signature_matches(const IRProgram *program,
               program, function, instruction, base + index++)))
         return 0;
     }
+    if (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE) {
+      const MtlcType *scale = ir_gpu_operand_type(
+          program, function, instruction, base + index++);
+      if (!ir_gpu_tensor_pointer_matches(scale, MTLC_TYPE_FLOAT32)) return 0;
+    }
     if (index != per_tile) return 0;
   }
 
@@ -4417,7 +4736,58 @@ static int ir_gpu_tensor_pipeline_barrier(
           instruction->memory_order == MTLC_MEMORY_ORDER_SEQ_CST);
 }
 
-static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
+// A region group: the start is the only way in and the commit the only
+// way out. Every block that begins strictly inside (start, commit] is
+// entered only from blocks ending in [start, commit), and every block
+// ending in [start, commit) leaves only to blocks beginning in
+// (start, commit]. Everything between is an update of the group or an
+// instruction that cannot observe D.
+static int ir_gpu_tensor_region_valid(const IRProgram *program,
+                                      IRFunction *function,
+                                      size_t start_index,
+                                      size_t commit_index) {
+  const IRInstruction *start = &function->instructions[start_index];
+  const IROperand *output = &start->arguments[3];
+  for (size_t j = start_index + 1; j < commit_index; j++) {
+    const IRInstruction *middle = &function->instructions[j];
+    if (middle->tensor_residency_id == start->tensor_residency_id &&
+        middle->tensor_residency_role == IR_TENSOR_RESIDENCY_UPDATE) {
+      if (!ir_tensor_region_update_operands_clean(middle, output)) return 0;
+      continue;
+    }
+    if (!ir_tensor_region_instruction_allowed(program, function, middle,
+                                              output))
+      return 0;
+  }
+  for (size_t block = 0; block < function->block_count; block++) {
+    const IRBasicBlock *cfg = &function->blocks[block];
+    if (cfg->instruction_count == 0) continue;
+    size_t first = cfg->first_instruction;
+    size_t last = first + cfg->instruction_count - 1;
+    if (first > start_index && first <= commit_index) {
+      for (size_t p = 0; p < cfg->predecessor_count; p++) {
+        size_t predecessor = cfg->predecessors[p];
+        if (predecessor >= function->block_count) return 0;
+        const IRBasicBlock *from = &function->blocks[predecessor];
+        if (from->instruction_count == 0) return 0;
+        size_t from_last = from->first_instruction + from->instruction_count - 1;
+        if (from_last < start_index || from_last >= commit_index) return 0;
+      }
+    }
+    if (last >= start_index && last < commit_index) {
+      for (size_t s = 0; s < cfg->successor_count; s++) {
+        size_t successor = cfg->successors[s];
+        if (successor >= function->block_count) return 0;
+        size_t to_first = function->blocks[successor].first_instruction;
+        if (to_first <= start_index || to_first > commit_index) return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int ir_gpu_tensor_residency_groups_valid(const IRProgram *program,
+                                                IRFunction *function) {
   if (!function) return 0;
   int have_group = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -4436,7 +4806,8 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
          role != IR_TENSOR_RESIDENCY_UPDATE &&
          role != IR_TENSOR_RESIDENCY_COMMIT) ||
         (scope != IR_TENSOR_RESIDENCY_SCOPE_LOOP &&
-         scope != IR_TENSOR_RESIDENCY_SCOPE_PIPELINE) ||
+         scope != IR_TENSOR_RESIDENCY_SCOPE_PIPELINE &&
+         scope != IR_TENSOR_RESIDENCY_SCOPE_REGION) ||
         (role == IR_TENSOR_RESIDENCY_COMMIT) !=
             (instruction->op == IR_OP_TENSOR_COMMIT) ||
         (role != IR_TENSOR_RESIDENCY_COMMIT &&
@@ -4522,7 +4893,11 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
                                                         commit_index,
                                                         &commit_block))
       return 0;
-    if (start->tensor_residency_scope == IR_TENSOR_RESIDENCY_SCOPE_LOOP) {
+    if (start->tensor_residency_scope == IR_TENSOR_RESIDENCY_SCOPE_REGION) {
+      if (!ir_gpu_tensor_region_valid(program, function, i, commit_index))
+        return 0;
+    } else if (start->tensor_residency_scope ==
+               IR_TENSOR_RESIDENCY_SCOPE_LOOP) {
       if (updates != 1 || start_block == update_block ||
           start_block == commit_block ||
           update_block == commit_block)
@@ -5029,6 +5404,9 @@ static int ir_gpu_instruction_collective_requirement(
     const IRProgram *program, const IRInstruction *instruction,
     const unsigned char *function_requirements) {
   if (!instruction) return IR_GPU_COLLECTIVE_NONE;
+  if (instruction->op == IR_OP_BARRIER &&
+      instruction->memory_scope == MTLC_MEMORY_SCOPE_SUBGROUP)
+    return IR_GPU_COLLECTIVE_SUBGROUP;
   if (instruction->op == IR_OP_BARRIER ||
       instruction->op == IR_OP_TENSOR_TRANSFER ||
       (instruction->op == IR_OP_CALL &&
@@ -5234,8 +5612,14 @@ static int ir_gpu_validate_function_uniformity(
           unsigned char operand_rank = ir_gpu_uniform_operand(
               &uniformity, &instruction->arguments[arg]);
           if (operand_rank > allowed) {
+            size_t per_mma =
+                ir_tensor_mma_operand_count(&IR_TENSOR_MMA(instruction));
+            int c_scale_pointer =
+                IR_TENSOR_MMA(instruction).c_scale_mode !=
+                    MTLC_TENSOR_SCALE_NONE &&
+                per_mma && arg % per_mma == per_mma - 1u;
             const char *operand_kind =
-                arg < pointer_operands
+                arg < pointer_operands || c_scale_pointer
                     ? "pointer"
                 : arg >= matmul_control_base &&
                           arg - matmul_control_base < 5u
@@ -5419,7 +5803,7 @@ static int ir_gpu_graph_visit(IRGpuGraphBuilder *builder, size_t index) {
         "GPU device function '%s' has an invalid asynchronous-copy contract or unbalanced group",
         function->name ? function->name : "?");
   }
-  if (!ir_gpu_tensor_residency_groups_valid(function)) {
+  if (!ir_gpu_tensor_residency_groups_valid(program, function)) {
     return ir_gpu_graph_fail(
         builder,
         "GPU device function '%s' has an invalid tensor residency group",

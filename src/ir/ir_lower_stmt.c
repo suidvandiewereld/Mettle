@@ -1548,7 +1548,8 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
     IRInstruction barrier = {0};
     barrier.op = IR_OP_BARRIER;
     barrier.location = statement->location;
-    barrier.memory_scope = MTLC_MEMORY_SCOPE_WORKGROUP;
+    barrier.memory_scope = source->subgroup ? MTLC_MEMORY_SCOPE_SUBGROUP
+                                            : MTLC_MEMORY_SCOPE_WORKGROUP;
     if (source->memory_regions & AST_MEMORY_REGION_WORKGROUP)
       barrier.memory_regions |= MTLC_MEMORY_REGION_WORKGROUP;
     if (source->memory_regions & AST_MEMORY_REGION_GLOBAL)

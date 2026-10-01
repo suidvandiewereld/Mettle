@@ -755,6 +755,14 @@ Block-scale metadata is canonical rather than vendor-fragment-shaped: A scales
 are row-major `M x ceil(K/block)` and B scales are column-major
 `ceil(K/block) x N`.
 
+4-bit operands may also use `halves` packing, the block layout of GGML's
+Q4_0/Q4_1/IQ4_NL: by linear storage position `p`, element `p` sits in byte
+`16 * (p / 32) + p % 16`, in its low nibble when `p % 32 < 16` and its high
+nibble otherwise. K must be a multiple of 32. An unsigned operand can carry a
+constant `a_zero_point`/`b_zero_point` (0..15 for u4, 0..255 for u8): its
+value is the stored integer minus that. Q4_0 weights are therefore B with
+`b_type: u4, b_packing: halves, b_zero_point: 8`, exactly as stored.
+
 Post-processing is a separate `tensor_epilogue` collective, so nonlinear
 activation never changes an MMA chain's exact sequential semantics:
 
@@ -866,10 +874,25 @@ chains and exact runtime-K loops.
 | packed FP4 E2M1 | UE8M0 block32 | MXFP4 `m16n8k64`, scale vector 2 |
 | packed FP4 E2M1 | UE4M3 block16 | NVFP4 `m16n8k64`, scale vector 4 |
 | structured 2:4 f16 or bf16 | compressed A + canonical uint8 masks | `mma.sp` `m16n8k16`, f32 accumulator/result |
+| i8/u8 A, i8/u8 or halves-packed i4/u4 B | f32 or f16 block32 on both | `mma.sync` `m16n8k32` s32 per block, scaled into f32 |
 
 The block-scaled profiles require PTX 8.8 and an architecture- or family-specific
 `sm_120a`/`sm_121a` target. Raw `sm_121` is deliberately rejected because it
 does not promise architecture-specific instructions.
+
+Block-scaled integer MMA is the int8-activation counterpart (the arithmetic
+of llama.cpp's MMQ): for each K32 block it forms the exact int32 dot of the
+block and adds it to the f32 accumulator times `scale_A[row] * scale_B[col]`.
+It needs PTX 7.0 and sm_80+, K=32 per tile, f32 accumulator/result, and
+default rounding with wrap overflow. The block dot starts from the bits of
+`1.5 * 2^23`, so its result reads as that float plus the dot (every s8/u8
+K32 dot is below 2^22 in magnitude) and one exact `sub.f32` replaces the
+quarter-rate `cvt.rn.f32.s32`. Row-major A and column-major B load four K
+bytes per 32-bit read through a per-lane pointer with constant offsets. A
+halves-packed 4-bit B costs one 32-bit load per n8 subtile -- the lane's word
+holds its K `4t..4t+3` in the low nibbles and `16+4t..16+4t+3` in the high
+ones -- widened in registers: `(x + 0x80 - z) ^ 0x80` per byte subtracts the
+zero point `z` without carries, and signed nibbles take `x ^ 8` first.
 
 The sparse f16/bf16 profile requires PTX 7.1 and sm_80+, subgroup scope,
 M divisible by 16, N divisible by 8, and K=16. PTX translates each neutral mask
@@ -1031,6 +1054,23 @@ handoff. PTX reports
 the accumulator tuple through wait and barrier. The public builder test creates
 the complete copy/tensor pipeline without frontend-private metadata and
 receives the same optimization.
+
+The most general form is a region: one start and any number of connected
+updates in a single-entry, single-exit stretch of code -- typically a K loop
+that stages its tiles through workgroup memory with asynchronous copies,
+plain loads and stores, and barriers. Nothing in the region may name D or
+reach its memory: every store, asynchronous copy destination, and 4-wide
+store must be in a different address space from D, and every load or copy
+source must be in a different address space or derive only from other
+kernel pointer parameters than D does (the same assumption the loop and
+pipeline forms make for MMA operands and copy sources); calls other than
+non-atomic intrinsics, returns, launches, and other tensor operations end the
+region. The commit goes on its only exit -- control transfers that leave
+the region are retargeted to a commit label in front of their destination.
+The verifier rebuilds the CFG and rechecks that every block beginning inside
+the region is entered only from inside it, that every block ending inside
+it leaves only to blocks inside it or to the commit, and the operand rules.
+PTX reports `mtlc.tensor_region resident ...` or `replay ...`.
 
 This accepts an arbitrary explicit N-stage sequence within the asynchronous
 group contract; it does not hard-code double buffering. The compiler does not

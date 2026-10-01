@@ -158,7 +158,8 @@ typedef enum {
 typedef enum {
   IR_TENSOR_RESIDENCY_SCOPE_NONE = 0,
   IR_TENSOR_RESIDENCY_SCOPE_LOOP = 1,
-  IR_TENSOR_RESIDENCY_SCOPE_PIPELINE = 2
+  IR_TENSOR_RESIDENCY_SCOPE_PIPELINE = 2,
+  IR_TENSOR_RESIDENCY_SCOPE_REGION = 3
 } IRTensorResidencyScope;
 
 typedef struct IRTensorAux {
@@ -596,5 +597,12 @@ int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports);
 int ir_program_drop_rewrite_rules(IRProgram *program);
 
 int ir_init_image_is_all_zero(const IRModuleSymbol *symbol);
+
+int ir_tensor_region_instruction_allowed(const IRProgram *program,
+                                         const IRFunction *function,
+                                         const IRInstruction *instruction,
+                                         const IROperand *output);
+int ir_tensor_region_update_operands_clean(const IRInstruction *update,
+                                           const IROperand *output);
 
 #endif

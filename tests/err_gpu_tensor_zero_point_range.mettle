@@ -1,0 +1,12 @@
+// A 4-bit unsigned operand stores 0..15; its zero point must be one of them.
+kernel tensor_zero_point_range(a: int8*, b: uint8*, c: float32*, d: float32*,
+                               sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, c, d, shape: m32n32k32,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 16,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             a_scale_ld: 1, b_scale_ld: 1);
+}

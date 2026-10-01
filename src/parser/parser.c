@@ -5509,6 +5509,7 @@ ASTNode *parser_parse_barrier_statement(Parser *parser) {
   unsigned regions = 0;
   AstMemoryOrder order = AST_MEMORY_ORDER_SEQ_CST;
   int saw_order = 0;
+  int subgroup = 0;
   parser_advance(parser);
   if (!parser_expect(parser, TOKEN_LPAREN)) return NULL;
   while (parser->current_token.type != TOKEN_RPAREN &&
@@ -5521,6 +5522,26 @@ ASTNode *parser_parse_barrier_statement(Parser *parser) {
     unsigned region = 0;
     AstMemoryOrder parsed_order = AST_MEMORY_ORDER_SEQ_CST;
     int is_order = 0;
+    if (strcmp(item, "subgroup") == 0) {
+      // Execution scope, not a memory region: only the subgroup waits.
+      if (subgroup) {
+        parser_set_error(parser, "Duplicate barrier execution scope");
+        return NULL;
+      }
+      subgroup = 1;
+      parser_advance(parser);
+      if (parser->current_token.type == TOKEN_COMMA) {
+        parser_advance(parser);
+        if (parser->current_token.type == TOKEN_RPAREN) {
+          parser_set_error(parser, "Trailing comma in barrier contract");
+          return NULL;
+        }
+      } else if (parser->current_token.type != TOKEN_RPAREN) {
+        parser_set_error(parser, "Expected ',' or ')' in barrier contract");
+        return NULL;
+      }
+      continue;
+    }
     if (strcmp(item, "workgroup") == 0) {
       region = AST_MEMORY_REGION_WORKGROUP;
     } else if (strcmp(item, "global") == 0) {
@@ -5539,8 +5560,9 @@ ASTNode *parser_parse_barrier_statement(Parser *parser) {
       is_order = 1;
     } else {
       parser_set_error(parser,
-                       "Barrier arguments are workgroup/global memory regions "
-                       "or acquire/release/acq_rel/seq_cst orders");
+                       "Barrier arguments are the subgroup execution scope, "
+                       "workgroup/global memory regions, or "
+                       "acquire/release/acq_rel/seq_cst orders");
       return NULL;
     }
     if (is_order) {
@@ -5572,7 +5594,9 @@ ASTNode *parser_parse_barrier_statement(Parser *parser) {
   if (!parser_expect(parser, TOKEN_RPAREN)) return NULL;
   if (regions == 0) regions = AST_MEMORY_REGION_WORKGROUP;
   parser_expect_statement_end(parser);
-  return ast_create_barrier_statement(regions, order, location);
+  ASTNode *node = ast_create_barrier_statement(regions, order, location);
+  if (node && node->data) ((BarrierStatement *)node->data)->subgroup = subgroup;
+  return node;
 }
 
 static int parser_parse_parameter_list(Parser *parser, char ***out_names,
