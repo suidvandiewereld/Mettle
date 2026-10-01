@@ -607,6 +607,10 @@ static int ir_lower_address_space_local(IRLoweringContext *context,
   local->text = decl_type->base_type->name;
   local->value_type = (MtlcType *)pointer_type;
   local->address_space = address_space;
+  // A dynamic view's declared align(N) rides on lhs: the storage the
+  // backend declares for it is at least that aligned.
+  if (is_dynamic_workgroup_view && decl_type->declared_align > 0)
+    local->lhs = ir_operand_int((long long)decl_type->declared_align);
   return 1;
 }
 

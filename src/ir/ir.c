@@ -114,6 +114,13 @@ static const IRIntrinsicName g_ir_intrinsics[] = {
     {"atomic_load_u64", MTLC_INTRINSIC_GPU_ATOMIC_LOAD_U64, 2},
     {"atomic_store_u32", MTLC_INTRINSIC_GPU_ATOMIC_STORE_U32, 3},
     {"atomic_store_u64", MTLC_INTRINSIC_GPU_ATOMIC_STORE_U64, 3},
+    {"mbarrier_init", MTLC_INTRINSIC_GPU_MBARRIER_INIT, 2},
+    {"mbarrier_arrive_expect_tx", MTLC_INTRINSIC_GPU_MBARRIER_ARRIVE_EXPECT_TX, 2},
+    {"mbarrier_wait_parity", MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY, 2},
+    {"fence_mbarrier_init", MTLC_INTRINSIC_GPU_FENCE_MBARRIER_INIT, 0},
+    {"fence_proxy_async", MTLC_INTRINSIC_GPU_FENCE_PROXY_ASYNC, 0},
+    {"tma_load_2d", MTLC_INTRINSIC_GPU_TMA_LOAD_2D, 5},
+    {"tensormap_acquire", MTLC_INTRINSIC_GPU_TENSORMAP_ACQUIRE, 1},
 };
 
 MtlcIntrinsic ir_intrinsic_from_name(const char *name) {
@@ -508,6 +515,40 @@ int mtlc_tensor_mma_desc_is_valid(const MtlcTensorMmaDesc *desc) {
                              desc->b_scale_leading_dimension, desc->k)) {
     return 0;
   }
+  // Scale values narrower than their f32 storage: block scales only.
+  if ((desc->a_scale_values &&
+       ((desc->a_scale_values != MTLC_TENSOR_ELEMENT_FLOAT16 &&
+         desc->a_scale_values != MTLC_TENSOR_ELEMENT_BFLOAT16) ||
+        desc->a_scale_mode == MTLC_TENSOR_SCALE_NONE ||
+        desc->a_scale_element != MTLC_TENSOR_ELEMENT_FLOAT32)) ||
+      (desc->b_scale_values &&
+       ((desc->b_scale_values != MTLC_TENSOR_ELEMENT_FLOAT16 &&
+         desc->b_scale_values != MTLC_TENSOR_ELEMENT_BFLOAT16) ||
+        desc->b_scale_mode == MTLC_TENSOR_SCALE_NONE ||
+        desc->b_scale_element != MTLC_TENSOR_ELEMENT_FLOAT32)))
+    return 0;
+  // A swizzled operand is whole swizzle rows: 8-bit row-major A with S-byte
+  // rows, or halves-packed column-major B with S-byte columns, K filling at
+  // most a row.
+  if ((desc->a_swizzle &&
+       (desc->a_swizzle != 32 && desc->a_swizzle != 64 &&
+        desc->a_swizzle != 128)) ||
+      (desc->b_swizzle &&
+       (desc->b_swizzle != 32 && desc->b_swizzle != 64 &&
+        desc->b_swizzle != 128)) ||
+      (desc->a_swizzle &&
+       ((desc->a_element != MTLC_TENSOR_ELEMENT_INT8 &&
+         desc->a_element != MTLC_TENSOR_ELEMENT_UINT8) ||
+        desc->a_layout != MTLC_TENSOR_LAYOUT_ROW_MAJOR || desc->transpose_a ||
+        desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE ||
+        desc->a_leading_dimension != desc->a_swizzle ||
+        desc->k > desc->a_swizzle)) ||
+      (desc->b_swizzle &&
+       (desc->b_packing != MTLC_TENSOR_PACKING_HALVES ||
+        desc->b_layout != MTLC_TENSOR_LAYOUT_COLUMN_MAJOR || desc->transpose_b ||
+        desc->b_leading_dimension != 2u * desc->b_swizzle ||
+        desc->k > 2u * desc->b_swizzle)))
+    return 0;
   a_storage_k = desc->k;
   if (desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE) {
     uint32_t group = ir_tensor_sparse_group_size(desc->sparsity);
@@ -653,7 +694,10 @@ int ir_tensor_mma_desc_equal(const MtlcTensorMmaDesc *a,
          a->transpose_b == b->transpose_b && a->scope == b->scope &&
          a->a_zero_point == b->a_zero_point &&
          a->b_zero_point == b->b_zero_point &&
-         a->c_scale_mode == b->c_scale_mode;
+         a->c_scale_mode == b->c_scale_mode &&
+         a->a_swizzle == b->a_swizzle && a->b_swizzle == b->b_swizzle &&
+         a->a_scale_values == b->a_scale_values &&
+         a->b_scale_values == b->b_scale_values;
 }
 
 int ir_operand_same(const IROperand *a, const IROperand *b) {
@@ -2803,6 +2847,20 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
       size_t used = strlen(residency);
       snprintf(residency + used, sizeof(residency) - used, " cscale(row)");
     }
+    if (IR_TENSOR_MMA(instruction).a_scale_values ||
+        IR_TENSOR_MMA(instruction).b_scale_values) {
+      size_t used = strlen(residency);
+      snprintf(residency + used, sizeof(residency) - used, " scalevals(%d,%d)",
+               (int)IR_TENSOR_MMA(instruction).a_scale_values,
+               (int)IR_TENSOR_MMA(instruction).b_scale_values);
+    }
+    if (IR_TENSOR_MMA(instruction).a_swizzle ||
+        IR_TENSOR_MMA(instruction).b_swizzle) {
+      size_t used = strlen(residency);
+      snprintf(residency + used, sizeof(residency) - used, " swizzle(%u,%u)",
+               (unsigned)IR_TENSOR_MMA(instruction).a_swizzle,
+               (unsigned)IR_TENSOR_MMA(instruction).b_swizzle);
+    }
     written = snprintf(
         buffer, buffer_size,
         "tensor_mma x%llu%s m%un%uk%u fmt(%d,%d,%d,%d) layout(%d,%d,%d,%d) ld(%u,%u,%u,%u) packing(%d,%d) sparsity(%d) scale(%d:%d:%u,%d:%d:%u)",
@@ -4198,6 +4256,20 @@ int ir_tensor_region_instruction_allowed(const IRProgram *program,
                  program, function, &instruction->arguments[0], output, 1) &&
              ir_tensor_region_access_disjoint(
                  program, function, &instruction->arguments[1], output, 1);
+    // A tile load writes its workgroup destination (and its barrier); the
+    // barrier operations write only the barrier object.
+    if (instruction->intrinsic == MTLC_INTRINSIC_GPU_TMA_LOAD_2D)
+      return instruction->argument_count >= 5 &&
+             ir_tensor_region_access_disjoint(
+                 program, function, &instruction->arguments[0], output, 1) &&
+             ir_tensor_region_access_disjoint(
+                 program, function, &instruction->arguments[4], output, 1);
+    if (instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_INIT ||
+        instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_ARRIVE_EXPECT_TX ||
+        instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY)
+      return instruction->argument_count >= 1 &&
+             ir_tensor_region_access_disjoint(
+                 program, function, &instruction->arguments[0], output, 1);
     return 1;
   default:
     return 0;
@@ -5246,6 +5318,13 @@ static const unsigned char IR_GPU_INTRINSIC_UNIFORMITY[MTLC_INTRINSIC_KIND_COUNT
     [MTLC_INTRINSIC_GPU_PRINT_2I32] = IR_GPU_UNIFORM_WORKGROUP,
     [MTLC_INTRINSIC_GPU_ASSERT] = IR_GPU_UNIFORM_WORKGROUP,
     [MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_MBARRIER_INIT] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_MBARRIER_ARRIVE_EXPECT_TX] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_FENCE_MBARRIER_INIT] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_FENCE_PROXY_ASYNC] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_TMA_LOAD_2D] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_TENSORMAP_ACQUIRE] = IR_GPU_UNIFORM_VARYING,
 };
 
 static unsigned char ir_gpu_intrinsic_result_uniformity(

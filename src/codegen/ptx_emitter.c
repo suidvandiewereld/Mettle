@@ -1863,6 +1863,9 @@ static int ptx_select_mma_profile(PtxFn *fn,
   } while (0)
   if (!fn || !ir_tensor_mma_desc_valid(desc))
     PTX_MMA_REJECT("invalid target-neutral tensor descriptor");
+  if ((desc->a_swizzle || desc->b_swizzle) &&
+      !ptx_tensor_is_float_scaled_int8(desc))
+    PTX_MMA_REJECT("swizzled operands are offered on block-scaled i8 tiles");
   if (desc->scope != MTLC_MEMORY_SCOPE_SUBGROUP)
     PTX_MMA_REJECT("warp-level MMA requires subgroup scope");
   if (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE) {
@@ -3507,12 +3510,37 @@ static void ptx_lane_load_scale(PtxFn *fn, const PtxLanePointer *pointer,
 // dot is 16 times the block dot -- which a start of 1.5 * 2^19, where the
 // float step is 1/16, reads back as the block dot itself.
 //
-// When B's scales are f16, -start * scale_B is exact in f32 (two
+// When B's scales are f16 -- stored so, or f32 declared (b_scale_values)
+// to hold f16 or bf16 values -- -start * scale_B is exact in f32 (two
 // significant bits times eleven), so fma(dot bits, scale_B, -start *
 // scale_B) is the block dot times scale_B with one rounding, and a second
 // fma adds that times scale_A: two operations per element and block. f16 A
 // scales take the mirror form; otherwise the subtraction, the scale
-// product and an fma.
+// product and an fma. Widened scales skip the per-block conversion.
+//
+// A swizzled operand (a tensor-map load's layout) loads through ldmatrix at
+// lane address p ^ key, key = ((p >> 7) & (S/16 - 1)) << 4. Its rows are S
+// bytes and K stays inside one, so bits 7 and up of a lane's address do not
+// move with K, and 16 rows (A) or 8 columns (B) on are 2^9 bytes or more
+// on: the key is one per lane, and each K step costs an add and an xor.
+static void ptx_mma_swizzle_key(PtxFn *fn, const char *address,
+                                unsigned swizzle, char key[24]) {
+  unsigned bits = swizzle == 128u ? 3u : (swizzle == 64u ? 2u : 1u);
+  reg_name(PC_B32, new_reg(fn, PC_B32), key);
+  sb_printf(&fn->body, "\tbfe.u32 %s, %s, 7, %u;\n", key, address, bits);
+  sb_printf(&fn->body, "\tshl.b32 %s, %s, 4;\n", key, key);
+}
+
+static void ptx_mma_swizzled_address(PtxFn *fn, const char *lane,
+                                     const char *key, unsigned bytes,
+                                     char out[24]) {
+  reg_name(PC_B32, new_reg(fn, PC_B32), out);
+  if (bytes)
+    sb_printf(&fn->body, "\tadd.u32 %s, %s, %u;\n", out, lane, bytes);
+  sb_printf(&fn->body, "\txor.b32 %s, %s, %s;\n", out, bytes ? out : lane,
+            key);
+}
+
 static void ptx_emit_mma_s8_scaled_tile(
     PtxFn *fn, const IRInstruction *in, const PtxMmaProfile *profile,
     const PtxMmaTileMemory *memory, const char *group, const char *thread,
@@ -3537,15 +3565,24 @@ static void ptx_emit_mma_s8_scaled_tile(
   int b_ldsm = ldsm_ok && profile->b_halves && memory->spaces[1] &&
                strcmp(memory->spaces[1], ".shared") == 0 && ldb_static &&
                (ldb_static / 2u) % 16u == 0;
+  if ((desc->a_swizzle && !a_ldsm) || (desc->b_swizzle && !b_ldsm)) {
+    fn_error(fn, "PTX swizzled MMA operands are read from workgroup memory "
+                 "through ldmatrix (sm_75, PTX 6.5)");
+    return;
+  }
   int x16 = profile->b_halves &&
             (profile->b_signed4 || profile->b_zero_point == 8);
   // -start, for the exact prefactor: f32 bits and hex text.
   const char *start_bits = x16 ? "0x49400000" : "0x4B400000";
   const char *start_float = x16 ? "0f49400000" : "0f4B400000";
   const char *neg_start = x16 ? "0fC9400000" : "0fCB400000";
-  int prefactor_b = desc->b_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16;
+  // Scales with at most 11 significant bits (f16, or f32 declared to hold
+  // f16 or bf16 values) make -start * scale exact.
+  int prefactor_b = desc->b_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
+                    desc->b_scale_values != MTLC_TENSOR_ELEMENT_INVALID;
   int prefactor_a = !prefactor_b &&
-                    desc->a_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16;
+                    (desc->a_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
+                     desc->a_scale_values != MTLC_TENSOR_ELEMENT_INVALID);
 
   char lane_id[24];
   reg_name(PC_B32, new_reg(fn, PC_B32), lane_id);
@@ -3574,11 +3611,15 @@ static void ptx_emit_mma_s8_scaled_tile(
     ptx_lane_pointer(fn, memory->bases[0], memory->spaces[0], lda, 1, group,
                      1, thread, 4, &a_lane);
   }
+  char a_key[24] = {0};
+  if (desc->a_swizzle)
+    ptx_mma_swizzle_key(fn, a_lane.reg, desc->a_swizzle, a_key);
 
   // B: per-lane pointers. Halves-packed column n is a run of 16-byte
   // groups at n * ldb / 2 bytes; the ldmatrix lane addresses column l % 8,
   // group l / 8 (K blocks 4j .. 4j + 3 per x4).
   PtxLanePointer b_lane, nibble_lane;
+  char b_key[24] = {0};
   char ldb_text[24];
   const char *ldb = ptx_static_ld(desc->b_leading_dimension,
                                   memory->strides[1], ldb_text);
@@ -3599,6 +3640,8 @@ static void ptx_emit_mma_s8_scaled_tile(
       sb_printf(&fn->body, "\tshr.u32 %s, %s, 3;\n", grp, lane_id);
       ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ld_bytes, 1,
                        col, 1, grp, 16, &nibble_lane);
+      if (desc->b_swizzle)
+        ptx_mma_swizzle_key(fn, nibble_lane.reg, desc->b_swizzle, b_key);
     } else {
       ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ld_bytes, 1,
                        group, 1, thread, 4, &nibble_lane);
@@ -3613,6 +3656,7 @@ static void ptx_emit_mma_s8_scaled_tile(
   if (profile->b_halves) {
     raw_base = fn->count[PC_B32];
     for (int i = 0; i < n_tiles * k_blocks; i++) new_reg(fn, PC_B32);
+    char b_swizzled[8][24];  // per K step, shared by every column group
     for (int nt = 0; nt < n_tiles; nt++) {
       int kb = 0;
       while (kb < k_blocks) {
@@ -3622,8 +3666,16 @@ static void ptx_emit_mma_s8_scaled_tile(
           char regs[4][24];
           for (int i = 0; i < count; i++)
             reg_name(PC_B32, raw_base + nt * k_blocks + kb + i, regs[i]);
-          ptx_lane_address(fn, &nibble_lane, (unsigned)nt * 8u,
-                           (unsigned)kb * 16u, address);
+          if (desc->b_swizzle) {
+            if (nt == 0)
+              ptx_mma_swizzled_address(fn, nibble_lane.reg, b_key,
+                                       (unsigned)kb * 16u, b_swizzled[kb]);
+            snprintf(address, sizeof(address), "%s+%u", b_swizzled[kb],
+                     (unsigned)nt * 8u * nibble_lane.stride_bytes);
+          } else {
+            ptx_lane_address(fn, &nibble_lane, (unsigned)nt * 8u,
+                             (unsigned)kb * 16u, address);
+          }
           if (count == 4)
             sb_printf(&fn->body,
                       "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
@@ -3718,6 +3770,9 @@ static void ptx_emit_mma_s8_scaled_tile(
   for (int i = 0; i < 4; i++) new_reg(fn, PC_F32);
   for (int kb = 0; kb < k_blocks; kb++) {
     unsigned k0 = (unsigned)kb * 32u;
+    char a_swizzled[24];
+    if (desc->a_swizzle)
+      ptx_mma_swizzled_address(fn, a_lane.reg, a_key, k0, a_swizzled);
     // A fragments for this block: register r holds rows group + 8*(r&1),
     // K k0 + 16*(r>>1) + 4*thread .. +3.
     for (int mt = 0; mt < m_tiles; mt++) {
@@ -3727,7 +3782,11 @@ static void ptx_emit_mma_s8_scaled_tile(
         reg_name(PC_B32, a_base + mt * 4 + 1, r1);
         reg_name(PC_B32, a_base + mt * 4 + 2, r2);
         reg_name(PC_B32, a_base + mt * 4 + 3, r3);
-        ptx_lane_address(fn, &a_lane, (unsigned)mt * 16u, k0, address);
+        if (desc->a_swizzle)
+          snprintf(address, sizeof(address), "%s+%u", a_swizzled,
+                   (unsigned)mt * 16u * a_lane.stride_bytes);
+        else
+          ptx_lane_address(fn, &a_lane, (unsigned)mt * 16u, k0, address);
         sb_printf(&fn->body,
                   "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
                   r0, r1, r2, r3, address);
@@ -7543,7 +7602,14 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
           !in->value_type->base_type) {
         continue;
       }
+      // A declared align(N) on the workgroup pointer raises the storage's
+      // alignment: tensor-map tiles and their swizzles want up to 1024.
       size_t candidate = mtlc_type_alignment(in->value_type->base_type);
+      if (in->value_type->pointee_align > candidate)
+        candidate = in->value_type->pointee_align;
+      if (in->lhs.kind == IR_OPERAND_INT && in->lhs.int_value > 0 &&
+          (size_t)in->lhs.int_value > candidate)
+        candidate = (size_t)in->lhs.int_value;
       if (candidate < 32) candidate = 32;
       if (candidate > alignment) alignment = candidate;
     }
@@ -8513,6 +8579,115 @@ static void ptx_emit_atomic_intrinsic(IRProgram *program, IRFunction *func,
   }
 }
 
+// A workgroup pointer operand as a 32-bit shared-window address. Only
+// pointers whose type names workgroup memory qualify: a generic pointer
+// would need a run-time conversion these instructions do not take.
+static int ptx_shared_address_u32(PtxFn *fn, const IROperand *operand,
+                                  const char *what, char out[24]) {
+  PtxVal desc = operand_desc(fn, operand);
+  if (!desc.is_ptr || desc.address_space != MTLC_ADDRESS_SPACE_WORKGROUP) {
+    fn_error(fn, "PTX: %s must be a workgroup (shared) pointer", what);
+    return 0;
+  }
+  char wide[24];
+  use_as(fn, operand, PC_B64, wide);
+  reg_name(PC_B32, new_reg(fn, PC_B32), out);
+  sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", out, wide);
+  return 1;
+}
+
+// Transaction barriers (mbarrier) and tensor-map tile loads, the
+// asynchronous staging of sm_90 and newer:
+//   mbarrier_init(bar, count)             arrivals that complete a phase
+//   fence_mbarrier_init()                 publish inits to the async proxy
+//   mbarrier_arrive_expect_tx(bar, bytes) one arrival, `bytes` to come
+//   mbarrier_wait_parity(bar, parity)     block until that phase completes
+//   tma_load_2d(dst, map, c0, c1, bar)    one tile of the tensor map's box
+//                                         at element coordinates (c0, c1),
+//                                         completing `bar`'s transaction
+//   fence_proxy_async()                   order generic workgroup accesses
+//                                         before later async-proxy ones
+//   tensormap_acquire(map)                acquire a tensor map in global
+//                                         memory for the tensor-map proxy
+// bar is a uint64 in workgroup memory; map a CUtensorMap in global memory,
+// 64-byte aligned. Waiting is acquire, arrival release, at CTA scope.
+static void ptx_emit_async_barrier_intrinsic(PtxFn *fn,
+                                             const IRInstruction *in,
+                                             MtlcIntrinsic intrinsic) {
+  if (fn->target_arch < 90 || !ptx_version_at_least(fn, 8, 0)) {
+    fn_error(fn, "PTX: transaction barriers and tensor-map loads require sm_90 and PTX 8.0 or newer");
+    return;
+  }
+  char bar[24], value[24], map[24], dst[24], c0[24], c1[24];
+  switch (intrinsic) {
+  case MTLC_INTRINSIC_GPU_MBARRIER_INIT:
+    if (in->argument_count < 2 ||
+        !ptx_shared_address_u32(fn, &in->arguments[0], "mbarrier_init's barrier", bar))
+      return;
+    use_as(fn, &in->arguments[1], PC_B32, value);
+    sb_printf(&fn->body, "\tmbarrier.init.shared::cta.b64 [%s], %s;\n", bar,
+              value);
+    return;
+  case MTLC_INTRINSIC_GPU_MBARRIER_ARRIVE_EXPECT_TX:
+    if (in->argument_count < 2 ||
+        !ptx_shared_address_u32(fn, &in->arguments[0], "mbarrier_arrive_expect_tx's barrier", bar))
+      return;
+    use_as(fn, &in->arguments[1], PC_B32, value);
+    sb_printf(&fn->body,
+              "\tmbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%s], %s;\n",
+              bar, value);
+    return;
+  case MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY: {
+    if (in->argument_count < 2 ||
+        !ptx_shared_address_u32(fn, &in->arguments[0], "mbarrier_wait_parity's barrier", bar))
+      return;
+    use_as(fn, &in->arguments[1], PC_B32, value);
+    char done[24];
+    reg_name(PC_PRED, new_reg(fn, PC_PRED), done);
+    unsigned long long id = (unsigned long long)fn->call_count++;
+    sb_printf(&fn->body,
+              "mtlc_mbarrier_wait_%llu:\n"
+              "\tmbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %s, [%s], %s;\n"
+              "\t@!%s bra mtlc_mbarrier_wait_%llu;\n",
+              id, done, bar, value, done, id);
+    return;
+  }
+  case MTLC_INTRINSIC_GPU_FENCE_MBARRIER_INIT:
+    sb_puts(&fn->body, "\tfence.mbarrier_init.release.cluster;\n");
+    return;
+  case MTLC_INTRINSIC_GPU_FENCE_PROXY_ASYNC:
+    sb_puts(&fn->body, "\tfence.proxy.async.shared::cta;\n");
+    return;
+  case MTLC_INTRINSIC_GPU_TMA_LOAD_2D:
+    if (in->argument_count < 5 ||
+        !ptx_shared_address_u32(fn, &in->arguments[0], "tma_load_2d's destination", dst) ||
+        !ptx_shared_address_u32(fn, &in->arguments[4], "tma_load_2d's barrier", bar))
+      return;
+    use_as(fn, &in->arguments[1], PC_B64, map);
+    use_as(fn, &in->arguments[2], PC_B32, c0);
+    use_as(fn, &in->arguments[3], PC_B32, c1);
+    // The CTA-local destination form (PTX 8.6) where there is one: with a
+    // shared::cluster destination ptxas guards every load with a check of
+    // the address's CTA rank and a called slow path for a remote CTA, and
+    // the call made ptxas spill and shuffle the registers of everything
+    // live around it (measured: ~3 moves per MMA in a GEMM's K loop).
+    sb_printf(&fn->body,
+              "\tcp.async.bulk.tensor.2d.%s.global.tile.mbarrier::complete_tx::bytes [%s], [%s, {%s, %s}], [%s];\n",
+              ptx_version_at_least(fn, 8, 6) ? "shared::cta" : "shared::cluster",
+              dst, map, c0, c1, bar);
+    return;
+  case MTLC_INTRINSIC_GPU_TENSORMAP_ACQUIRE:
+    if (in->argument_count < 1) return;
+    use_as(fn, &in->arguments[0], PC_B64, map);
+    sb_printf(&fn->body,
+              "\tfence.proxy.tensormap::generic.acquire.gpu [%s], 128;\n", map);
+    return;
+  default:
+    fn_error(fn, "PTX: unknown transaction-barrier intrinsic");
+    return;
+  }
+}
+
 static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
                                     PtxFn *fn, const IRInstruction *in,
                                     char **error, const char *ename,
@@ -8639,6 +8814,9 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
       sb_printf(&fn->body, "\tprmt.b32 %s, %s, %s, %s;\n", dn, a, b, sel);
       if (in->dest.name)
         bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic >= MTLC_INTRINSIC_GPU_MBARRIER_INIT &&
+               intrinsic <= MTLC_INTRINSIC_GPU_TENSORMAP_ACQUIRE) {
+      ptx_emit_async_barrier_intrinsic(fn, in, intrinsic);
     } else if ((intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
                 intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32 ||
                 intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||

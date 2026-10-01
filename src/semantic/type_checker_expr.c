@@ -1720,6 +1720,19 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
     }
     if (option[0] == 'a') desc->a_scale_element = element;
     else desc->b_scale_element = element;
+  } else if (!strcmp(option, "a_scale_values") ||
+             !strcmp(option, "b_scale_values")) {
+    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
+    if (element != MTLC_TENSOR_ELEMENT_FLOAT16 &&
+        element != MTLC_TENSOR_ELEMENT_BFLOAT16) {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor scale values must be f16 or bf16 (exact values of that "
+          "format, stored as the scale type)");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_scale_values = element;
+    else desc->b_scale_values = element;
   } else if (!strcmp(option, "a_packing") ||
              !strcmp(option, "b_packing")) {
     MtlcTensorPacking packing;
@@ -1750,6 +1763,20 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
       desc->a_scale_leading_dimension = dimension;
     else
       desc->b_scale_leading_dimension = dimension;
+  } else if (!strcmp(option, "a_swizzle") ||
+             !strcmp(option, "b_swizzle")) {
+    uint32_t swizzle = 0;
+    if (!type_checker_tensor_option_u32(checker, value, option, 128,
+                                        &swizzle))
+      return 0;
+    if (swizzle != 32 && swizzle != 64 && swizzle != 128) {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor option '%s' must be 32, 64 or 128 (bytes)", option);
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_swizzle = (uint8_t)swizzle;
+    else desc->b_swizzle = (uint8_t)swizzle;
   } else if (!strcmp(option, "a_zero_point") ||
              !strcmp(option, "b_zero_point")) {
     uint32_t zero_point = 0;

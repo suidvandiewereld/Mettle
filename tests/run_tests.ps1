@@ -16705,23 +16705,27 @@ try {
   $bsText = Get-Content -Raw $bsPtx
   $bsMma = 'mma\.sync\.aligned\.m16n8k32\.row\.col\.s32\.s8\.s8\.s32'
   $bsExpect = @(
-    @{ Name = 's8_scaled_tile'; Note = 'mtlc\.tensor_mma native-mma s8-block-scaled whole-tile lowering'; Mma = 8; Stores = 32; Widen = 0; Sign = 0 },
-    @{ Name = 's8_scaled_loop'; Note = 'mtlc\.tensor_loop resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Widen = 0; Sign = 0 },
-    @{ Name = 's8_scaled_region'; Note = 'mtlc\.tensor_region resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Widen = 0; Sign = 0 },
-    @{ Name = 'q4_halves_loop'; Note = 'mtlc\.tensor_loop resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Widen = 16; Sign = 0 },
-    @{ Name = 's4_halves_tile'; Note = 'mtlc\.tensor_mma native-mma s8-block-scaled whole-tile lowering'; Mma = 8; Stores = 32; Widen = 8; Sign = 8 })
+    @{ Name = 's8_scaled_tile'; Note = 'mtlc\.tensor_mma native-mma s8-block-scaled whole-tile lowering'; Mma = 8; Stores = 32; Nibble = 0; Flip = 0; Start = '0x4B400000' },
+    @{ Name = 's8_scaled_loop'; Note = 'mtlc\.tensor_loop resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Nibble = 0; Flip = 0; Start = '0x4B400000' },
+    @{ Name = 's8_scaled_region'; Note = 'mtlc\.tensor_region resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Nibble = 0; Flip = 0; Start = '0x4B400000' },
+    @{ Name = 'q4_halves_loop'; Note = 'mtlc\.tensor_loop resident native-mma s8-block-scaled group=1 subtiles=8'; Mma = 16; Stores = 32; Nibble = 16; Flip = 8; Start = '0x49400000' },
+    @{ Name = 's4_halves_tile'; Note = 'mtlc\.tensor_mma native-mma s8-block-scaled whole-tile lowering'; Mma = 8; Stores = 32; Nibble = 8; Flip = 0; Start = '0x49400000' })
   foreach ($bsCase in $bsExpect) {
     $bsEntry = [regex]::Match(
       $bsText,
       "(?s)\.visible \.entry $($bsCase.Name)\(.*?(?=\.visible \.entry|\z)"
     ).Value
+    # Halves-packed 4-bit B keeps each nibble in the high half of its byte:
+    # two lop3 masks a word, ^ 8 per nibble for the zero point, and the
+    # start 1.5 * 2^19 that reads 16 * dot back as the dot.
     if (-not $bsEntry -or
         $bsEntry -notmatch $bsCase.Note -or
         [regex]::Matches($bsEntry, $bsMma).Count -ne $bsCase.Mma -or
         [regex]::Matches($bsEntry, 'st\.global\.f32').Count -ne $bsCase.Stores -or
-        [regex]::Matches($bsEntry, '0x78787878').Count -ne $bsCase.Widen -or
-        [regex]::Matches($bsEntry, '0x08080808').Count -ne $bsCase.Sign -or
-        $bsEntry -notmatch 'mov\.b32 %r[0-9]+, 0x4B400000' -or
+        [regex]::Matches($bsEntry, '0x78787878').Count -ne 0 -or
+        [regex]::Matches($bsEntry, '0xF0F0F0F0').Count -ne $bsCase.Nibble -or
+        [regex]::Matches($bsEntry, '0x88888888').Count -ne $bsCase.Flip -or
+        $bsEntry -notmatch "mov\.b32 %r[0-9]+, $($bsCase.Start)" -or
         $bsEntry -match 'cvt\.rn\.f32\.s32') {
       throw "block-scaled i8 contract mismatch in $($bsCase.Name)"
     }

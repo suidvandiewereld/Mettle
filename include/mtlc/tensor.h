@@ -169,6 +169,18 @@ typedef struct {
      M row factors -- the online-softmax rescale of a running accumulator.
      Its pointer is the last operand. NONE: D = A * B + C. */
   MtlcTensorScaleMode c_scale_mode;
+  /* 0, or 32, 64 or 128: the operand sits in workgroup memory permuted as
+     a tensor-map load with that swizzle leaves it -- by byte address p,
+     the 16-byte chunk at p is stored at p ^ (((p >> 7) & (S/16 - 1)) << 4),
+     with S/16 - 1 = 1, 3 or 7. Its rows are then exactly S bytes. */
+  uint8_t a_swizzle;
+  uint8_t b_swizzle;
+  /* INVALID, or FLOAT16 / BFLOAT16 under f32 block scales: every scale
+     value is exactly representable in that narrower format (widened when
+     it was stored), a runtime precondition. A backend may then scale as
+     exactly as it would scales stored narrow. */
+  MtlcTensorElement a_scale_values;
+  MtlcTensorElement b_scale_values;
 } MtlcTensorMmaDesc;
 
 typedef struct {
