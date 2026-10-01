@@ -76,6 +76,39 @@ fn fill_bytes() -> int32 {
   return acc;
 }
 
+// A pointer-returning helper inlined into a loop writes its result temp on
+// both return paths: &CUR when k is the current slot, &SLOTS[k].st
+// otherwise. Hoisting &CUR used to rename every read of that temp, so all
+// slots read CUR. Only a temp with a single definition may be renamed.
+struct SlotState {
+  phase: int32;
+  energy: float64;
+}
+
+struct Slot {
+  st: SlotState;
+  weight: float32;
+}
+
+var SLOTS: Slot[8];
+var CUR: SlotState;
+var g_cur_slot: int32 = 0;
+
+fn slot_state(k: int32) -> SlotState* {
+  if (k == g_cur_slot) { return &CUR; }
+  return &SLOTS[k].st;
+}
+
+fn busy_slots() -> int32 {
+  var n: int32 = 0;
+  var k: int32 = 0;
+  while (k < 8) {
+    if (slot_state(k)->phase != 0) { n = n + 1; }
+    k = k + 1;
+  }
+  return n;
+}
+
 fn main() -> int32 {
   fill_src();
   if (SRC[0] != 1 || SRC[511] != 1534) { return 1; }
@@ -95,6 +128,10 @@ fn main() -> int32 {
 
   // Eight runs of 0..63, so 8 * 2016.
   if (fill_bytes() != 16128) { return 6; }
+
+  // Only the current slot is busy; the other seven are idle.
+  CUR.phase = 1;
+  if (busy_slots() != 1) { return 7; }
 
   return 42;
 }

@@ -330,6 +330,28 @@ static int ir_hoist_temp_escapes(const IRFunction *function, size_t lo,
   return 0;
 }
 
+/* Whether `temp` is written by exactly one instruction in the function.
+ * The rename below replaces every read of the temp in the loop with the
+ * hoisted global base, which is only sound when the ADDRESS_OF is the
+ * temp's sole definition. An inlined call that returns a pointer writes
+ * its result temp on each return path -- `if (k == cur) return &A;
+ * return &arr[k].st;` assigns one temp in both branches -- and renaming
+ * those reads made every path read &A. */
+static int ir_hoist_temp_single_def(const IRFunction *function,
+                                    const char *temp) {
+  int defs = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *ins = &function->instructions[i];
+    if (ins->op == IR_OP_STORE) {
+      continue; /* dest is the address stored through, not a write */
+    }
+    if (ir_operand_is_temp_named(&ins->dest, temp) && ++defs > 1) {
+      return 0;
+    }
+  }
+  return defs == 1;
+}
+
 int ir_hoist_global_bases_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
@@ -377,7 +399,8 @@ int ir_hoist_global_bases_pass(IRFunction *function, int *changed) {
         continue;
       }
       ptr_type = ir_hoist_base_pointer_type(function, i, latch, temp);
-      if (!ptr_type || ir_hoist_temp_escapes(function, header, latch, temp)) {
+      if (!ptr_type || ir_hoist_temp_escapes(function, header, latch, temp) ||
+          !ir_hoist_temp_single_def(function, temp)) {
         continue;
       }
       if (snprintf(base_name, sizeof(base_name), "__gbase_%s_%s", loop_label,
