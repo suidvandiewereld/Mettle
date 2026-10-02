@@ -3949,55 +3949,66 @@ static void ptx_emit_mma_s8_scaled_tile(
       }
     }
 
-    // This block's scales, and the exact prefactors -start * scale.
-    for (int mt = 0; mt < m_tiles; mt++) {
-      for (int h = 0; h < 2; h++) {
-        ptx_lane_load_scale(fn, &sa_lane, memory->spaces[4],
-                            desc->a_scale_element,
-                            (unsigned)mt * 16u + (h ? 8u : 0u), kb,
-                            sa_base + mt * 2 + h);
-        if (prefactor_a) {
-          char pre[24], sa[24];
-          reg_name(PC_F32, pre_base + mt * 2 + h, pre);
-          reg_name(PC_F32, sa_base + mt * 2 + h, sa);
-          sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sa,
-                    neg_start);
-        }
-      }
-    }
-    for (int nt = 0; nt < n_tiles; nt++) {
-      for (int h = 0; h < 2; h++) {
-        ptx_lane_load_scale(fn, &sb_lane, memory->spaces[5],
-                            desc->b_scale_element,
-                            (unsigned)nt * 8u + (unsigned)h, kb,
-                            sb_base + nt * 2 + h);
-        if (prefactor_b) {
-          char pre[24], sb[24];
-          reg_name(PC_F32, pre_base + nt * 2 + h, pre);
-          reg_name(PC_F32, sb_base + nt * 2 + h, sb);
-          sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sb,
-                    neg_start);
-        }
-      }
-    }
-
+    // This block's dots, DOT_LAG MMAs ahead of their epilogues. The ring
+    // runs on across blocks: a block's scales are loaded where its first
+    // epilogue is due, after the previous block's last ones, so those sit
+    // among this block's first MMAs instead of draining the tensor pipe at
+    // every block boundary (~0.4% on the int8 TMA GEMM).
     int pairs = m_tiles * n_tiles;
-    for (int step = 0; step < pairs + DOT_LAG; step++) {
+    int g0 = kb * pairs;
+    int steps = kb == k_blocks - 1 ? pairs + DOT_LAG : pairs;
+    for (int step = 0; step < steps; step++) {
+      int g = g0 + step;
       if (step < pairs) {
         int mt = step / n_tiles, nt = step % n_tiles;
         char a[128], b[128], dots[128];
         ptx_reg_tuple_at(PC_B32, a_base + mt * 4, 4, a, sizeof(a));
         ptx_reg_tuple_at(PC_B32, b_base + nt * 2, 2, b, sizeof(b));
-        ptx_reg_tuple_at(PC_B32, dot_base + (step % DOT_RING) * 4, 4, dots,
+        ptx_reg_tuple_at(PC_B32, dot_base + (g % DOT_RING) * 4, 4, dots,
                          sizeof(dots));
         sb_printf(&fn->body,
                   "\tmma.sync.aligned.m16n8k32.row.col.s32.%s.%s.s32 %s, %s, %s, {%s, %s, %s, %s};\n",
                   profile->a_type, profile->b_type, dots, a, b, bias, bias,
                   bias, bias);
       }
-      int done = step - DOT_LAG;
+      int done = g - DOT_LAG;
       if (done < 0) continue;
-      int mt = done / n_tiles, nt = done % n_tiles;
+      int dkb = done / pairs;
+      int dstep = done % pairs;
+      if (dstep == 0) {
+        // Block dkb's scales, and the exact prefactors -start * scale.
+        for (int mt = 0; mt < m_tiles; mt++) {
+          for (int h = 0; h < 2; h++) {
+            ptx_lane_load_scale(fn, &sa_lane, memory->spaces[4],
+                                desc->a_scale_element,
+                                (unsigned)mt * 16u + (h ? 8u : 0u), dkb,
+                                sa_base + mt * 2 + h);
+            if (prefactor_a) {
+              char pre[24], sa[24];
+              reg_name(PC_F32, pre_base + mt * 2 + h, pre);
+              reg_name(PC_F32, sa_base + mt * 2 + h, sa);
+              sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sa,
+                        neg_start);
+            }
+          }
+        }
+        for (int nt = 0; nt < n_tiles; nt++) {
+          for (int h = 0; h < 2; h++) {
+            ptx_lane_load_scale(fn, &sb_lane, memory->spaces[5],
+                                desc->b_scale_element,
+                                (unsigned)nt * 8u + (unsigned)h, dkb,
+                                sb_base + nt * 2 + h);
+            if (prefactor_b) {
+              char pre[24], sb[24];
+              reg_name(PC_F32, pre_base + nt * 2 + h, pre);
+              reg_name(PC_F32, sb_base + nt * 2 + h, sb);
+              sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sb,
+                        neg_start);
+            }
+          }
+        }
+      }
+      int mt = dstep / n_tiles, nt = dstep % n_tiles;
       int acc = accumulator_base + (mt * n_tiles + nt) * 4;
       for (int e = 0; e < 4; e++) {
         char dot[24], f[24], sa[24], sb[24], accr[24];
