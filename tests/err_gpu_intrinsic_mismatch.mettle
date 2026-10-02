@@ -1,0 +1,5 @@
+extern fn h2f(bits: uint16) -> float32 = "h2f";
+
+kernel(block = 32) mismatched(out: float32*, h: uint16*) {
+  out[thread.x] = h2f(h[thread.x]);
+}

@@ -118,6 +118,7 @@ typedef struct {
   Type *aggregate_target_type;
   int aggregate_requires_constant;
   struct ASTNode *module_program;
+  int device_module;
   Type **struct_placeholders;
   size_t struct_placeholder_count;
   size_t struct_placeholder_capacity;

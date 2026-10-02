@@ -2686,7 +2686,10 @@ $cases = @(
   @{ Name = "err_gpu_address_space_initializer"; Path = "tests/err_gpu_address_space_initializer.mettle"; ShouldSucceed = $false; Pattern = "workgroup storage cannot have a declaration initializer" },
   @{ Name = "err_gpu_address_space_rebind"; Path = "tests/err_gpu_address_space_rebind.mettle"; ShouldSucceed = $false; Pattern = "GPU address-space binding 'scratch' cannot be rebound" },
   @{ Name = "err_gpu_barrier_outside_kernel"; Path = "tests/err_gpu_barrier_outside_kernel.mettle"; ShouldSucceed = $false; Pattern = "Barrier statements are only legal inside a GPU kernel" },
-  @{ Name = "err_gpu_subgroup_signature"; Path = "tests/err_gpu_subgroup_signature.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "invalid subgroup intrinsic signature" },
+  @{ Name = "gpu_intrinsics_builtin"; Path = "tests/gpu/intrinsics_builtin.mettle"; ShouldSucceed = $true; Args = @("--emit-ptx", "--gpu-arch=gb10") },
+  @{ Name = "gpu_intrinsics_redeclared"; Path = "tests/gpu/intrinsics_redeclared.mettle"; ShouldSucceed = $true; Args = @("--emit-ptx", "--gpu-arch=gb10") },
+  @{ Name = "err_gpu_intrinsic_mismatch"; Path = "tests/err_gpu_intrinsic_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "extern 'h2f' does not match the GPU intrinsic h2f\(bits: int32\) -> float32" },
+  @{ Name = "err_gpu_subgroup_signature"; Path = "tests/err_gpu_subgroup_signature.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "extern 'subgroup_reduce_add_f32' does not match the GPU intrinsic subgroup_reduce_add_f32\(value: float32\) -> float32" },
   @{ Name = "err_gpu_subgroup_outside_kernel"; Path = "tests/err_gpu_subgroup_outside_kernel.mettle"; ShouldSucceed = $false; Pattern = "Subgroup built-ins are only legal inside a GPU kernel or a device function a kernel in the same module reaches" },
   @{ Name = "err_gpu_subgroup_type"; Path = "tests/err_gpu_subgroup_type.mettle"; ShouldSucceed = $false; Pattern = "Subgroup 'reduce_add' value must be uint32 or float32" },
   @{ Name = "err_gpu_subgroup_vote_type"; Path = "tests/err_gpu_subgroup_vote_type.mettle"; ShouldSucceed = $false; Pattern = "Subgroup 'any' predicate must be bool" },
@@ -16814,6 +16817,31 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "ptx_emit_gb10_inline_asm_operands" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $gbiBuiltin = Join-Path $tmpDir "intrinsics_builtin.ptx"
+  $gbiDeclared = Join-Path $tmpDir "intrinsics_redeclared.ptx"
+  foreach ($pair in @(@("tests/gpu/intrinsics_builtin.mettle", $gbiBuiltin),
+                      @("tests/gpu/intrinsics_redeclared.mettle", $gbiDeclared))) {
+    $gbiOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 $pair[0] -o $pair[1] 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "$($pair[0]) did not compile: $gbiOut" }
+  }
+  $gbiA = Get-Content -Raw $gbiBuiltin
+  $gbiB = Get-Content -Raw $gbiDeclared
+  if ($gbiA -ne $gbiB) {
+    throw "undeclared intrinsics emit different PTX from declared ones"
+  }
+  foreach ($want in @('sqrt\.rn\.f32', 'prmt\.b32', 'dp4a\.s32\.s32', 'mbarrier\.init', 'ld\.global\.v4\.u32', 'fence\.mbarrier_init')) {
+    if ($gbiA -notmatch $want) { throw "built-in intrinsic PTX lacks $want" }
+  }
+  Write-CaseResult -Name "gpu_intrinsics_builtin_equals_declared" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "gpu_intrinsics_builtin_equals_declared" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++

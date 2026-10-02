@@ -5,7 +5,6 @@
 extern fn sqrtf(x: float32) -> float32 = "sqrtf";
 extern fn expf(x: float32) -> float32 = "expf";
 extern fn rsqrtf(x: float32) -> float32 = "rsqrtf";
-extern fn h2f(bits: uint16) -> float32 = "h2f";
 
 // Contended global and workgroup atomics, plus a release/acquire message pass.
 // Four 64-thread workgroups exercise every u32/u64 RMW and CAS identity. The

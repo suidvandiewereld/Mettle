@@ -5738,6 +5738,8 @@ static const char *compile_session_open(CompileContext *ctx) {
   if (!ctx->parser || !ctx->type_checker) {
     return "Failed to initialize parser or type checker";
   }
+  ctx->type_checker->device_module =
+      ctx->options->emit_ptx || ctx->options->emit_spirv;
 
   if (compile_wants_debug_info(ctx->options)) {
     ctx->debug_info =

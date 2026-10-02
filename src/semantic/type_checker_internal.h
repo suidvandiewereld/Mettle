@@ -78,6 +78,12 @@ void type_checker_print_gpu_type_report(FILE *out);
 long long type_checker_view_element_offset(const Type *view, long long row,
                                            long long column);
 int type_checker_module_has_kernel(TypeChecker *checker);
+Symbol *type_checker_declare_gpu_intrinsic(TypeChecker *checker,
+                                           const char *name);
+int type_checker_check_gpu_intrinsic_declaration(TypeChecker *checker,
+                                                 ASTNode *declaration,
+                                                 FunctionDeclaration *decl,
+                                                 Type *return_type);
 int type_checker_static_view_index_is_bounded(TypeChecker *checker,
                                               ASTNode *index, size_t extent);
 ASTNode *type_checker_declared_type_template(const char *name);

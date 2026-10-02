@@ -3348,6 +3348,10 @@ static Type *type_checker_infer_user_call(TypeChecker *checker,
 
   Symbol *func_symbol =
       symbol_table_lookup(checker->symbol_table, call->function_name);
+  if (!func_symbol && !call->object) {
+    func_symbol =
+        type_checker_declare_gpu_intrinsic(checker, call->function_name);
+  }
   if (!func_symbol) {
     type_checker_report_undefined_symbol(
         checker, expression->location,

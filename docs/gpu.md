@@ -51,13 +51,41 @@ an ordinary struct named `block` in a CPU program is unaffected.
 ### Supported kernel constructs
 
 Kernels use the same syntax as CPU code: arithmetic, comparisons, `if`/`while`,
-pointer indexing, casts, and a set of GPU math intrinsics declared as `extern`:
-`sqrtf`, `rsqrtf`, `fabsf`, `sinf`, `cosf`, `logf`, `expf` (lowered to PTX
-`sqrt.rn` / `rsqrt.approx` / `ex2.approx` etc.), plus `h2f` / `f2h` for fp16
-conversion. The PTX backend is validated structurally by round-tripping emitted
-PTX through `ptxas`; a CUDA Driver differential suite executes correctness and
-sanitizer cases on development hardware and has a stricter native GB10 mode.
-See the [GPU architecture and acceptance contract](gpu-architecture.md).
+pointer indexing, casts, and the built-in GPU intrinsics listed below
+(`sqrtf` lowers to `sqrt.rn`, `expf` to `ex2.approx`, and so on). The PTX
+backend is validated structurally by round-tripping emitted PTX through
+`ptxas`; a CUDA Driver differential suite executes correctness and sanitizer
+cases on development hardware and has a stricter native GB10 mode. See the
+[GPU architecture and acceptance contract](gpu-architecture.md).
+
+### Built-in intrinsics
+
+Device code calls these without declaring them. A call counts as device code
+in a file compiled with `--emit-ptx` or `--emit-spirv`, and in any function of
+a module that has a kernel. An `extern fn` with one of these names must
+declare exactly the signature below (parameter names do not matter), so an
+existing declaration keeps compiling and a wrong one is an error that prints
+the expected signature.
+
+| Group | Intrinsics |
+|---|---|
+| thread geometry | `gpu_tid_x/y/z()`, `gpu_ntid_x/y/z()`, `gpu_ctaid_x/y/z()`, `gpu_nctaid_x/y/z()`, each `-> int32` |
+| barrier | `gpu_barrier()` |
+| f32 math | `sqrtf`, `rsqrtf`, `fabsf`, `sinf`, `cosf`, `logf`, `expf`: `(x: float32) -> float32` |
+| fp16 | `h2f(bits: int32) -> float32`, `f2h(x: float32) -> int32` |
+| packed fp16 | `h2f_lo(p: uint32) -> float32`, `h2f_hi(p: uint32) -> float32`, `f2h2(lo: float32, hi: float32) -> uint32`, `hadd2(a: uint32, b: uint32) -> uint32`, `hmul2(a: uint32, b: uint32) -> uint32`, `hfma2(a: uint32, b: uint32, c: uint32) -> uint32` |
+| bf16 | `bf2f(bits: uint32) -> float32`, `f2bf(x: float32) -> uint32` |
+| bit casts | `f32_from_bits(bits: uint32) -> float32`, `bits_from_f32(x: float32) -> uint32` |
+| integer dot | `dp4a_u32`, `dp2a_lo_u32`, `dp2a_hi_u32`: `(a: uint32, b: uint32, c: uint32) -> uint32`; `dp4a_s32`, `dp2a_lo_s32`, `dp2a_hi_s32`: `(a: int32, b: int32, c: int32) -> int32` |
+| byte permute | `prmt_b32(a: uint32, b: uint32, sel: uint32) -> uint32` |
+| 128-bit access | `load4_f32(src: float32*, dst: float32*)`, `load4_u32(src: uint32*, dst: uint32*)`, `store4_f32(dst: float32*, src: float32*)`, `store4_u32(dst: uint32*, src: uint32*)` |
+| transaction barriers | `mbarrier_init(bar: uint64 shared*, count: uint32)`, `mbarrier_arrive_expect_tx(bar: uint64 shared*, bytes: uint32)`, `mbarrier_wait_parity(bar: uint64 shared*, parity: uint32)`, `fence_mbarrier_init()`, `fence_proxy_async()` |
+| tensor maps | `tma_load_2d(dst: uint8 shared*, map: uint8*, c0: int32, c1: int32, bar: uint64 shared*)`, `tensormap_acquire(map: uint8*)` |
+| printing | `gpu_print(fmt: cstring)`, `gpu_print_i32(fmt: cstring, v: int32)`, `gpu_print_f32(fmt: cstring, v: float32)`, `gpu_print_2i32(fmt: cstring, a: int32, b: int32)`, `gpu_assert(cond: int32)` |
+| subgroup, typed | `subgroup_local_id()`, `subgroup_size()` `-> uint32`; `subgroup_broadcast_u32`, `subgroup_shuffle_u32`: `(value: uint32, lane: uint32) -> uint32`; the `_f32` forms take and return `float32` with a `uint32` lane; `subgroup_reduce_{add,min,max}_u32`, `subgroup_scan_{inclusive,exclusive}_add_u32`: `(value: uint32) -> uint32`, and the `_f32` forms on `float32`; `subgroup_ballot_word(predicate: bool, word: uint32) -> uint32`; `subgroup_any`, `subgroup_all`: `(predicate: bool) -> bool` |
+
+The generic subgroup built-ins (`subgroup_reduce_add` and the rest) and the
+scoped atomics have their own syntax, described in their sections.
 
 An ordinary function called by a kernel is emitted as a non-entry device helper
 in both PTX and SPIR-V. Reachability is transitive and unrelated host functions

@@ -2320,6 +2320,10 @@ static int type_checker_process_function(TypeChecker *checker,
     if (!return_type) {
       return 0;
     }
+    if (!type_checker_check_gpu_intrinsic_declaration(checker, declaration,
+                                                      func_decl, return_type)) {
+      return 0;
+    }
 
     Symbol *func_symbol = type_checker_build_function_symbol(
         checker, declaration, func_decl, return_type);

@@ -2,7 +2,6 @@
 // 2-aligned-but-not-4-aligned block offsets (GGML Q6_K's 210-byte blocks).
 // Regression for inference-engine feature request 4.
 
-extern fn h2f(bits: uint16) -> float32 = "h2f";
 
 kernel u16_block_tail(blocks: uint16*, out: float32*, nb: int32) {
   var i: int32 = block.x * block_dim.x + thread.x;

@@ -1,0 +1,18 @@
+kernel(block = 32) builtin_intrinsics(out: float32*, h: uint16*, w: uint32*) {
+  workgroup var s8: uint8 align(16)*;
+  var bar: uint64 shared* = (uint64 shared*)s8;
+  var x: float32 = out[thread.x];
+  var a: float32 = sqrtf(x) + expf(x) + rsqrtf(x + 1.0) + h2f((int32)h[thread.x]);
+  var p: uint32 = prmt_b32(w[0], w[1], 0x5410);
+  var d: int32 = dp4a_s32((int32)p, 3, 7);
+  var half2: uint32 = hadd2(f2h2(a, x), w[2]);
+  var four: uint32[4];
+  load4_u32(w, &four[0]);
+  if (thread.x == 0) {
+    mbarrier_init(bar, 1);
+    fence_mbarrier_init();
+  }
+  gpu_barrier();
+  out[thread.x] = a + (float32)d + (float32)four[2] + (float32)f2h(a) + h2f_lo(half2) +
+                  f32_from_bits(bits_from_f32(x)) + bf2f(f2bf(x));
+}

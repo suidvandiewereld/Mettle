@@ -11,8 +11,6 @@ extern fn gpu_ntid_x() -> int32 = "gpu_ntid_x";
 extern fn gpu_ctaid_x() -> int32 = "gpu_ctaid_x";
 extern fn sqrtf(x: float32) -> float32 = "sqrtf";
 extern fn fabsf(x: float32) -> float32 = "fabsf";
-extern fn h2f(bits: uint16) -> float32 = "h2f";
-extern fn f2h(x: float32) -> uint16 = "f2h";
 extern fn gpu_barrier() = "gpu_barrier";
 
 // An unreachable ordinary function is neither an entry point nor device code.
@@ -87,7 +85,7 @@ kernel fp16_roundtrip(src: uint16*, dst: uint16*, n: int32) {
   var i: int32 = gpu_ctaid_x() * gpu_ntid_x() + gpu_tid_x();
   if (i < n) {
     var f: float32 = h2f(src[i]);
-    dst[i] = f2h(f + 1.0);
+    dst[i] = (uint16)f2h(f + 1.0);
   }
 }
 
