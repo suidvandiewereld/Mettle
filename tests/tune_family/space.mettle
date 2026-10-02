@@ -1,0 +1,13 @@
+export struct Scale {
+  name: string;
+  width: int32;
+  unroll: int32;
+  split: int32;
+}
+
+export const SCALES: Scale[4] = [
+  { name: "w32", width: 32, unroll: 1, split: 0 },
+  { name: "w32", width: 32, unroll: 2, split: 0 },
+  { name: "w32", width: 32, unroll: 2, split: 1 },
+  { name: "w64", width: 64, unroll: 1, split: 0 }
+];

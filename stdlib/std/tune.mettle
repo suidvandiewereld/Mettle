@@ -1,0 +1,7 @@
+export struct TuneResult {
+  row: int32;
+  key: string;
+  verdict: string;
+  median_us: float64;
+  chosen: bool;
+}

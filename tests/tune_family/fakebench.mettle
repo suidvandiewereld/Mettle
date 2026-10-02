@@ -1,0 +1,12 @@
+import "std/io";
+import "space";
+import "family.tune";
+
+fn main() -> int32 {
+  for i in 0..2 {
+    var s: Scale = SCALES_TUNED[i];
+    var us: float64 = 100.0 / (float64)s.unroll + (float64)s.width / 64.0;
+    println("tune saxpy_{s.name} case {us}");
+  }
+  return 0;
+}

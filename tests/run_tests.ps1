@@ -13,6 +13,13 @@
 
 $ErrorActionPreference = "Continue"
 
+$scratchRoot = Join-Path (Split-Path -Parent $PSScriptRoot) ".tmp/tests"
+if ($env:METTLE_TEST_SCRATCH) { $scratchRoot = $env:METTLE_TEST_SCRATCH }
+if (-not (Test-Path $scratchRoot)) { New-Item -Path $scratchRoot -ItemType Directory -Force | Out-Null }
+$env:TEMP = $scratchRoot
+$env:TMP = $scratchRoot
+$env:TMPDIR = $scratchRoot
+
 # Host platform. Windows PowerShell 5.1 predates the $IsWindows automatic
 # variable and only ever runs on Windows, so a null reading means Windows.
 $script:OnWindows = if ($null -eq $IsWindows) { $true } else { [bool]$IsWindows }
@@ -17242,6 +17249,43 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "ptx_emit_gb10_tensor_c_zero" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $tfDir = Join-Path $tmpDir "tune_family"
+  if (Test-Path $tfDir) { Remove-Item -Recurse -Force $tfDir }
+  New-Item -ItemType Directory -Force $tfDir | Out-Null
+  Copy-Item tests/tune_family/*.mettle $tfDir
+  $tfCompiler = (Resolve-Path $CompilerPath).Path
+  Push-Location $tfDir
+  try {
+    $tfOut = & $tfCompiler tune family.mettle --space SCALES --key width `
+      --build "$tfCompiler --build fakebench.mettle -o fakebench.exe" `
+      --artifact fakebench.exe --run "{artifact}" --rounds 2 2>&1 | Out-String
+    $tfExit = $LASTEXITCODE
+  } finally {
+    Pop-Location
+  }
+  if ($tfExit -ne 0) { throw "mettle tune failed: $tfOut" }
+  if ($tfOut -notmatch 'row 2 refused, never timed: error\[C0001\]: contract SAXPY: saxpy_reference and saxpy_w32 compute output \[0\]\[0\] of the claim at line 42 differently' -or
+      $tfOut -match 'They part at') {
+    throw "mettle tune did not refuse the split row by its diagnostic: $tfOut"
+  }
+  $tfFile = Get-Content -Raw (Join-Path $tfDir "family.tune.mettle")
+  if ($tfFile -notmatch [regex]::Escape('{ name: "w32", width: 32, unroll: 2, split: 0 },') -or
+      $tfFile -notmatch [regex]::Escape('{ row: 1, key: "32", verdict: "proven", median_us: 50.50, chosen: true }') -or
+      $tfFile -notmatch [regex]::Escape('{ row: 0, key: "32", verdict: "proven", median_us: 100.50, chosen: false }') -or
+      $tfFile -notmatch [regex]::Escape('{ row: 3, key: "64", verdict: "proven", median_us: 101.00, chosen: true }') -or
+      $tfFile -notmatch 'row: 2, key: "32", verdict: "refused: error\[C0001\]') {
+    throw "mettle tune wrote an unexpected tuning file: $tfFile"
+  }
+  Write-CaseResult -Name "mettle_tune_family" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "mettle_tune_family" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++

@@ -1547,6 +1547,63 @@ tile_reversed visit the same K steps in different orders for output [0][0] of
 the claim at line 50: ...
 ```
 
+### Contract-safe tuning
+
+A kernel family whose variants are rows of a table is tuned on the device by
+`mettle tune`, and only there: a normal build reads the choice from a checked-in
+file and measures nothing. The table sits beside the module, and the module
+generates its kernels from the rows the tuning file chose:
+
+```mettle
+export struct ShortTile { name: string; m: int32; stages: int32; per: int32; ... }
+export const SHORT_TILES: ShortTile[11] = [
+  { name: "s16", m: 16, stages: 4, per: 2, ... },
+  { name: "s16", m: 16, stages: 8, per: 1, ... },
+  ...
+];
+```
+
+```mettle
+import "short_tiles";
+import "kernels.tune";
+
+comptime for t in SHORT_TILES_TUNED.rows {
+  @numerics(Q4_0_GEMM) kernel(block = t.warps * 32) ident("gemm_q4_0_i8_", t.name)(...) {
+    ...
+  }
+}
+```
+
+```bash
+mettle tune kernels/kernels.mettle --space SHORT_TILES --key m --check "-O" --build "tools/tune_build.bat" --artifact build/pgemm.exe --run "{artifact} -tune"
+```
+
+Each build takes one row for every value of the key. The tuner writes that
+choice to `kernels.tune.mettle` and compiles the module with the contract
+report. A row the module's numerics contract refuses is reported with its
+diagnostic and never built or timed. So is a row whose kernels no contract
+proves, since tuning without a proof would choose between results. The proven
+builds run `--build`, and copies of `--artifact` run `--run` in interleaved
+rounds. The run prints `tune <kernel> <case> <microseconds>` lines, and a row's
+time is the sum over its cases of the median across rounds. A key keeps its
+shipped row unless a proven row is faster by more than `--margin` percent (1
+by default).
+
+The file it writes holds `SHORT_TILES_TUNED`, the chosen row for each key, and
+`SHORT_TILES_MEASURED`, every row's verdict and time as `std/tune`
+`TuneResult` rows, so the same file always builds the same binary. A build
+without the file fails, naming `mettle tune`. Each row needs a `name` column
+that ends the names of the kernels it generates, and rows of one key share
+it, since the host launches them by name.
+
+```text
+m = 16
+  row  0    429.05 us    +0.0%  { name: "s16", m: 16, stages: 4, per: 2, ... }  (shipped)  <- chosen
+  row  2    426.48 us    -0.6%  { name: "s16", m: 16, stages: 2, per: 2, ... }
+  row  3   refused: error[C0004]: contract Q4_0_GEMM accumulates K in one
+           ascending chain, and gemm_q4_0_i8_s16 splits it into partial sums
+```
+
 ### Multidimensional tensor transfers
 
 `tensor_transfer_workgroup` moves one complete rank-1 through rank-5 rectangular

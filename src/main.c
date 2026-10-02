@@ -41,6 +41,7 @@
 #include "ir/ir_purity.h"
 #include "ir/ir_twins.h"
 #include "ir/ir_machine.h"
+#include "tune.h"
 #include "ir/ir_trace.h"
 #include "ir/ir_explain_ledger.h"
 #include "ir/ir_interp.h"
@@ -4045,6 +4046,13 @@ int main(int argc, char *argv[]) {
     }
     if (strcmp(argv[1], "help") == 0) {
       return print_help_topic(argv[0], argv[0], argc >= 3 ? argv[2] : NULL);
+    }
+    if (strcmp(argv[1], "tune") == 0) {
+      char *self_path = get_executable_path(argv[0]);
+      int tuned = mettle_tune_main(argc - 1, argv + 1,
+                                   self_path ? self_path : argv[0]);
+      free(self_path);
+      return tuned;
     }
     if (strcmp(argv[1], "explain") == 0) {
       if (argc >= 4) {

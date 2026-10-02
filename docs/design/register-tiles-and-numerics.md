@@ -264,14 +264,24 @@ The candidate space is data, and the kernels come from it by ordinary
 metaprogramming:
 
 ```mettle
-struct ShortTile { m: int32; stages: int32; per: int32; warps: int32; }
-const SHORT_TILES: ShortTile[9] = [ ... ];
+struct ShortTile { name: string; m: int32; stages: int32; per: int32;
+                   warps: int32; warps_m: int32; chains: int32; }
+const SHORT_TILES: ShortTile[11] = [ ... ];
 
 import "kernels.tune";
 comptime for t in SHORT_TILES_TUNED.rows {
-  @numerics(Q4_0_GEMM) kernel ident("gemm_q4_0_i8_s", textof(t.m))(...) { ... }
+  @numerics(Q4_0_GEMM) kernel(block = t.warps * 32) ident("gemm_q4_0_i8_", t.name)(...) {
+    comptime for p in 0..t.per { ... }
+  }
 }
 ```
+
+The table sits beside the module. A row's `name` ends the names of the
+kernels it generates, and the rows of one key share it, since the host
+launches them by name. Writing the family this way needed `comptime for` over
+an integer range, block sizes and tensor dimensions from compile-time values,
+and constants that fold inside kernels, so the template compiles to the same
+instructions the Python generator wrote.
 
 `kernels.tune.mettle` is checked in. It holds `SHORT_TILES_TUNED`, one chosen
 row a key, and the measurements the choice came from, as data. A build reads it
@@ -280,19 +290,25 @@ tuning file fails the build naming the step that writes it.
 
 ### The step
 
-`mettle tune kernels.mettle --space SHORT_TILES --key m` is the only place
-tuning happens. Nothing in a normal build measures anything.
+`mettle tune kernels.mettle --space SHORT_TILES --key m --build <cmd>
+--artifact <path> --run <cmd>` is the only place tuning happens. Nothing in a
+normal build measures anything.
 
-1. For each row it builds the module with that row as the choice for its key.
-2. Each build runs the module's numerics contracts. A row whose kernel the
-   contract does not prove equivalent is refused and reported with the
-   divergence, and is never timed.
-3. The rest are timed on the device. The tuner runs the module's `@tune`
-   function, a host workload in Mettle that dispatches at real sizes, in the
-   interpreter with every dispatch sent to the GPU on random data. Rounds are
-   interleaved, and the median is taken.
-4. It writes `kernels.tune.mettle`: the fastest proven row per key, the shipped
-   row if nothing beats it, and every row's timing and verdict.
+1. Each build takes one row for every key value: the i-th candidate of each
+   key, or its shipped row once a key runs out.
+2. Each build is first compiled with the contract report. A row whose kernel
+   the contract refuses is reported with the diagnostic, put back to the
+   shipped row, and never timed; so is a row no contract proves.
+3. The proven builds run the project's own build command, and copies of the
+   artifact it leaves run the project's bench in interleaved rounds. The bench
+   prints `tune <kernel> <case> <microseconds>`. A row's time is the sum over
+   its cases of the median across rounds. (The note first had the tuner run a
+   `@tune` function in the interpreter with dispatches sent to the GPU; the
+   interpreter cannot reach the device, and the project's bench already
+   launches at real sizes on real data, so the step runs it.)
+4. It writes `kernels.tune.mettle`: per key the shipped row unless a proven row
+   is faster by more than the margin (1% by default), and every row's verdict
+   and time as data.
 
 ### Refused
 

@@ -1,0 +1,44 @@
+import "std/numerics";
+import "std/mem";
+import "space";
+import "family.tune";
+
+const SAXPY: Numerics = { k_order: k_ascending };
+
+@numerics(SAXPY) kernel(block = 32) saxpy_reference(x: float32*, y: float32*, out: float32*) {
+  var i: int32 = block.x * 32 + thread.x;
+  out[i] = x[i] * 2.5 + y[i];
+}
+
+comptime for s in SCALES_TUNED.rows {
+  @numerics(SAXPY) kernel(block = 32) ident("saxpy_", s.name)(x: float32*, y: float32*,
+                                                              out: float32*) {
+    var base: int32 = block.x * 32 * s.unroll + thread.x;
+    comptime for u in 0..s.unroll {
+      var i: int32 = base + u * 32;
+      if (s.split == 1) {
+        out[i] = x[i] * 2.0 + x[i] * 0.5 + y[i];
+      } else {
+        out[i] = x[i] * 2.5 + y[i];
+      }
+    }
+  }
+}
+
+@numerics(SAXPY) fn saxpy_agree() {
+  var x: float32* = (float32*)numerics_input(1024);
+  var y: float32* = (float32*)numerics_input(1024);
+  var reference: float32* = (float32*)calloc(256, 4);
+  var out: float32* = (float32*)calloc(256, 4);
+  dispatch saxpy_reference[grid: (8, 1, 1), block: (32, 1, 1)](x, y, reference);
+  for i in 0..2 {
+    var s: Scale = SCALES_TUNED[i];
+    var blocks: int32 = 8 / s.unroll;
+    if (s.width == 32) {
+      dispatch saxpy_w32[grid: (blocks, 1, 1), block: (32, 1, 1)](x, y, out);
+    } else {
+      dispatch saxpy_w64[grid: (blocks, 1, 1), block: (32, 1, 1)](x, y, out);
+    }
+    numerics_same(reference, out, 1, 256, 256);
+  }
+}
