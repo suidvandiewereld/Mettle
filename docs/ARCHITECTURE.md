@@ -73,6 +73,7 @@ backtrack, which was a real bug once.
 | File | Concern |
 |------|---------|
 | `type_checker*.c` | Types, declarations, statements, expressions, matches |
+| `type_checker_gpu_intrinsics.c` | The GPU intrinsics' signatures: declared on first use in device code, and the check that an `extern` of one matches |
 | `type_checker_memory.c` | Use after free, double free, leaks, out of bounds |
 | `type_checker_safety.c` | `--safe` check placement and static elision |
 | `type_layout.c` | Sizes, alignment, field offsets |
@@ -229,6 +230,24 @@ A shared IR call-graph verifier rejects recursion, indirect calls, external
 calls, and host launches from device code, so the rule is identical for every
 frontend and both GPU backends.
 
+Before device code is optimized, `ir_device_asm.c` gives every `asm` block
+explicit operands. It reads the PTX to find which `{name}` bindings an
+instruction writes (its destination operand) and which it reads, makes the
+values read the block's arguments, and follows the block with one
+`asm_result` instruction per written binding. Copy propagation, CSE and the
+inliner then treat the block like any other instruction that may touch
+memory. The PTX emitter substitutes registers: a read-only binding is the
+register already holding its value, and a written one gets a register of its
+own that `asm_result` copies into the local.
+
+The emitter also decides two things the IR leaves open. A plain `T*` that
+may hold a workgroup, private or generic address is generic: the value goes
+through `cvta` where it enters, and accesses through it name no state space,
+while plain pointers that only ever hold global addresses keep `.global`. A
+divergent branch whose body is only async copies and their address
+arithmetic is not emitted as a branch: the copies are predicated instead,
+because ptxas schedules a GEMM's K loop badly around a branch.
+
 `gpu_detect.c` asks the CUDA driver what the local card is, falling back to
 `nvidia-smi` when the driver library is out of reach.
 
@@ -258,6 +277,14 @@ gated.
 
 `src/runtime/swap.mettle` is the first runtime component written in Mettle,
 compiled by the compiler this build produces.
+
+`src/runtime/crash_handler.c` prints the crash report. On Windows it installs a
+first-chance (vectored) handler and an unhandled-exception filter. The
+vectored handler acts only on exceptions raised inside the executable's image.
+Exceptions from DLLs go through normal dispatch, since a DLL may raise and
+handle its own (Nsight's injection library does, and treating them as crashes
+killed every profiled program). An exception nothing handles still reaches the
+report through the unhandled-exception filter.
 
 ## The interpreter
 

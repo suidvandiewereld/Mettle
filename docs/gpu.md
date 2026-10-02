@@ -238,7 +238,12 @@ where a launch's allocation is, so the non-coherent load is what the qualifier
 means here.
 
 Spaces flow one way. A `T global*` becomes a `T*` for free, because forgetting
-where something lives claims nothing. Going the other way is a claim, so it
+where something lives claims nothing. A workgroup or private address that
+becomes a plain `T*` (by a cast, an assignment, or a helper's plain
+parameter) is converted to a generic address where it does (`cvta.shared` /
+`cvta.local`), and every access through that pointer is generic. Plain
+pointers that only ever hold global addresses, a kernel's parameters among
+them, still load and store `.global`. Going the other way is a claim, so it
 needs the cast `(T global*)value`, which `mettle test` re-checks when it runs
 the grid. Handing a `shared` pointer where a `global` one is wanted is refused
 outright, and the message names both spaces: they are two different memories,
@@ -586,6 +591,62 @@ function containing explicit async groups is left alone, so generated staging
 never splices into user-managed pending-group state. Source Mettle and public
 libmtlc builders use the identical pass; the backend chooses native versus
 synchronous realization only after neutral legality succeeds.
+
+A branch that only some threads take, whose body is nothing but async copies
+and the arithmetic that addresses them (`if (tid < 128) { async_copy_workgroup(...); }`),
+is not emitted as a branch. The arithmetic runs on every thread, and each
+copy carries the branch's predicate (`@!p cp.async...`), so no thread copies
+anything it would not have. Around such a branch in a GEMM's K loop, ptxas
+has been seen to front-load the tensor instructions (255 registers, about
+three moves per MMA, in an earlier version of the inference engine's TMA
+GEMM). Predication leaves it no branch to schedule around. A branch the type
+checker proves uniform keeps its branch. Predicating it would only make its address arithmetic run when
+the copies do not.
+
+### Transaction barriers and tensor-map loads
+
+On sm_90 and newer (PTX 8.0+), a kernel can stage tiles with the Tensor
+Memory Accelerator instead of per-thread copies. The built-in intrinsics
+(listed under Built-in intrinsics) map one to one onto the PTX:
+
+| Intrinsic | PTX | Use |
+|---|---|---|
+| `mbarrier_init(bar, count)` | `mbarrier.init.shared::cta.b64` | one thread, before any use; `count` arrivals complete a phase |
+| `fence_mbarrier_init()` | `fence.mbarrier_init.release.cluster` | after the inits, before the barrier that publishes them |
+| `tensormap_acquire(map)` | `fence.proxy.tensormap::generic.acquire.gpu` | before the first load through a map the host wrote |
+| `mbarrier_arrive_expect_tx(bar, bytes)` | `mbarrier.arrive.expect_tx.release.cta.shared::cta.b64` | the issuing thread arrives and says how many bytes the phase waits for |
+| `tma_load_2d(dst, map, c0, c1, bar)` | `cp.async.bulk.tensor.2d...mbarrier::complete_tx::bytes` | copies the box at (c0, c1) to `dst`, counting its bytes against `bar` |
+| `mbarrier_wait_parity(bar, parity)` | a `mbarrier.try_wait.parity` loop | every thread waits for the phase with that parity |
+| `fence_proxy_async()` | `fence.proxy.async.shared::cta` | before a TMA overwrites a stage the threads wrote or read with ordinary instructions |
+
+A barrier is a `uint64` in workgroup memory, and a map is a `CUtensorMap` (128
+bytes, 64-byte aligned) in global memory that the host builds with
+`cuTensorMapEncodeTiled`. A swizzled map wants its destination tile aligned to
+the swizzle's period: `align(1024)` on a dynamic workgroup pointer raises the
+`.extern .shared` alignment to match, and `tensor_mma`'s `a_swizzle` /
+`b_swizzle` read the tile the way the copy left it.
+
+```mettle
+workgroup var s8: uint8 align(1024)*;
+var bar: uint64 shared* = (uint64 shared*)(s8 + 32768);
+if (thread.x == 0) {
+  mbarrier_init(bar, 1);
+  fence_mbarrier_init();
+  tensormap_acquire(map);
+}
+barrier(workgroup, acq_rel);
+if (thread.x == 0) {
+  mbarrier_arrive_expect_tx(bar, 16384);
+  tma_load_2d((uint8 shared*)s8, map, k0, row0, bar);
+}
+mbarrier_wait_parity(bar, 0);
+```
+
+From PTX 8.6 the copy's destination is written `shared::cta`. Before that
+only `shared::cluster` exists, and ptxas guards every such load with a check
+of the address's CTA rank and a called slow path. That costs a GEMM's K loop
+its register allocation. `tensor_transfer`'s native tensor-map path chooses
+its destination form by version the same way.
 
 ### Scoped atomics
 
@@ -977,6 +1038,24 @@ halves-packed 4-bit B costs one 32-bit load per n8 subtile -- the lane's word
 holds its K `4t..4t+3` in the low nibbles and `16+4t..16+4t+3` in the high
 ones -- widened in registers: `(x + 0x80 - z) ^ 0x80` per byte subtracts the
 zero point `z` without carries, and signed nibbles take `x ^ 8` first.
+
+A tile works through K one K32 block at a time. The block dots run as a ring
+of four: each dot's epilogue (the `sub.f32` and the scale multiply-add into
+the accumulator) is issued three MMAs after the dot, and the ring keeps
+running across block boundaries. A block's scales load where its first
+epilogue is due, so the MMA stream never waits on the float pipe. When B comes
+through `ldmatrix` for four column tiles, one x4 per K block loads that
+block's halves-packed words for all four tiles into four registers that the
+next block reuses. The weight nibbles are live only for the block that uses
+them.
+
+Operands written by a tensor-map load keep the layout the copy left them in:
+`a_swizzle` / `b_swizzle` (32, 64 or 128 bytes) read them through `ldmatrix`
+at `p ^ key`, one key per lane. `a_scale_values` / `b_scale_values` say an f32
+scale array holds f16 or bf16 values, which keeps the exact prefactor epilogue
+for scales widened ahead of time. In a K loop staged through workgroup memory,
+the f32 accumulator stays in registers through region residency (below) and
+is committed once on the loop's exit.
 
 The sparse f16/bf16 profile requires PTX 7.1 and sm_80+, subgroup scope,
 M divisible by 16, N divisible by 8, and K=16. PTX translates each neutral mask

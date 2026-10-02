@@ -324,6 +324,35 @@ Adjacent loads widen into one `ld.global.v2`/`ld.global.v4` only inside a
 single block and only through a pointer whose declared alignment covers the
 whole access. Stores are never widened.
 
+A plain `T*` that may hold a workgroup or private address is made generic
+where that address enters it. A plain pointer read back from memory is not
+followed: it is taken to hold a global address. A workgroup pointer stored to
+memory and loaded again must be loaded as `T shared*`.
+
+## Inline PTX and the GPU intrinsics
+
+An `asm` block's bindings are read or written according to where they sit in
+each PTX instruction: in the first operand they are written (and also read
+when the instruction is predicated, is `wgmma`, or the block has a label or a
+branch). Everywhere else, and in the first operand of a memory address or of
+`st`, `red`, `bar`, `bra`, `call`, `cp`, `stmatrix`, `fence` and the few
+others with no destination, they are read. An instruction that writes a
+register outside its first operand does not fit this rule: bind such a value
+through a `mov` into the first operand of its own instruction.
+
+A device function whose `asm` defines a label is not inlined, and a loop
+holding such a block must not be unrolled with `@unroll`: each copy would
+define the label again.
+
+The intrinsics' types are fixed: `h2f` takes and `f2h` returns an `int32`
+holding the half's bits. A declaration that spelled them with `uint16` is now
+an error that prints the expected signature; drop the declaration and cast
+the value where it meets a `uint16`.
+
+`ncu`'s command-line printer fails with "bad conversion" under a locale whose
+decimal separator is a comma. Collecting with `-o` works; read the report with
+Nsight Compute's Python interface (see [GPU offload](gpu.md)).
+
 ## Running a kernel's grid on the CPU
 
 `mettle test` runs a dispatched grid in the compiler's interpreter, one block
