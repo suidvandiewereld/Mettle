@@ -1,0 +1,11 @@
+fn count(n: int32) -> int32 {
+  var total: int32 = 0;
+  comptime for i in 0..n {
+    total = total + i;
+  }
+  return total;
+}
+
+fn main() -> int32 {
+  return count(3);
+}

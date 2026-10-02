@@ -1260,19 +1260,17 @@ static Type *type_checker_async_copy_builtin(TypeChecker *checker,
 int type_checker_tensor_option_u32(TypeChecker *checker, ASTNode *node,
                                    const char *name, uint32_t maximum,
                                    uint32_t *out_value) {
-  NumberLiteral *literal =
-      node && node->type == AST_NUMBER_LITERAL
-          ? (NumberLiteral *)node->data
-          : NULL;
-  if (!literal || literal->is_float || literal->int_value <= 0 ||
-      (unsigned long long)literal->int_value > maximum) {
+  ComptimeValue value = comptime_none();
+  if (!node || !type_checker_eval_comptime(checker, node, &value) ||
+      value.kind != COMPTIME_INT || value.as.int_value <= 0 ||
+      (unsigned long long)value.as.int_value > maximum) {
     type_checker_set_error_at_location(
         checker, node ? node->location : (SourceLocation){0},
-        "Tensor option '%s' must be an integer in [1, %u]", name,
+        "Tensor option '%s' must be a compile-time integer in [1, %u]", name,
         (unsigned)maximum);
     return 0;
   }
-  *out_value = (uint32_t)literal->int_value;
+  *out_value = (uint32_t)value.as.int_value;
   return 1;
 }
 

@@ -1162,9 +1162,6 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
 static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
     Program *block = (Program *)statement->data;
     if (block) {
-      int expanded_ok =
-          type_checker_expand_comptime_block(checker, statement, 0);
-
       SourceSpan expansion_origin;
       const char *expansion_note =
           type_checker_expansion_note(checker, statement, &expansion_origin);
@@ -1191,8 +1188,9 @@ static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
         return 0;
       }
 
-      int block_ok = expanded_ok &&
-                     type_checker_declare_expansion_binding(checker, statement);
+      int block_ok =
+          type_checker_declare_expansion_binding(checker, statement) &&
+          type_checker_expand_comptime_block(checker, statement, 0);
       int reached_terminator = 0;
       size_t block_guard_depth = type_checker_guard_depth(checker);
       for (size_t i = 0; i < statement->child_count; i++) {

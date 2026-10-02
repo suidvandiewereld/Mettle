@@ -102,7 +102,7 @@ Parser *parser_create_with_error_reporter(Lexer *lexer,
   parser->gpu_mode = 0;
   parser->in_kernel_body = 0;
   parser->comptime_depth = 0;
-  parser->pending_composed_name = NULL;
+  parser->pending_composed_count = 0;
   parser->expression_depth = 0;
   parser->extra_declarations[0] = NULL;
   parser->extra_declarations[1] = NULL;
@@ -121,7 +121,9 @@ void parser_destroy(Parser *parser) {
   if (parser) {
     token_destroy(&parser->current_token);
     token_destroy(&parser->peek_token);
-    ast_destroy_node(parser->pending_composed_name);
+    for (size_t i = 0; i < parser->pending_composed_count; i++) {
+      ast_destroy_node(parser->pending_composed_names[i]);
+    }
     for (size_t i = 0; i < parser->extra_declaration_count; i++) {
       ast_destroy_node(parser->extra_declarations[i]);
     }
@@ -2042,13 +2044,31 @@ static ASTNode *parser_parse_composed_name(Parser *parser) {
   return node;
 }
 
+static void parser_hold_composed_name(Parser *parser, ASTNode *composed) {
+  size_t capacity = sizeof(parser->pending_composed_names) /
+                    sizeof(parser->pending_composed_names[0]);
+  if (composed && parser->pending_composed_count < capacity) {
+    parser->pending_composed_names[parser->pending_composed_count++] = composed;
+  }
+}
+
+static void parser_release_composed_name(Parser *parser, ASTNode *composed) {
+  for (size_t i = parser->pending_composed_count; composed && i-- > 0;) {
+    if (parser->pending_composed_names[i] == composed) {
+      memmove(&parser->pending_composed_names[i],
+              &parser->pending_composed_names[i + 1],
+              (parser->pending_composed_count - i - 1) * sizeof(ASTNode *));
+      parser->pending_composed_count--;
+      return;
+    }
+  }
+}
+
 static int parser_parse_declaration_name(Parser *parser, const char *expected,
                                          char **out_name,
                                          ASTNode **out_composed) {
   *out_name = NULL;
   *out_composed = NULL;
-  ast_destroy_node(parser->pending_composed_name);
-  parser->pending_composed_name = NULL;
 
   if (parser->comptime_depth == 0 &&
       parser_is_identifier_like(parser->current_token.type) &&
@@ -2074,7 +2094,7 @@ static int parser_parse_declaration_name(Parser *parser, const char *expected,
     if (!*out_composed) {
       return 0;
     }
-    parser->pending_composed_name = *out_composed;
+    parser_hold_composed_name(parser, *out_composed);
     *out_name = strdup("<ident>");
     return *out_name != NULL;
   }
@@ -2181,10 +2201,30 @@ static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations) {
     return NULL;
   }
 
+  ASTNode *range_end = NULL;
+  int range_inclusive = 0;
+  if (parser->current_token.type == TOKEN_DOT_DOT) {
+    parser_advance(parser);
+    if (parser->current_token.type == TOKEN_EQUALS) {
+      range_inclusive = 1;
+      parser_advance(parser);
+    }
+    range_end = parser_parse_expression(parser);
+    if (!range_end) {
+      if (!parser->has_error) {
+        parser_set_error(parser, "Expected the range's end after '..'");
+      }
+      free(binding_name);
+      ast_destroy_node(sequence);
+      return NULL;
+    }
+  }
+
   if (parser->current_token.type != TOKEN_LBRACE) {
     parser_set_error(parser, "Expected '{' to open the 'comptime for' body");
     free(binding_name);
     ast_destroy_node(sequence);
+    ast_destroy_node(range_end);
     return NULL;
   }
 
@@ -2195,6 +2235,7 @@ static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations) {
   if (!body) {
     free(binding_name);
     ast_destroy_node(sequence);
+    ast_destroy_node(range_end);
     return NULL;
   }
 
@@ -2203,8 +2244,15 @@ static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations) {
   free(binding_name);
   if (!node) {
     ast_destroy_node(sequence);
+    ast_destroy_node(range_end);
     ast_destroy_node(body);
     return NULL;
+  }
+  if (range_end) {
+    ComptimeForStatement *directive = (ComptimeForStatement *)node->data;
+    directive->range_end = range_end;
+    directive->range_inclusive = range_inclusive;
+    ast_add_child(node, range_end);
   }
   return node;
 }
@@ -5520,9 +5568,10 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
     data->is_const = is_const;
     data->address_space = address_space;
     data->composed_name = composed_name;
+    parser_release_composed_name(parser, composed_name);
     composed_name = NULL;
-    parser->pending_composed_name = NULL;
   }
+  parser_release_composed_name(parser, composed_name);
   ast_destroy_node(composed_name);
 
   free(var_name);
@@ -5698,6 +5747,7 @@ fail:
 
 static int parser_parse_kernel_attributes(Parser *parser,
                                           int *kernel_block,
+                                          ASTNode **block_expression,
                                           int *kernel_threads_per_item) {
   parser_advance(parser);
   if (parser->current_token.type != TOKEN_IDENTIFIER ||
@@ -5718,6 +5768,19 @@ static int parser_parse_kernel_attributes(Parser *parser,
     dims = 3;
   }
   long long product = 1;
+  if (!grouped && parser->current_token.type != TOKEN_NUMBER) {
+    *block_expression = parser_parse_expression(parser);
+    if (!*block_expression) {
+      if (!parser->has_error) {
+        parser_set_error(parser,
+                         "Expected the kernel's block size: a compile-time "
+                         "integer");
+      }
+      return 0;
+    }
+    dims = 0;
+    product = 32;
+  }
   for (int d = 0; d < dims; d++) {
     if (d && !parser_expect(parser, TOKEN_COMMA)) {
       return 0;
@@ -5742,7 +5805,7 @@ static int parser_parse_kernel_attributes(Parser *parser,
   if (grouped && !parser_expect(parser, TOKEN_RPAREN)) {
     return 0;
   }
-  if (dims == 1) {
+  if (dims <= 1) {
     kernel_block[1] = 1;
     kernel_block[2] = 1;
   }
@@ -5806,10 +5869,13 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   parser_advance(parser);
 
   int kernel_block[3] = {0, 0, 0};
+  ASTNode *kernel_block_expression = NULL;
   int kernel_threads_per_item = 0;
   if (is_kernel && parser->current_token.type == TOKEN_LPAREN &&
       !parser_parse_kernel_attributes(parser, kernel_block,
+                                      &kernel_block_expression,
                                       &kernel_threads_per_item)) {
+    ast_destroy_node(kernel_block_expression);
     return NULL;
   }
 
@@ -6133,8 +6199,8 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     explain_code = NULL;
     explain_text = NULL;
     func_data->composed_name = composed_name;
+    parser_release_composed_name(parser, composed_name);
     composed_name = NULL;
-    parser->pending_composed_name = NULL;
     func_data->return_types = return_types;
     func_data->return_type_count = return_type_count;
     return_types = NULL;
@@ -6143,6 +6209,8 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     func_data->kernel_block[0] = kernel_block[0];
     func_data->kernel_block[1] = kernel_block[1];
     func_data->kernel_block[2] = kernel_block[2];
+    func_data->kernel_block_expression = kernel_block_expression;
+    kernel_block_expression = NULL;
     func_data->kernel_threads_per_item = kernel_threads_per_item;
     if (link_name) {
       func_data->link_name = strdup(link_name);
@@ -6743,9 +6811,10 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
 
   if (struct_decl && struct_decl->data) {
     ((StructDeclaration *)struct_decl->data)->composed_name = composed_name;
+    parser_release_composed_name(parser, composed_name);
     composed_name = NULL;
-    parser->pending_composed_name = NULL;
   }
+  parser_release_composed_name(parser, composed_name);
   ast_destroy_node(composed_name);
 
   if (struct_decl && struct_decl->data && type_param_count > 0) {

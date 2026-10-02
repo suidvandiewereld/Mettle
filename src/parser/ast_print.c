@@ -274,6 +274,10 @@ case AST_COMPTIME_FOR: {
           directive && directive->binding_name ? directive->binding_name
                                                : "<binding>");
   print_expression(printer, directive ? directive->sequence : NULL);
+  if (directive && directive->range_end) {
+    fputs(directive->range_inclusive ? "..=" : "..", printer->out);
+    print_expression(printer, directive->range_end);
+  }
   print_block(printer, directive ? directive->body : NULL);
   fputc('\n', printer->out);
   break;

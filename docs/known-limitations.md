@@ -152,12 +152,13 @@ reach at nearly the same time and wrong for one they reach minutes apart.
 
 ## Compile-time expansion
 
-`comptime for` iterates two sequences: `typeof(T).fields`, and `TABLE.rows` for
-a `const` holding an array literal. Anything else is refused by name:
+`comptime for` iterates three sequences: `typeof(T).fields`, `TABLE.rows` for
+a `const` holding an array literal, and a range `lo..hi` whose bounds the
+compiler knows. Anything else is refused by name:
 
 ```text
 error[E0003]: 'comptime for' cannot iterate '.each'; the compile-time sequences
-are '.fields' and '.rows'
+are '.fields', '.rows' and a range 'lo..hi'
 ```
 
 A row of a struct answers to its own columns and to `.index`; a row of a plain

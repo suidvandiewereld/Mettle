@@ -27,6 +27,22 @@ kernel vadd(a: float32*, b: float32*, c: float32*, n: int32) {
 }
 ```
 
+`kernel(block = N)` fixes the block size (PTX `.reqntid`). N is any integer the
+compiler knows, so a family of kernels generated from a table takes it from the
+row, and `tensor_mma`'s `m:`, `n:` and `k:` take compile-time integers the same
+way:
+
+```mettle
+comptime for t in TILES.rows {
+  kernel(block = t.warps * 32) ident("gemm_", t.name)(a: uint16*, b: uint16*,
+                                                      d: float32*) {
+    comptime for c in 0..t.chunks {
+      tensor_mma(a + c * 64, b + c * 64, d, d, m: 16, n: 32, k: 64, ...);
+    }
+  }
+}
+```
+
 ### Index built-ins
 
 Inside `--emit-ptx` compiles, the GPU thread/block indices are built-in member

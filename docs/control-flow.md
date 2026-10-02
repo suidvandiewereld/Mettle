@@ -266,7 +266,7 @@ At file scope it generates declarations, and each generated name must come
 from the binding. [Declarations](declarations.md) covers `ident(...)` and the
 rules that go with it.
 
-There are two sequences. `typeof(T).fields` reflects on a type the program
+There are three sequences. `typeof(T).fields` reflects on a type the program
 declared. `TABLE.rows` reads a `const` holding an array literal, which is how a
 program generates from data it wrote down:
 
@@ -282,6 +282,26 @@ comptime for op in OPS.rows {
 
 A row of a struct answers to its own columns, and to `.index`. A row of a plain
 value is that value, so a `const int32[4]` binds an `int32` each time round.
+
+The third is a range, `lo..hi` or `lo..=hi`, whose bounds the compiler knows:
+literals, constants, and the columns of an enclosing binding. Each value gets
+its own copy of the body, so a loop over a row's count is unrolled by
+construction. The binding takes its type from the upper bound, as a run-time
+range counter does:
+
+```mettle
+comptime for op in OPS.rows {
+  fn ident("repeat_", op.name)(x: int32) -> int32 {
+    var total: int32 = 0;
+    comptime for i in 0..op.code {
+      total = total + x * i;
+    }
+    return total;
+  }
+}
+```
+
+A bound the compiler cannot compute is refused, naming the bound.
 
 A directive may generate a type, and a later directive may reflect on it.
 Module-scope expansion retires one directive per round and registers the types

@@ -1,0 +1,33 @@
+import "std/gpu";
+
+struct Shape {
+  name: string;
+  warps: int32;
+  chunks: int32;
+}
+
+const SHAPES: Shape[2] = [
+  { name: "one", warps: 2, chunks: 1 },
+  { name: "three", warps: 4, chunks: 3 }
+];
+
+comptime for s in SHAPES.rows {
+  kernel(block = s.warps * 32) ident("chunked_", s.name)(a: uint16*, b: uint16*,
+                                                          d: float32*) {
+    const K: int32 = s.chunks * 16;
+    var lane: int32 = thread.x;
+    tensor_mma(a, b, 0.0, d, m: 16, n: 32, k: 64,
+               a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+               a_layout: row, b_layout: col, d_layout: row,
+               lda: 256, ldb: 256, ldd: 32);
+    comptime for c in 1..=s.chunks {
+      tensor_mma(a + c * 64, b + c * 64, d, d, m: 16, n: 32, k: 64,
+                 a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+                 a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+                 lda: 256, ldb: 256, ldc: 32, ldd: 32);
+    }
+    if (lane == 0) {
+      d[0] = d[0] + (float32)K;
+    }
+  }
+}

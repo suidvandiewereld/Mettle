@@ -2195,6 +2195,28 @@ static Type *type_checker_function_return_type(
         return_type->name ? return_type->name : "non-void");
     return 0;
   }
+  if (func_decl->is_kernel && func_decl->kernel_block_expression) {
+    ComptimeValue block = comptime_none();
+    if (!type_checker_eval_comptime(checker, func_decl->kernel_block_expression,
+                                    &block) ||
+        block.kind != COMPTIME_INT || block.as.int_value < 1 ||
+        block.as.int_value > 1024 ||
+        (func_decl->kernel_threads_per_item > 1 &&
+         block.as.int_value % func_decl->kernel_threads_per_item != 0)) {
+      type_checker_set_error_at_location(
+          checker, func_decl->kernel_block_expression->location,
+          "kernel '%s' needs a block size the compiler knows: a compile-time "
+          "integer between 1 and 1024%s",
+          func_decl->name,
+          func_decl->kernel_threads_per_item > 1
+              ? ", a whole number of 32-lane warps"
+              : "");
+      return 0;
+    }
+    func_decl->kernel_block[0] = (int)block.as.int_value;
+    func_decl->kernel_block[1] = 1;
+    func_decl->kernel_block[2] = 1;
+  }
   if (func_decl->numerics_contract) {
     Symbol *contract = symbol_table_lookup(checker->symbol_table,
                                            func_decl->numerics_contract);

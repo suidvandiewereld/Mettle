@@ -244,12 +244,60 @@ int type_checker_check_expansion_budget(TypeChecker *checker, size_t budget) {
 
 typedef struct {
   int is_table;
+  int is_range;
+  long long range_start;
+  Type *range_type;
   Type *owner;
   uint32_t owner_index;
   const char *label;
   size_t count;
   AggregateLiteral *table;
 } ComptimeSource;
+
+#define COMPTIME_RANGE_MAX 65536
+
+static int resolve_range_sequence(TypeChecker *checker,
+                                  ComptimeForStatement *directive,
+                                  ComptimeSource *out) {
+  ComptimeValue low = comptime_none(), high = comptime_none();
+  long long count;
+  Type *bound_type;
+  if (!type_checker_eval_comptime(checker, directive->sequence, &low) ||
+      low.kind != COMPTIME_INT) {
+    type_checker_set_error_at_location(
+        checker, directive->sequence->location,
+        "a 'comptime for' range starts at a compile-time integer");
+    return 0;
+  }
+  if (!type_checker_eval_comptime(checker, directive->range_end, &high) ||
+      high.kind != COMPTIME_INT) {
+    type_checker_set_error_at_location(
+        checker, directive->range_end->location,
+        "a 'comptime for' range ends at a compile-time integer");
+    return 0;
+  }
+  count = high.as.int_value - low.as.int_value +
+          (directive->range_inclusive ? 1 : 0);
+  if (count < 0) {
+    count = 0;
+  }
+  if (count > COMPTIME_RANGE_MAX) {
+    type_checker_set_error_at_location(
+        checker, directive->range_end->location,
+        "a 'comptime for' range of %lld values is over the limit of %d",
+        count, COMPTIME_RANGE_MAX);
+    return 0;
+  }
+  bound_type = type_checker_infer_type(checker, directive->range_end);
+  out->is_range = 1;
+  out->range_start = low.as.int_value;
+  out->range_type = bound_type && type_checker_is_integer_type(bound_type)
+                        ? bound_type
+                        : checker->builtin_int32;
+  out->label = "range";
+  out->count = (size_t)count;
+  return 1;
+}
 
 static ASTNode *module_const_initializer(TypeChecker *checker,
                                          const char *name, Type **out_type) {
@@ -356,8 +404,8 @@ static int resolve_sequence(TypeChecker *checker, ASTNode *sequence,
   if (!sequence || sequence->type != AST_MEMBER_ACCESS) {
     type_checker_set_error_at_location(
         checker, sequence ? sequence->location : (SourceLocation){0, 0, NULL},
-        "'comptime for' iterates a compile-time sequence: '<type>.fields', or "
-        "'<table>.rows' for a constant table");
+        "'comptime for' iterates a compile-time sequence: '<type>.fields', "
+        "'<table>.rows' for a constant table, or a range 'lo..hi'");
     return 0;
   }
 
@@ -371,7 +419,7 @@ static int resolve_sequence(TypeChecker *checker, ASTNode *sequence,
     type_checker_set_error_at_location(
         checker, sequence->location,
         "'comptime for' cannot iterate '.%s'; the compile-time sequences are "
-        "'.fields' and '.rows'",
+        "'.fields', '.rows' and a range 'lo..hi'",
         member && member->member ? member->member : "<unknown>");
     return 0;
   }
@@ -412,6 +460,11 @@ static int resolve_sequence(TypeChecker *checker, ASTNode *sequence,
 static void iteration_note(char *out, size_t capacity,
                            const ComptimeSource *source, const TypeField *field,
                            size_t index) {
+  if (source && source->is_range) {
+    snprintf(out, capacity, "expanded from comptime-for iteration %zu (value %lld)",
+             index + 1, source->range_start + (long long)index);
+    return;
+  }
   if (source && source->is_table) {
     snprintf(out, capacity, "expanded from comptime-for iteration %zu (row %zu of `%s`)",
              index + 1, index + 1, source->label ? source->label : "<table>");
@@ -422,6 +475,9 @@ static void iteration_note(char *out, size_t capacity,
 }
 
 static Type *binding_declared_type(const ComptimeSource *source) {
+  if (source && source->is_range) {
+    return source->range_type;
+  }
   if (!source || !source->is_table || !source->owner) {
     return NULL;
   }
@@ -431,6 +487,9 @@ static Type *binding_declared_type(const ComptimeSource *source) {
 static ComptimeValue iteration_value(TypeChecker *checker,
                                      const ComptimeSource *source,
                                      size_t index) {
+  if (source->is_range) {
+    return comptime_int(source->range_start + (long long)index);
+  }
   if (source->is_table) {
     ASTNode *row = source->table && index < source->table->element_count
                        ? source->table->elements[index]
@@ -501,7 +560,7 @@ static ASTNode *expand_iteration(TypeChecker *checker,
                                  size_t field_index) {
   TypeField field;
   memset(&field, 0, sizeof(field));
-  if (!source->is_table &&
+  if (!source->is_table && !source->is_range &&
       !read_field(checker, directive, source->owner, field_index, &field)) {
     return NULL;
   }
@@ -576,7 +635,7 @@ static int expand_declaration_iteration(TypeChecker *checker,
                                         size_t *out_count) {
   TypeField field;
   memset(&field, 0, sizeof(field));
-  if (!source->is_table &&
+  if (!source->is_table && !source->is_range &&
       !read_field(checker, directive, source->owner, field_index, &field)) {
     return 0;
   }
@@ -1110,8 +1169,11 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
 
       ComptimeForStatement *directive = (ComptimeForStatement *)child->data;
       ComptimeSource source;
+      memset(&source, 0, sizeof(source));
       if (!directive ||
-          !resolve_sequence(checker, directive->sequence, &source)) {
+          !(directive->range_end
+                ? resolve_range_sequence(checker, directive, &source)
+                : resolve_sequence(checker, directive->sequence, &source))) {
         ok = 0;
         type_checker_leave_expansion_decl(checker, &outer);
         break;

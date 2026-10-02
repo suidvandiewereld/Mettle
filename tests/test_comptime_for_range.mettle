@@ -1,0 +1,63 @@
+struct Lane {
+  name: string;
+  width: int32;
+}
+
+const LANES: Lane[3] = [
+  { name: "narrow", width: 2 },
+  { name: "wide", width: 5 },
+  { name: "none", width: 0 }
+];
+
+comptime for l in LANES.rows {
+  fn ident("sum_", l.name)(base: int32) -> int32 {
+    var total: int32 = base;
+    comptime for i in 0..l.width {
+      var step: int32 = i * 10;
+      total = total + step + l.width;
+    }
+    return total;
+  }
+
+  const ident("SQUARE_", l.name): int32 = l.width * l.width;
+}
+
+fn inclusive_sum() -> int64 {
+  var total: int64 = 0;
+  comptime for i in 1..=4 {
+    total = total + i;
+  }
+  return total;
+}
+
+fn nested() -> int32 {
+  var total: int32 = 0;
+  comptime for i in 0..3 {
+    comptime for j in i..3 {
+      total = total + i * 3 + j;
+    }
+  }
+  return total;
+}
+
+fn main() -> int32 {
+  if (sum_narrow(1) != 15) {
+    return 1;
+  }
+  if (sum_wide(0) != 125) {
+    return 2;
+  }
+  if (sum_none(7) != 7) {
+    return 3;
+  }
+  if (SQUARE_wide != 25) {
+    return 4;
+  }
+  if (inclusive_sum() != 10) {
+    return 5;
+  }
+  if (nested() != 20) {
+    return 6;
+  }
+  return 0;
+}

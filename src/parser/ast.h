@@ -116,6 +116,7 @@ typedef struct {
   int is_extern;
   int is_kernel;
   int kernel_block[3];
+  ASTNode *kernel_block_expression;
   int kernel_threads_per_item;
   char *link_name;
   char **type_params;
@@ -483,6 +484,8 @@ typedef struct {
 typedef struct {
   char *binding_name;
   ASTNode *sequence;
+  ASTNode *range_end;
+  int range_inclusive;
   ASTNode *body;
   SourceLocation keyword_location;
 } ComptimeForStatement;

@@ -135,6 +135,10 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
   dst->kernel_block[0] = src->kernel_block[0];
   dst->kernel_block[1] = src->kernel_block[1];
   dst->kernel_block[2] = src->kernel_block[2];
+  dst->kernel_block_expression =
+      src->kernel_block_expression
+          ? ast_clone_node(src->kernel_block_expression)
+          : NULL;
   dst->kernel_threads_per_item = src->kernel_threads_per_item;
   dst->link_name = ast_copy_string(src->link_name);
   dst->type_param_count = src->type_param_count;
@@ -913,10 +917,14 @@ static ASTNode *ast_clone_comptime_for(ASTNode *clone, const ASTNode *node) {
   }
   dst->binding_name = ast_intern_string(src->binding_name);
   dst->sequence = src->sequence ? ast_clone_node(src->sequence) : NULL;
+  dst->range_end = src->range_end ? ast_clone_node(src->range_end) : NULL;
+  dst->range_inclusive = src->range_inclusive;
   dst->body = src->body ? ast_clone_node(src->body) : NULL;
   dst->keyword_location = src->keyword_location;
   if (dst->sequence)
     ast_add_child(clone, dst->sequence);
+  if (dst->range_end)
+    ast_add_child(clone, dst->range_end);
   if (dst->body)
     ast_add_child(clone, dst->body);
   clone->data = dst;
@@ -1310,6 +1318,7 @@ void ast_destroy_node(ASTNode *node) {
       ast_free_string(func_decl->explain_code);
       ast_free_string(func_decl->explain_text);
       ast_destroy_node(func_decl->composed_name);
+      ast_destroy_node(func_decl->kernel_block_expression);
       ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_WITH, NULL, 0);
       ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_FORBIDS, NULL, 0);
       ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_REQUIRES, NULL, 0);
@@ -1827,6 +1836,7 @@ ASTNode *ast_create_function_declaration(const char *name, char **param_names,
   func_decl->kernel_block[0] = 0;
   func_decl->kernel_block[1] = 0;
   func_decl->kernel_block[2] = 0;
+  func_decl->kernel_block_expression = NULL;
   func_decl->kernel_threads_per_item = 0;
   func_decl->link_name = NULL;
   func_decl->type_params = NULL;
@@ -3038,6 +3048,8 @@ ASTNode *ast_create_comptime_for(const char *binding_name, ASTNode *sequence,
 
   comptime_for->binding_name = ast_copy_string(binding_name);
   comptime_for->sequence = sequence;
+  comptime_for->range_end = NULL;
+  comptime_for->range_inclusive = 0;
   comptime_for->body = body;
   comptime_for->keyword_location = location;
   node->data = comptime_for;

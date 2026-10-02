@@ -1,0 +1,7 @@
+import "std/gpu";
+
+var g_block: int32 = 64;
+
+kernel(block = g_block) fill(d: float32*) {
+  d[thread.x] = 1.0;
+}

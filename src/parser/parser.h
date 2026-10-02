@@ -27,7 +27,8 @@ typedef struct {
   int gpu_mode;
   int in_kernel_body;
   int comptime_depth;
-  ASTNode *pending_composed_name;
+  ASTNode *pending_composed_names[32];
+  size_t pending_composed_count;
   int expression_depth;
   ASTNode *extra_declarations[2];
   size_t extra_declaration_count;

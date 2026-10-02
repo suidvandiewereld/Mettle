@@ -1580,6 +1580,11 @@ $cases = @(
   # of its own, and the failures around composing them are named individually
   # rather than left to surface as a missing symbol somewhere downstream.
   @{ Name = "comptime_for_declarations"; Path = "tests/test_comptime_for_declarations.mettle"; ShouldSucceed = $true },
+  @{ Name = "comptime_for_range"; Path = "tests/test_comptime_for_range.mettle"; ShouldSucceed = $true },
+  @{ Name = "err_comptime_range_runtime"; Path = "tests/err_comptime_range_runtime.mettle"; ShouldSucceed = $false
+     Pattern = "a .comptime for. range ends at a compile-time integer"
+     OutputMustNotMatch = @("internal compiler error") },
+  @{ Name = "err_kernel_block_runtime"; Path = "tests/err_kernel_block_runtime.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "kernel .fill. needs a block size the compiler knows" },
   @{ Name = "err_comptime_ident_duplicate"; Path = "tests/err_comptime_ident_duplicate.mettle"; ShouldSucceed = $false
      Pattern = "generated two declarations named 'probe'"
      OutputMustNotMatch = @("internal compiler error") },
@@ -17228,6 +17233,36 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "ptx_emit_gb10_tensor_c_zero" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $ckPtx = Join-Path $tmpDir "ptx_emit_gb10_comptime_kernels.ptx"
+  $ckOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/comptime_kernels.mettle -o $ckPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "comptime kernel emit failed: $ckOut" }
+  $ckText = Get-Content -Raw $ckPtx
+  $ckExpect = @(
+    @{ Name = 'chunked_one'; Threads = 64; Mma = 32 },
+    @{ Name = 'chunked_three'; Threads = 128; Mma = 64 })
+  foreach ($ckCase in $ckExpect) {
+    $ckEntry = [regex]::Match(
+      $ckText,
+      "(?s)\.visible \.entry $($ckCase.Name)\(.*?(?=\.visible \.entry|\z)"
+    ).Value
+    if (-not $ckEntry -or
+        $ckEntry -notmatch "\.reqntid $($ckCase.Threads), 1, 1" -or
+        [regex]::Matches($ckEntry, 'mma\.sync').Count -ne $ckCase.Mma -or
+        [regex]::Matches($ckEntry, '\bbra\b').Count -ne 1) {
+      throw "comptime kernel mismatch in $($ckCase.Name)"
+    }
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_comptime_kernels" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_comptime_kernels" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++
