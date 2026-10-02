@@ -255,6 +255,10 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
                             function_data->effects_provides_count);
   }
   function->is_test = function_data->is_test;
+  function->numerics_contract =
+      function_data->numerics_contract
+          ? string_intern(function_data->numerics_contract)
+          : NULL;
   function->is_rule = function_data->is_rule;
   function->rewrite_role = function_data->rewrite_role;
   function->is_kernel = function_data->is_kernel;

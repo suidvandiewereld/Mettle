@@ -1311,7 +1311,7 @@ static int irv_guard_admits(IRProgram *program, IRFunction *guard,
                             int probe_ordinal) {
   IRInterpMachine *machine = ir_interp_create(program);
   IRInterpValue args[IRV_MAX_PARAMS] = {{0}};
-  IRInterpValue verdict = {0, 0, 0, 0};
+  IRInterpValue verdict = {0, 0, 0, 0, 0};
   int admits = 0;
   if (!machine) {
     return 0;

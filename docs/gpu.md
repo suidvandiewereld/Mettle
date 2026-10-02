@@ -443,6 +443,10 @@ does not. That is the whole reason uniformity and the group effects belong
 together: the uniformity proof is what decides whether a collective is
 reachable.
 
+A call to a device function that only computes from its arguments, with no
+loads, no lane or subgroup intrinsics and no calls that do either, is as
+uniform as its arguments. Any other call's result varies.
+
 A workgroup barrier is the block collective the compiler already knew about: a
 device helper holding one needs `Block` wherever it is called from, and a
 barrier the work items of a block do not all reach is refused by the device
@@ -1424,6 +1428,105 @@ plain Mettle at 255 registers with no spill, where the inline-asm version
 spilled 76 bytes, and on the RTX 5060 Ti (`fa256bench`, depths 384 / 896 /
 1920) it runs 68.0 / 125.6 / 139.7 us at 128 rows against 77.1 / 144.1 / 157.4,
 and 597.2 / 733.2 / 832.6 us at 1024 rows against 641.8 / 787.9 / 888.0.
+
+### Numerics contracts
+
+Kernels that must give the same bits for the same inputs, whatever their tile
+shape, warp split or block shape, declare one contract, and the build proves
+they do or fails.
+
+```mettle
+import "std/numerics";
+
+const Q4_0_GEMM: Numerics = { k_order: k_ascending };
+
+@numerics(Q4_0_GEMM) kernel(block = 256) gemm_q4_0_i8(...) { ... }
+@numerics(Q4_0_GEMM) kernel(block = 128) gemm_q4_0_i8_s16(...) { ... }
+
+@numerics(Q4_0_GEMM) fn q4_0_gemm_family() {
+  var xq: int8* = (int8*)numerics_input((int64)m * k);
+  ...
+  dispatch gemm_q4_0_i8[...](...);
+  dispatch gemm_q4_0_i8_s16[...](...);
+  numerics_same(reference, out, m, d, d);
+}
+```
+
+A kernel with `@numerics(C)` is a member of C. A plain function with
+`@numerics(C)` is a harness: ordinary Mettle that launches members the way the
+host does, at the shapes the contract covers, and compares their outputs.
+`numerics_input(bytes)` returns memory whose every byte is an input of the
+proof; `numerics_same(a, b, rows, cols, ld)` claims two `float32` matrices are
+the same bits; `numerics_tensor_map_2d` describes a tensor map to the
+interpreter the way `cuTensorMapEncodeTiled` describes it to the device.
+Harnesses never reach the binary.
+
+#### The proof
+
+Each harness runs in the compile-time interpreter on the optimized IR the PTX
+backend emits from, with every input byte a symbol. Each value is a term and
+equal terms are one node, so each output element comes out as its canonical
+computation: the ordered chain of rounding operations and where every operand
+came from. A claim holds when the two elements are the same node.
+
+- Integer arithmetic is exact. Bitwise operations, whole-byte shifts and
+  masks, and stores and loads of any width keep track of bytes, so a value
+  stored and reloaded in pieces is the value.
+- `f32`/`f64` `+ - * /`, `fma` and `sqrt` round to nearest. Conversions round
+  as the cast does.
+- `expf` is `ex2.approx` of `x * log2(e)`, and the other approximate
+  intrinsics are opaque functions of their operand.
+- Each MMA step is opaque: an f16 `m16n8k16` step is a function of the
+  accumulator and its row of A and column of B; a block-scaled int8 block is
+  the exact integer dot followed by the backend's own rounding sequence.
+- A branch whose condition comes from the inputs is followed only when both
+  arms just compute values; it becomes a select.
+
+Only identities that are bit-exact are applied, each where its side condition
+is proven from facts the check keeps for every term (can it be NaN, infinite,
+-0.0): `x * 1.0 = x`, `x + (-0.0) = x`, `x + 0.0 = x` when x cannot be -0.0,
+`a + b = b + a`, `a * b = b * a`, `max`/`min` trees in any order, and
+constant folding. Every NaN is one value: PTX leaves the bits of a NaN
+unspecified.
+
+With `k_order: k_ascending` each tensor accumulation must visit K ascending in
+one chain; the check reads the order off each output's chain.
+
+Members emit `f32` `add`, `sub` and `mul` with `.rn`, and so do device
+helpers in a module with members, since the PTX ISA lets ptxas fuse unrounded
+ones into an FMA and the chain the check derived would then not be the chain
+that runs.
+
+The claim covers the shapes the harnesses launch; every other shape is
+unproven, and the report (`--explain`) says so. It rests on stated premises:
+the PTX backend emits each operation as the instruction its term names, ptxas
+keeps the value of `.rn` arithmetic, an MMA step's result for an element
+depends only on that element's row of A, column of B and accumulator on every
+SM, and the kernels are race-free.
+
+```text
+numerics contract Q4_0_GEMM: proven for gemm_q4_0_i8, gemm_q4_0_i8_64,
+gemm_q4_0_i8_tma, gemm_q4_0_i8_s16, gemm_q4_0_i8_s32, gemm_q4_0_i8_s64
+  81920 outputs of 5 claims, bit for bit, at the shapes its harness launches;
+  other shapes are unproven (619521 terms)
+```
+
+#### Refused
+
+| Code | When |
+|---|---|
+| `C0001` | two members compute an element differently; the message names the element and the first operation where the chains part, with its line in each kernel |
+| `C0002` | the check cannot decide: a branch, address or loop bound computed from the inputs, inline asm, an extern call, a read of bytes still in flight |
+| `C0003` | a member no harness launches, or a harness that claims nothing |
+| `C0004` | a member reorders K or splits it into partial sums |
+
+A reordered K walk:
+
+```text
+error[C0004]: contract TILES accumulates K ascending, and tile_whole and
+tile_reversed visit the same K steps in different orders for output [0][0] of
+the claim at line 50: ...
+```
 
 ### Multidimensional tensor transfers
 

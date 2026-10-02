@@ -2,6 +2,7 @@
 #define IR_INTERP_H
 
 #include "ir.h"
+#include "ir_numerics.h"
 #include <stdint.h>
 
 typedef enum {
@@ -19,6 +20,7 @@ typedef struct {
   double f;
   int is_float;
   int undefined;
+  uint32_t term;
 } IRInterpValue;
 
 #define IR_INTERP_EXTERN_MEM_CAP 96
@@ -34,6 +36,31 @@ typedef struct {
 } IRInterpExternCall;
 
 typedef struct IRInterpMachine IRInterpMachine;
+
+typedef struct {
+  size_t line;
+  long long rows;
+  long long cols;
+  long long row;
+  long long column;
+  NumTerm left;
+  NumTerm right;
+  int equal;
+  int summary;
+} IRInterpClaim;
+
+typedef void (*IRInterpClaimHook)(void *ctx, const IRInterpClaim *claim);
+typedef void (*IRInterpLaunchHook)(void *ctx, const char *kernel,
+                                   const long long grid[3],
+                                   const long long block[3]);
+
+void ir_interp_set_launch_hook(IRInterpMachine *machine,
+                               IRInterpLaunchHook hook, void *ctx);
+
+void ir_interp_enable_numerics(IRInterpMachine *machine, NumStore *store,
+                               IRInterpClaimHook hook, void *ctx);
+const IRInstruction *ir_interp_symbolic_site(const IRInterpMachine *machine,
+                                             const char **function);
 
 IRInterpMachine *ir_interp_create(IRProgram *program);
 void ir_interp_destroy(IRInterpMachine *machine);

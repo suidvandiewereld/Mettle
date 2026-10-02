@@ -9,6 +9,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int g_ii_symbolic;
+static int g_ii_misuse;
+static const void *g_ii_insn;
+static const void *g_ii_insn_fn;
+static const void *g_ii_misuse_insn;
+static const void *g_ii_misuse_fn;
+
+static void ii_misuse(void) {
+  if (!g_ii_misuse) {
+    g_ii_misuse_insn = g_ii_insn;
+    g_ii_misuse_fn = g_ii_insn_fn;
+  }
+  g_ii_misuse = 1;
+}
+
 #define II_ADDR_BASE 0x0000200000000000ULL
 #define II_POISON_BYTE 0xA5
 #define II_ADDR_STRIDE 0x0000000001000000ULL
@@ -31,6 +46,7 @@ typedef struct {
   unsigned char *init_map;
   unsigned char device_space;
   uint32_t *pending;
+  uint32_t *shadow;
 } IIBuffer;
 
 typedef struct {
@@ -243,6 +259,15 @@ struct IRInterpMachine {
   IIGpuGrid gpu;
   IIGpuThread *gpu_current;
 
+  NumStore *num;
+  uint32_t num_inputs;
+  IRInterpClaimHook claim_hook;
+  void *claim_ctx;
+  IRInterpLaunchHook launch_hook;
+  void *launch_ctx;
+  const IRInstruction *num_site;
+  const char *num_site_function;
+
   int count_enabled;
   struct {
     const IRFunction *fn;
@@ -345,6 +370,7 @@ void ir_interp_destroy(IRInterpMachine *machine) {
     free(machine->buffers[i].data);
     free(machine->buffers[i].init_map);
     free(machine->buffers[i].pending);
+    free(machine->buffers[i].shadow);
   }
   free(machine->buffers);
   free(machine->free_slots);
@@ -459,9 +485,11 @@ static void ii_reclaim_buffer(IRInterpMachine *machine, size_t index) {
   free(buf->data);
   free(buf->init_map);
   free(buf->pending);
+  free(buf->shadow);
   buf->data = NULL;
   buf->init_map = NULL;
   buf->pending = NULL;
+  buf->shadow = NULL;
   buf->freed = 1;
   buf->escaped_local = 0;
   ii_free_slot_push(machine, index);
@@ -510,6 +538,7 @@ static unsigned long long ii_add_buffer_ex(IRInterpMachine *machine,
   buf->base = II_ADDR_BASE + (unsigned long long)index * II_ADDR_STRIDE;
   buf->init_map = NULL;
   buf->pending = NULL;
+  buf->shadow = NULL;
   buf->device_space = MTLC_ADDRESS_SPACE_DEFAULT;
   buf->data = (unsigned char *)malloc(size > 0 ? (size_t)size : 1);
   if (buf->data) {
@@ -733,6 +762,8 @@ static IRFunction *ii_token_function(IRInterpMachine *machine,
 
 static int ii_pending_check(IRInterpMachine *machine, IIBuffer *buf,
                             long long offset, long long length);
+static int ii_sym_range(IIBuffer *buf, long long offset, long long length);
+static void ii_sym_clear(IIBuffer *buf, long long offset, long long length);
 
 static int ii_mem_read(IRInterpMachine *machine, unsigned long long addr,
                        int size, unsigned long long *out) {
@@ -744,6 +775,9 @@ static int ii_mem_read(IRInterpMachine *machine, unsigned long long addr,
   }
   if (buf->pending && !ii_pending_check(machine, buf, offset, size)) {
     return 0;
+  }
+  if (g_ii_symbolic && buf->shadow && ii_sym_range(buf, offset, size)) {
+    ii_misuse();
   }
   unsigned long long value = 0;
   memcpy(&value, buf->data + offset, (size_t)size);
@@ -772,6 +806,7 @@ static int ii_mem_write(IRInterpMachine *machine, unsigned long long addr,
   }
   memcpy(buf->data + offset, &value, (size_t)size);
   ii_mark_bytes(buf, offset, size, 1);
+  ii_sym_clear(buf, offset, size);
   return 1;
 }
 
@@ -951,10 +986,16 @@ static int ii_parse_local_type(const char *text, int *elem_size, long long *coun
 }
 
 static long long ii_as_int(const IRInterpValue *value) {
+  if (g_ii_symbolic && value->term) {
+    ii_misuse();
+  }
   return value->is_float ? (long long)value->f : value->i;
 }
 
 static double ii_as_float(const IRInterpValue *value) {
+  if (g_ii_symbolic && value->term) {
+    ii_misuse();
+  }
   return value->is_float ? value->f : (double)value->i;
 }
 
@@ -964,6 +1005,7 @@ static IRInterpValue ii_int_value(long long v) {
   value.f = 0;
   value.is_float = 0;
   value.undefined = 0;
+  value.term = 0;
   return value;
 }
 
@@ -973,6 +1015,7 @@ static IRInterpValue ii_float_value(double v) {
   value.f = v;
   value.is_float = 1;
   value.undefined = 0;
+  value.term = 0;
   return value;
 }
 
@@ -981,6 +1024,7 @@ static IRInterpValue ii_poison_value(void) {
   value.i = (long long)0xA5A5A5A5A5A5A5A5ULL;
   value.f = 0;
   value.is_float = 0;
+  value.term = 0;
   value.undefined = 1;
   return value;
 }
@@ -998,11 +1042,36 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
                             const IRInterpValue *args, size_t arg_count,
                             IRInterpValue *result);
 
+static int ii_sym_load(IRInterpMachine *machine, unsigned long long addr,
+                       int size, int is_float, int is_unsigned,
+                       unsigned char alias, IRInterpValue *out, int *handled);
+static int ii_sym_store(IRInterpMachine *machine, unsigned long long addr,
+                        int size, int is_float, unsigned char alias,
+                        const IRInterpValue *value, int *handled);
+static int ii_sym_copy(IRInterpMachine *machine, unsigned long long to,
+                       unsigned long long from, long long length);
+static IRInterpValue ii_sym_value(IRInterpMachine *machine, NumTerm term,
+                                  int is_float);
+static NumTerm ii_sym_term(IRInterpMachine *machine, const IRInterpValue *value,
+                           unsigned width, int as_float);
+
 static int ii_var_read(IRInterpMachine *machine, IIVar *var,
                        IRInterpValue *out) {
   if (!var->slotted) {
     *out = var->value;
     return 1;
+  }
+  if (machine->num) {
+    int handled = 0;
+    if (!ii_sym_load(machine, (unsigned long long)var->value.i,
+                     var->slot_size, var->slot_is_float,
+                     var->slot_is_unsigned, (unsigned char)var->slot_alias,
+                     out, &handled)) {
+      return 0;
+    }
+    if (handled) {
+      return 1;
+    }
   }
   unsigned long long raw = 0;
   if (!ii_mem_read(machine, (unsigned long long)var->value.i, var->slot_size,
@@ -1112,6 +1181,9 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
               "aggregate copy out of bounds / after free");
       return 0;
     }
+    if (machine->num && !ii_sym_copy(machine, dst, src, var->agg_size)) {
+      return 0;
+    }
     if (sbuf != dbuf || src_off != dst_off) {
       memmove(dbuf->data + dst_off, sbuf->data + src_off,
               (size_t)var->agg_size);
@@ -1124,6 +1196,18 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
   }
   if (!var->slotted) {
     var->value = *value;
+    if (value->term && machine->num) {
+      if (!value->is_float && var->value_size > 0 && var->value_size < 8) {
+        NumTerm narrow = num_resize(machine->num, value->term,
+                                    (unsigned)var->value_size * 8u, 0);
+        var->value = ii_sym_value(
+            machine,
+            num_resize(machine->num, narrow, 64, !var->value_is_unsigned), 0);
+      } else if (value->is_float && var->value_size == -4) {
+        var->value = ii_sym_value(machine, ii_sym_term(machine, value, 32, 1), 1);
+      }
+      return 1;
+    }
     if (!var->value.is_float && var->value_size > 0 && var->value_size < 8) {
       var->value.i =
           ii_narrow_int(var->value.i, var->value_size, var->value_is_unsigned);
@@ -1132,6 +1216,17 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
       var->value.f = (double)(float)var->value.f;
     }
     return 1;
+  }
+  if (machine->num) {
+    int handled = 0;
+    if (!ii_sym_store(machine, (unsigned long long)var->value.i,
+                      var->slot_size, var->slot_is_float,
+                      (unsigned char)var->slot_alias, value, &handled)) {
+      return 0;
+    }
+    if (handled) {
+      return 1;
+    }
   }
   unsigned long long raw = 0;
   if (var->slot_is_float) {
@@ -1547,10 +1642,17 @@ static int ii_fetch_int(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
+static int ii_sym_binary(IRInterpMachine *machine, const IRInstruction *insn,
+                         const IRInterpValue *a, const IRInterpValue *b,
+                         IRInterpValue *out);
+
 static int ii_binary(IRInterpMachine *machine, const IRInstruction *insn,
                      const IRInterpValue *a, const IRInterpValue *b,
                      IRInterpValue *out) {
   const char *op = insn->text ? insn->text : "?";
+  if (g_ii_symbolic && machine->num && (a->term || b->term)) {
+    return ii_sym_binary(machine, insn, a, b, out);
+  }
 
   if (insn->value_type && insn->value_type->kind == MTLC_TYPE_STRING &&
       strcmp(op, "+") == 0) {
@@ -1815,11 +1917,18 @@ static long long ii_cast_to_integer(const IRInterpValue *in, int size,
   return v;
 }
 
+static int ii_sym_cast(IRInterpMachine *machine, const IRInstruction *insn,
+                       const IRInterpValue *in, IRInterpValue *out);
+
 static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
                    const IRInterpValue *in, IRInterpValue *out) {
   const char *type = insn->text ? insn->text : "";
   int size = 0;
   int target_unsigned = 0;
+  if (g_ii_symbolic && machine->num && in->term &&
+      !ii_cast_target_is_pointer_shaped(type, strlen(type))) {
+    return ii_sym_cast(machine, insn, in, out);
+  }
 
   if (ii_cast_target_is_pointer_shaped(type, strlen(type))) {
     *out = ii_int_value(ii_as_int(in));
@@ -4893,9 +5002,21 @@ static int ii_exec_simd(IRInterpMachine *machine, IIFrame *frame,
   return 0;
 }
 
+static int ii_sym_select_insn(IRInterpMachine *machine, IIFrame *frame,
+                              const IRInstruction *insn, int *handled);
+
 static int ii_op_select(IRInterpMachine *machine, IIFrame *frame,
                          const IRInstruction *insn) {
   long long truth = 0;
+  if (g_ii_symbolic && machine->num) {
+    int handled = 0;
+    if (!ii_sym_select_insn(machine, frame, insn, &handled)) {
+      return 0;
+    }
+    if (handled) {
+      return 1;
+    }
+  }
   if (insn->text && insn->argument_count > 1) {
     IRInterpValue a, b;
     if (!ii_fetch(machine, frame, &insn->lhs, &a) ||
@@ -5081,6 +5202,7 @@ static int ii_gpu_check_uniform_value(IRInterpMachine *machine,
     }
     slot->last_lane = gpu->lane;
     if (slot->value.is_float != value->is_float ||
+        slot->value.term != value->term ||
         (value->is_float ? slot->value.f != value->f
                          : slot->value.i != value->i)) {
       snprintf(machine->detail, sizeof(machine->detail),
@@ -5198,6 +5320,7 @@ static const char *ii_gpu_launch_kernel_name(IIFrame *frame,
 #include "ir_interp_tile.inc"
 
 #include "ir_interp_gpu.inc"
+#include "ir_interp_numerics.inc"
 
 static int ii_op_gpu_launch(IRInterpMachine *machine, IIFrame *frame,
                             const IRInstruction *insn, size_t index) {
@@ -5254,6 +5377,9 @@ static int ii_op_gpu_launch(IRInterpMachine *machine, IIFrame *frame,
     return 0;
   }
 
+  if (machine->launch_hook) {
+    machine->launch_hook(machine->launch_ctx, kernel_name, grid, block);
+  }
   memset(&machine->gpu, 0, sizeof(machine->gpu));
   machine->gpu.active = 1;
   machine->gpu.dynamic_shared = controls_value[6].i > 0 ? controls_value[6].i : 0;
@@ -5326,9 +5452,22 @@ static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
       ii_gpu_index_intrinsic(machine, insn->intrinsic, &call_result)) {
     return ii_store_dest(machine, frame, &insn->dest, &call_result);
   }
-  if (!callee && machine->gpu.active && insn->intrinsic != MTLC_INTRINSIC_NONE) {
+  if (!callee && machine->num) {
     int handled = 0;
-    if (!ii_gpu_device_call(machine, insn, call_args, call_arg_count,
+    if (!ii_sym_extern(machine, insn->text, call_args, call_arg_count,
+                       &call_result, &handled)) {
+      return 0;
+    }
+    if (handled) {
+      return ii_store_dest(machine, frame, &insn->dest, &call_result);
+    }
+  }
+  MtlcIntrinsic intrinsic = insn->intrinsic != MTLC_INTRINSIC_NONE
+                                ? insn->intrinsic
+                                : ir_intrinsic_from_name(insn->text);
+  if (!callee && machine->gpu.active && intrinsic != MTLC_INTRINSIC_NONE) {
+    int handled = 0;
+    if (!ii_gpu_device_call(machine, intrinsic, call_args, call_arg_count,
                             &call_result, &handled)) {
       return 0;
     }
@@ -5347,6 +5486,10 @@ static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
     int handled =
         ii_extern_call(machine, insn->text, call_args, call_arg_count,
                        &call_result);
+    if (machine->num && handled == 0 && machine->status == IR_INTERP_OK &&
+        strcmp(insn->text, "mtlc_gpu_kernel_handle") != 0) {
+      ii_misuse();
+    }
     if (strncmp(insn->text, "mettle_string_", 14) != 0) {
       for (size_t bi = buffers_before; bi < machine->buffer_count; bi++) {
         machine->buffers[bi].alloc_line = insn->location.line;
@@ -5484,11 +5627,14 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
               "block copy out of bounds / after free");
       return 0;
     }
+    if (machine->num && !ii_sym_copy(machine, addr, source, size)) {
+      return 0;
+    }
     memmove(dest_buffer->data + dest_offset,
             source_buffer->data + source_offset, (size_t)size);
     return 1;
   }
-  if (!value.is_float && !insn->is_float && value.i != 0) {
+  if (!value.is_float && !insn->is_float && value.i != 0 && !value.term) {
     long long source_offset = 0;
     IIBuffer *source_buffer = NULL;
     int is_aggregate_source = 0;
@@ -5510,6 +5656,10 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
                 "block copy out of bounds / after free");
         return 0;
       }
+      if (machine->num &&
+          !ii_sym_copy(machine, addr, (unsigned long long)value.i, size)) {
+        return 0;
+      }
       memmove(dest_buffer->data + dest_offset,
               source_buffer->data + source_offset, (size_t)size);
       if (source_buffer->escaped_local && source_buffer != dest_buffer) {
@@ -5517,6 +5667,16 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
                           (size_t)((source_buffer->base - II_ADDR_BASE) /
                                    II_ADDR_STRIDE));
       }
+      return 1;
+    }
+  }
+  if (machine->num) {
+    int handled = 0;
+    if (!ii_sym_store(machine, addr, (int)size, insn->is_float,
+                      insn->alias_class, &value, &handled)) {
+      return 0;
+    }
+    if (handled) {
       return 1;
     }
   }
@@ -5561,11 +5721,20 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
+static int ii_sym_unary(IRInterpMachine *machine, const IRInstruction *insn,
+                        const IRInterpValue *a, IRInterpValue *out);
+
 static int ii_op_unary(IRInterpMachine *machine, IIFrame *frame,
                         const IRInstruction *insn) {
   IRInterpValue a, out;
   if (!ii_fetch(machine, frame, &insn->lhs, &a)) {
     return 0;
+  }
+  if (g_ii_symbolic && machine->num && a.term) {
+    if (!ii_sym_unary(machine, insn, &a, &out)) {
+      return 0;
+    }
+    return ii_store_dest(machine, frame, &insn->dest, &out);
   }
   const char *op = insn->text ? insn->text : "?";
   if (strcmp(op, "-") == 0) {
@@ -5632,6 +5801,18 @@ static int ii_op_load(IRInterpMachine *machine, IIFrame *frame,
   if (size != 1 && size != 2 && size != 4 && size != 8) {
     ii_fail(machine, IR_INTERP_UNSUPPORTED, "load size");
     return 0;
+  }
+  if (machine->num) {
+    int handled = 0;
+    IRInterpValue loaded;
+    if (!ii_sym_load(machine, addr, (int)size, insn->is_float,
+                     insn->is_unsigned, insn->alias_class, &loaded,
+                     &handled)) {
+      return 0;
+    }
+    if (handled) {
+      return ii_store_dest(machine, frame, &insn->dest, &loaded);
+    }
   }
   unsigned long long raw;
   if (!ii_mem_read(machine, addr, (int)size, &raw)) {
@@ -6170,6 +6351,15 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     const IRInstruction *insn = &fn->instructions[pc];
     size_t executed_pc = pc;
 
+    if (machine->num) {
+      num_store_set_site(machine->num, (uint32_t)insn->location.line,
+                         fn->name);
+      machine->num_site = insn;
+      machine->num_site_function = fn->name;
+      g_ii_insn = insn;
+      g_ii_insn_fn = fn;
+    }
+
     if (machine->gpu.active && ii_gpu_is_collective(insn)) {
       if (!ii_gpu_stop(machine, &frame, pc, insn, II_STOP_COLLECTIVE)) {
         goto done;
@@ -6214,6 +6404,33 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       if (!ii_fetch(machine, &frame, &insn->lhs, &cond)) {
         goto done;
       }
+      if (g_ii_symbolic && machine->num && cond.term) {
+        size_t next = pc;
+        NumTerm truth;
+        int merged;
+        if (cond.is_float) {
+          NumTerm args[2];
+          args[0] = cond.term;
+          args[1] = num_const(machine->num, num_width(machine->num, cond.term), 0);
+          truth = num_op(machine->num, NUM_FCMP, 64, NUM_CMP_NE, args, 2);
+        } else {
+          truth = ii_sym_truth(machine, cond.term);
+        }
+        merged = ii_sym_merge_branch(machine, &frame, fn, pc, insn, truth, 1,
+                                     &next);
+        if (merged < 0) {
+          goto done;
+        }
+        if (merged == 0) {
+          ii_sym_refuse(machine, insn, fn,
+                        "a branch on a value computed from the contract's "
+                        "inputs, which the check follows only when both arms "
+                        "just compute values");
+          goto done;
+        }
+        pc = next;
+        break;
+      }
       long long v = cond.is_float ? (cond.f != 0.0) : cond.i;
       if (cond.undefined) {
         machine->branched_on_undefined = 1;
@@ -6235,6 +6452,12 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       IRInterpValue a, b;
       if (!ii_fetch(machine, &frame, &insn->lhs, &a) ||
           !ii_fetch(machine, &frame, &insn->rhs, &b)) {
+        goto done;
+      }
+      if (g_ii_symbolic && machine->num && (a.term || b.term)) {
+        ii_sym_refuse(machine, insn, fn,
+                      "a branch on a value computed from the contract's "
+                      "inputs");
         goto done;
       }
       int equal;
@@ -6506,6 +6729,12 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       break;
 
     default:
+      if (machine->num && ii_sym_simd_touches(machine, &frame, insn)) {
+        ii_sym_refuse(machine, insn, fn,
+                      "a vectorized loop over the contract's inputs; the check "
+                      "follows scalar code");
+        goto done;
+      }
       if (!ii_exec_simd(machine, &frame, insn)) {
         goto done;
       }
@@ -6515,6 +6744,25 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       }
       pc++;
       break;
+    }
+
+    if (g_ii_misuse) {
+      g_ii_misuse = 0;
+      g_ii_misuse_insn = NULL;
+      g_ii_misuse_fn = NULL;
+      if (machine->num) {
+        const IRInstruction *site =
+            g_ii_misuse_insn ? (const IRInstruction *)g_ii_misuse_insn : insn;
+        const IRFunction *where =
+            g_ii_misuse_fn ? (const IRFunction *)g_ii_misuse_fn : fn;
+        char what[160];
+        snprintf(what, sizeof(what),
+                 "a %s the check cannot follow with a value computed from "
+                 "the contract's inputs",
+                 ir_opcode_name(site->op));
+        ii_sym_refuse(machine, site, where, what);
+        goto done;
+      }
     }
 
     if (exec_counts) {

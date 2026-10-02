@@ -1210,6 +1210,7 @@ IRFunction *ir_function_create(const char *name) {
   function->is_speculatable_inferred = 0;
   function->is_noalloc = 0;
   function->is_test = 0;
+  function->numerics_contract = NULL;
   function->is_swappable = 0;
   function->is_naked = 0;
   function->is_interrupt = 0;
@@ -2007,15 +2008,16 @@ int ir_program_drop_rules(IRProgram *program) {
   return ir_program_drop_rules_except(program, NULL);
 }
 
-int ir_program_drop_rules_except(IRProgram *program,
-                                 int (*keep)(const IRFunction *)) {
+static int ir_program_drop_where(IRProgram *program,
+                                 int (*drop)(const IRFunction *, void *),
+                                 void *context) {
   size_t kept = 0;
   if (!program) {
     return 0;
   }
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *function = program->functions[i];
-    if (!function || !function->is_rule || (keep && keep(function))) {
+    if (!function || !drop(function, context)) {
       program->functions[kept++] = function;
       continue;
     }
@@ -2038,6 +2040,32 @@ int ir_program_drop_rules_except(IRProgram *program,
   }
   program->function_count = kept;
   return 1;
+}
+
+typedef struct {
+  int (*keep)(const IRFunction *);
+} IRRuleKeep;
+
+static int ir_drop_rule(const IRFunction *function, void *context) {
+  const IRRuleKeep *rule = (const IRRuleKeep *)context;
+  return function->is_rule && !(rule->keep && rule->keep(function));
+}
+
+int ir_program_drop_rules_except(IRProgram *program,
+                                 int (*keep)(const IRFunction *)) {
+  IRRuleKeep rule;
+  rule.keep = keep;
+  return ir_program_drop_where(program, ir_drop_rule, &rule);
+}
+
+static int ir_drop_numerics_harness(const IRFunction *function,
+                                    void *context) {
+  (void)context;
+  return function->numerics_contract && !function->is_kernel;
+}
+
+int ir_program_drop_numerics_harnesses(IRProgram *program) {
+  return ir_program_drop_where(program, ir_drop_numerics_harness, NULL);
 }
 
 int ir_program_drop_rewrite_rules(IRProgram *program) {
@@ -5142,6 +5170,7 @@ typedef struct {
 typedef struct {
   IRGpuUniformSlot *slots;
   size_t capacity;
+  const IRProgram *program;
 } IRGpuUniformMap;
 
 static size_t ir_gpu_uniform_hash(const char *name) {
@@ -5427,6 +5456,54 @@ static unsigned char ir_gpu_intrinsic_result_uniformity(
 }
 
 
+static const IRFunction *ir_gpu_find_callee(const IRProgram *program,
+                                            const char *name) {
+  if (!program || !name) return NULL;
+  for (size_t i = 0; i < program->function_count; i++) {
+    const IRFunction *function = program->functions[i];
+    if (function && function->name && strcmp(function->name, name) == 0)
+      return function;
+  }
+  return NULL;
+}
+
+static int ir_gpu_function_computes_only(const IRProgram *program,
+                                         const IRFunction *function,
+                                         int depth) {
+  if (!function || function->is_kernel || depth > 8 ||
+      function->instruction_count == 0)
+    return 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    switch (instruction->op) {
+    case IR_OP_NOP:
+    case IR_OP_LABEL:
+    case IR_OP_JUMP:
+    case IR_OP_BRANCH_ZERO:
+    case IR_OP_BRANCH_EQ:
+    case IR_OP_DECLARE_LOCAL:
+    case IR_OP_ASSIGN:
+    case IR_OP_BINARY:
+    case IR_OP_UNARY:
+    case IR_OP_CAST:
+    case IR_OP_SELECT:
+    case IR_OP_PHI:
+    case IR_OP_RETURN:
+      break;
+    case IR_OP_CALL:
+      if (instruction->intrinsic != MTLC_INTRINSIC_NONE ||
+          !ir_gpu_function_computes_only(
+              program, ir_gpu_find_callee(program, instruction->text),
+              depth + 1))
+        return 0;
+      break;
+    default:
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static unsigned char ir_gpu_instruction_result_uniformity(
     const IRGpuUniformMap *map, const IRInstruction *instruction) {
   unsigned char lhs;
@@ -5458,9 +5535,20 @@ static unsigned char ir_gpu_instruction_result_uniformity(
   case IR_OP_CALL_INDIRECT:
     return IR_GPU_UNIFORM_VARYING;
   case IR_OP_CALL:
-    return instruction->intrinsic == MTLC_INTRINSIC_NONE
-               ? IR_GPU_UNIFORM_VARYING
-               : ir_gpu_intrinsic_result_uniformity(map, instruction);
+    if (instruction->intrinsic == MTLC_INTRINSIC_NONE) {
+      unsigned char rank = IR_GPU_UNIFORM_WORKGROUP;
+      if (!ir_gpu_function_computes_only(
+              map->program, ir_gpu_find_callee(map->program, instruction->text),
+              0))
+        return IR_GPU_UNIFORM_VARYING;
+      for (size_t i = 0; i < instruction->argument_count; i++) {
+        unsigned char argument =
+            ir_gpu_uniform_operand(map, &instruction->arguments[i]);
+        if (argument > rank) rank = argument;
+      }
+      return rank;
+    }
+    return ir_gpu_intrinsic_result_uniformity(map, instruction);
   case IR_OP_ROTATE_ADD:
     return lhs > rhs ? lhs : rhs;
   default:
@@ -5468,12 +5556,14 @@ static unsigned char ir_gpu_instruction_result_uniformity(
   }
 }
 
-static int ir_gpu_uniform_map_build(const IRFunction *function,
+static int ir_gpu_uniform_map_build(const IRProgram *program,
+                                    const IRFunction *function,
                                     const unsigned char *parameter_ranks,
                                     IRGpuUniformMap *map) {
   size_t names = function ? function->parameter_count : 0;
   if (!function || !map) return 0;
   memset(map, 0, sizeof(*map));
+  map->program = program;
   for (size_t i = 0; i < function->instruction_count; i++) {
     if (ir_gpu_instruction_defines_dest(&function->instructions[i])) names++;
   }
@@ -5644,7 +5734,8 @@ static int ir_gpu_validate_function_uniformity(
   size_t *queue = NULL;
   int ok = 0;
   if (!function || !out_requirement ||
-      !ir_gpu_uniform_map_build(function, parameter_ranks, &uniformity)) {
+      !ir_gpu_uniform_map_build(builder->program, function, parameter_ranks,
+                                &uniformity)) {
     return ir_gpu_graph_fail(builder,
                              "out of memory analyzing GPU collective uniformity");
   }
@@ -5908,7 +5999,7 @@ static int ir_gpu_validate_collective_uniformity(IRGpuGraphBuilder *builder) {
     size_t index = graph->order[remaining - 1];
     IRFunction *function = program->functions[index];
     IRGpuUniformMap uniformity;
-    if (!ir_gpu_uniform_map_build(function, parameter_ranks[index],
+    if (!ir_gpu_uniform_map_build(program, function, parameter_ranks[index],
                                   &uniformity)) {
       free(function_requirements);
       ir_gpu_free_parameter_ranks(program, parameter_ranks);

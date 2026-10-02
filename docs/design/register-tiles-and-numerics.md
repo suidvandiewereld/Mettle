@@ -133,7 +133,7 @@ spill; SPIR-V, which has no cooperative-matrix profile here.
 ```mettle
 import "std/numerics";
 
-const Q4_0_GEMM: Numerics = Numerics { k_order: k_ascending };
+const Q4_0_GEMM: Numerics = { k_order: k_ascending };
 
 @numerics(Q4_0_GEMM) kernel(block = 256) gemm_q4_0_i8(...) { ... }
 @numerics(Q4_0_GEMM) kernel(block = 128) gemm_q4_0_i8_s16(...) { ... }
@@ -147,9 +147,10 @@ const Q4_0_GEMM: Numerics = Numerics { k_order: k_ascending };
 }
 ```
 
-A kernel or device function with `@numerics(C)` is a member. A plain function
-with `@numerics(C)` is a harness: ordinary Mettle, like a `@test`, that launches
-members the way the host does, at the shapes the contract covers.
+A kernel with `@numerics(C)` is a member, and so is every device function it
+calls. A plain function with `@numerics(C)` is a harness: ordinary Mettle, like
+a `@test`, that takes no parameters and launches members the way the host does,
+at the shapes the contract covers. Harnesses are dropped before code generation.
 `numerics_input(bytes)` returns memory whose every byte is a distinct symbol.
 `numerics_same(a, b, rows, cols, ld)` is the claim. `numerics_tensor_map_2d`
 describes a tensor map to the interpreter the way `cuTensorMapEncodeTiled`
@@ -181,8 +182,8 @@ the first element that differs, naming the first operation where the chains
 part: the operation, its line in each kernel, and the operand that differs.
 
 Only bit-exact identities are applied, each only where its side condition is
-proven from facts the checker derives for every term (an interval, whether it
-can be -0.0, whether it can be infinite or NaN):
+proven from facts the checker derives for every term (whether it can be
+negative, zero, -0.0, infinite or NaN):
 
 - `x * 1.0 = x`; `x + (-0.0) = x`; `x + 0.0 = x` when x cannot be -0.0;
 - `a + b = b + a` and `a * b = b * a` (IEEE addition and multiplication are
@@ -197,7 +198,14 @@ identity with any NaN standing for every NaN.
 
 The contract's `k_order` is checked too: with `k_ascending` every tensor
 accumulation must visit K in ascending order, and a split-K member or a
-reordered K walk is `C0004` naming the step out of order.
+reordered K walk is `C0004` naming the step out of order. The order is read off
+each output's chain: the input bytes each MMA step's B operand came from. A
+ring buffer wraps once, so one rotation of an ascending walk is accepted.
+
+Any interpreter path that meets a term it cannot follow raises a flag that
+stops the run at that instruction (`C0002`), so a symbolic value is never
+silently read as a number. An extern call the interpreter does not model is
+such a path.
 
 When the checker cannot decide, the build fails (`C0002`) naming the site: a
 symbolic value reaching a branch (a branch whose arms only assign values merges
@@ -211,9 +219,15 @@ operation as the instruction its term names; ptxas does not change the value of
 `.rn` arithmetic; an MMA primitive's result for an element depends only on that
 element's row of A, column of B and accumulator, the same on every SM.
 
-Members emit f32 `add`, `sub` and `mul` with `.rn`. The PTX ISA lets ptxas fuse
-unrounded `mul`/`add` into FMA, and the chain the checker derived would then not
-be the chain that runs.
+Members emit f32 `add`, `sub` and `mul` with `.rn`, and so do device helpers in
+a module with members, since a helper may be reached from one. The PTX ISA lets
+ptxas fuse unrounded `mul`/`add` into FMA, and the chain the checker derived
+would then not be the chain that runs.
+
+Admitting fa2 needed one change to the device verifier: a call to a device
+function that only computes from its arguments (no loads, no lane or subgroup
+intrinsics, no impure calls) is as uniform as its arguments. Before, every
+non-intrinsic call result was varying.
 
 The claim covers the shapes the harnesses launch, all listed in the report;
 every other shape is unproven and the report says so. `--verify`'s CPU
@@ -236,7 +250,8 @@ by construction:
   ran fully masked chunks fa2w never ran, and 0 * V there is not a no-op when V
   is infinite or O is -0.0).
 
-The contract then proves fa2 and fa2w equal at the same launch. Split invariance
+The contract then proves fa2 and fa2w equal at the same launch, at 16 and 32
+rows, with two splits, and with a sliding window over a wrapped ring. Split invariance
 at an arbitrary row split stays a runtime test: a tile's masked key positions
 read keys that exist in one launch and not in the other, so a proof would need
 either a premise that V is finite or staging per tile.

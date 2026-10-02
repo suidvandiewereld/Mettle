@@ -2661,6 +2661,17 @@ $cases = @(
      Args = @("test")
      SkipBinaryCheck = $true
      Pattern = "a read of workgroup bytes that the asynchronous copy at line 4 has not delivered yet" },
+  @{ Name = "gpu_numerics_contract"; Path = "tests/gpu/numerics_contract.mettle"; ShouldSucceed = $true
+     Args = @("-O", "--emit-ptx", "--gpu-arch=gb10", "--explain")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("numerics contract Q4_TILES: proven for q4_whole, q4_halves", "numerics contract SOFT_ROWS: proven for soft_lane_major, soft_two_rows") },
+  @{ Name = "err_numerics_k_reorder"; Path = "tests/err_numerics_k_reorder.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0004.: contract TILES accumulates K ascending, and tile_whole and tile_reversed visit the same K steps in different orders" },
+  @{ Name = "err_numerics_split_k"; Path = "tests/err_numerics_split_k.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0004.: contract TILES accumulates K in one ascending chain, and tile_split splits it into partial sums" },
+  @{ Name = "err_numerics_data_branch"; Path = "tests/err_numerics_data_branch.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0002.: contract TILES cannot be decided: harness tiles_agree stopped at line 31 of tile_checked: a branch on a value computed from the contract.s inputs" },
+  @{ Name = "err_numerics_unlaunched"; Path = "tests/err_numerics_unlaunched.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0003.: kernel tile_spare declares contract TILES, and no harness of the contract launches it" },
+  @{ Name = "err_numerics_zero_product"; Path = "tests/err_numerics_zero_product.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0001.: contract TILES: tile_whole and tile_padded compute output .0..0. of the claim at line 46 differently. They part at fma.rn.f32 at line 8 of tile_whole" },
+  @{ Name = "err_numerics_no_claim"; Path = "tests/err_numerics_no_claim.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0003.: harness tiles_run of contract TILES makes no claim" },
+  @{ Name = "err_numerics_contract_name"; Path = "tests/err_numerics_contract_name.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "names a contract: a const of type Numerics from std/numerics" },
   @{ Name = "gpu_register_tiles"; Path = "tests/gpu/register_tiles.mettle"; ShouldSucceed = $true
      Args = @("test")
      SkipBinaryCheck = $true
@@ -17215,6 +17226,29 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "ptx_emit_gb10_tensor_c_zero" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $ncPtx = Join-Path $tmpDir "ptx_emit_gb10_numerics_members.ptx"
+  $ncOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/numerics_contract.mettle -o $ncPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "numerics members emit failed: $ncOut" }
+  $ncText = Get-Content -Raw $ncPtx
+  $ncEntry = [regex]::Match($ncText,
+    "(?s)\.visible \.entry soft_lane_major\(.*?(?=\.visible \.entry|\z)").Value
+  if (-not $ncEntry -or $ncEntry -notmatch 'add\.rn\.f32' -or
+      $ncEntry -match 'add\.f32 ' -or $ncEntry -match 'mul\.f32 ' -or
+      $ncEntry -match 'sub\.f32 ' -or $ncText -match 'soft_rows_agree' -or
+      $ncText -match 'q4_tiles_agree') {
+    throw "numerics members are not emitted with rounded arithmetic, or a harness reached the module"
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_numerics_members" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_numerics_members" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++

@@ -2195,6 +2195,35 @@ static Type *type_checker_function_return_type(
         return_type->name ? return_type->name : "non-void");
     return 0;
   }
+  if (func_decl->numerics_contract) {
+    Symbol *contract = symbol_table_lookup(checker->symbol_table,
+                                           func_decl->numerics_contract);
+    size_t length = contract && contract->type && contract->type->name
+                        ? strlen(contract->type->name)
+                        : 0;
+    if (!contract ||
+        (contract->kind != SYMBOL_CONSTANT &&
+         contract->kind != SYMBOL_VARIABLE) ||
+        length < 8 ||
+        strcmp(contract->type->name + length - 8, "Numerics") != 0) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "'@numerics(%s)' names a contract: a const of type Numerics from "
+          "std/numerics",
+          func_decl->numerics_contract);
+      return 0;
+    }
+    if (!func_decl->is_kernel &&
+        (func_decl->parameter_count > 0 || return_type->kind != TYPE_VOID)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "'%s' is a harness of contract '%s': it takes no parameters and "
+          "returns nothing, and launches the contract's kernels the way the "
+          "host does",
+          func_decl->name, func_decl->numerics_contract);
+      return 0;
+    }
+  }
   return return_type;
 }
 

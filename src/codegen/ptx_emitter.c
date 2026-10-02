@@ -103,6 +103,7 @@ typedef struct {
   int isa_major;
   int isa_minor;
   int tensor_tuple_budget;
+  int rounded_arithmetic;
   char *error;
 } PtxFn;
 
@@ -9328,12 +9329,14 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
         char tn[24];
         reg_name(PC_F32, t, tn);
         sb_printf(&fn->body, "\tlg2.approx.f32 %s, %s;\n", tn, a);
-        sb_printf(&fn->body, "\tmul.f32 %s, %s, 0f3F317218;\n", dn, tn);
+        sb_printf(&fn->body, "\tmul.%sf32 %s, %s, 0f3F317218;\n",
+                  fn->rounded_arithmetic ? "rn." : "", dn, tn);
       } else {
         int t = new_reg(fn, PC_F32);
         char tn[24];
         reg_name(PC_F32, t, tn);
-        sb_printf(&fn->body, "\tmul.f32 %s, %s, 0f3FB8AA3B;\n", tn, a);
+        sb_printf(&fn->body, "\tmul.%sf32 %s, %s, 0f3FB8AA3B;\n",
+                  fn->rounded_arithmetic ? "rn." : "", tn, a);
         sb_printf(&fn->body, "\tex2.approx.f32 %s, %s;\n", dn, tn);
       }
       if (in->dest.name)
@@ -10847,6 +10850,23 @@ static void ptx_count_definitions(PtxFn *fn, const IRFunction *func) {
   }
 }
 
+static int ptx_rounded_arithmetic(const IRProgram *program,
+                                  const IRFunction *function) {
+  if (function->numerics_contract) {
+    return 1;
+  }
+  if (function->is_kernel) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    if (program->functions[i] && program->functions[i]->is_kernel &&
+        program->functions[i]->numerics_contract) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
                           FILE *out, int target_arch, char target_variant,
                           int isa_major, int isa_minor,
@@ -10864,6 +10884,7 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   e.fn.isa_major = isa_major;
   e.fn.isa_minor = isa_minor;
   e.fn.tensor_tuple_budget = tensor_tuple_budget;
+  e.fn.rounded_arithmetic = ptx_rounded_arithmetic(program, e.func);
   ptx_count_definitions(&e.fn, e.func);
   ptx_collect_generic_names(&e.fn, e.func, e.symbol);
   ptx_emit_return_descriptor(&e);
@@ -11045,13 +11066,17 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
     return;
   }
 
+  const char *rounding =
+      fn->rounded_arithmetic && (dv.cls == PC_F32 || dv.cls == PC_F64) ? "rn."
+                                                                     : "";
   if (!strcmp(t, "+")) {
-    sb_printf(&fn->body, "\tadd.%s %s, %s, %s;\n", ts, dn, a, b);
+    sb_printf(&fn->body, "\tadd.%s%s %s, %s, %s;\n", rounding, ts, dn, a, b);
   } else if (!strcmp(t, "-")) {
-    sb_printf(&fn->body, "\tsub.%s %s, %s, %s;\n", ts, dn, a, b);
+    sb_printf(&fn->body, "\tsub.%s%s %s, %s, %s;\n", rounding, ts, dn, a, b);
   } else if (!strcmp(t, "*")) {
     if (dv.cls == PC_F32 || dv.cls == PC_F64) {
-      sb_printf(&fn->body, "\tmul.%s %s, %s, %s;\n", ts, dn, a, b);
+      sb_printf(&fn->body, "\tmul.%s%s %s, %s, %s;\n", rounding, ts, dn, a,
+                b);
     } else {
       sb_printf(&fn->body, "\tmul.lo.%s %s, %s, %s;\n", ts, dn, a, b);
     }

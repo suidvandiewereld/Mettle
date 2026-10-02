@@ -664,6 +664,54 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: narrow the parameters to shapes the prober can build, or accept\n"
      "that this pair is unchecked and know that it is.\n"},
+    {"C0001", "Two kernels of a numerics contract compute an output differently",
+     "Every kernel marked @numerics(C) promises the same bits for each output\n"
+     "element as every other member of C, given the same inputs. The build\n"
+     "proves it: each harness of C runs in the compile-time interpreter with\n"
+     "every input byte a symbol, so each output element comes out as its\n"
+     "computation, the ordered chain of rounding operations and where every\n"
+     "operand came from. Two members that agree compute the same chain.\n"
+     "\n"
+     "These two do not. The message names the element, the claim\n"
+     "(numerics_same) that compared it, and the first operation where the\n"
+     "chains part, with its line in each kernel. A different rounding order,\n"
+     "an extra operation (x + 0 * v is not a no-op: v can be infinite, and\n"
+     "the sum can lose a negative zero) or a different operand all part the\n"
+     "chains.\n"
+     "\n"
+     "Fix: make the kernels compute the same thing, or take the kernel out of\n"
+     "the contract.\n"},
+    {"C0002", "The numerics check cannot follow a computation",
+     "The check follows integer and floating-point arithmetic, conversions,\n"
+     "loads and stores, copies, subgroup operations, tensor MMAs and the math\n"
+     "intrinsics on values computed from the contract's inputs. It stops, and\n"
+     "the build fails, where it cannot decide what happens: a branch, address\n"
+     "or loop bound computed from the inputs (a branch whose arms only\n"
+     "compute values is followed as a select), an operation with no meaning\n"
+     "here such as inline asm or an extern call, a read of bytes an\n"
+     "asynchronous copy has not delivered, or an interpreter limit. The\n"
+     "message names the line.\n"
+     "\n"
+     "Fix: compute the decision from indices and sizes, which the check\n"
+     "knows, or write the data-dependent choice as an assignment in both\n"
+     "arms.\n"},
+    {"C0003", "A numerics contract is unproven for a kernel",
+     "A kernel that declares @numerics(C) is a member of C, and the build\n"
+     "proves C by running its harnesses. A member that no harness launches,\n"
+     "or a harness that makes no claim with numerics_same, leaves the\n"
+     "contract unproven, and an unproven contract is not stated.\n"
+     "\n"
+     "Fix: launch the member from a harness of C and compare its output with\n"
+     "another member's.\n"},
+    {"C0004", "A kernel walks K in an order its contract does not allow",
+     "A contract with k_order: k_ascending promises that every tensor\n"
+     "accumulation visits K in ascending order, one chain from the first\n"
+     "block to the last. The check reads the order off each output's chain:\n"
+     "which input bytes each MMA step's B operand came from. A member that\n"
+     "reorders the blocks, or splits K into partial sums added afterwards,\n"
+     "rounds differently from one that walks K once in order.\n"
+     "\n"
+     "Fix: accumulate the blocks in ascending order into one accumulator.\n"},
     {"G0001", "A kernel holds more tile registers at once than its budget",
      "A register tile is a subgroup's value held in registers, each work\n"
      "item its share, and tiles never spill. The backend states what each\n"

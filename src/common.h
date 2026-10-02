@@ -49,6 +49,7 @@ uint32_t mettle_bf16bits_to_f32bits(uint16_t h);
 float mettle_f16bits_to_f32(uint16_t h);
 uint16_t mettle_f32_to_f16bits(float f);
 float mettle_bf16bits_to_f32(uint16_t h);
+float mettle_fmaf_exact(float a, float b, float c);
 uint16_t mettle_f32_to_bf16bits(float f);
 uint16_t mettle_f64bits_to_f16bits(uint64_t u);
 uint16_t mettle_f64bits_to_bf16bits(uint64_t u);

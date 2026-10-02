@@ -676,6 +676,7 @@ typedef struct {
   int uniform_mode;
   int conflict_free_mode;
   int parallel_mode;
+  char *numerics_contract;
 } ParsedDecorators;
 
 static int parser_parse_one_decorator(Parser *parser,
@@ -788,6 +789,26 @@ static int parser_parse_one_decorator(Parser *parser,
       out->simd_mode = SIMD_ATTR_CONTRACT;
       parser_advance(parser);
     }
+  } else if (strcmp(name, "numerics") == 0) {
+    if (out->numerics_contract) {
+      parser_set_error(parser, "Duplicate '@numerics' decorator");
+      return 0;
+    }
+    parser_advance(parser);
+    if (!parser_expect(parser, TOKEN_LPAREN)) {
+      parser_set_error(parser, "Expected '(contract)' after '@numerics'");
+      return 0;
+    }
+    if (!parser_is_identifier_like(parser->current_token.type)) {
+      parser_set_error(parser,
+                       "'@numerics' names a contract: a const of type Numerics");
+      return 0;
+    }
+    out->numerics_contract = strdup(parser->current_token.value);
+    parser_advance(parser);
+    if (!parser_expect(parser, TOKEN_RPAREN)) {
+      return 0;
+    }
   } else if (strcmp(name, "parallel") == 0) {
     if (out->parallel_mode) {
       parser_set_error(parser, "Duplicate '@parallel' decorator");
@@ -826,7 +847,7 @@ static int parser_parse_one_decorator(Parser *parser,
                      "Unknown decorator after '@' (expected 'inline', "
                      "'noinline', 'pure', 'noalloc', 'test', 'rule', "
                      "'naked', 'interrupt', 'swappable', 'simd', "
-                     "'parallel', or 'unroll')");
+                     "'parallel', 'numerics', or 'unroll')");
     return 0;
   }
   return 1;
@@ -848,6 +869,7 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->uniform_mode = 0;
   out->conflict_free_mode = 0;
   out->parallel_mode = 0;
+  out->numerics_contract = NULL;
 
   while (parser->current_token.type == TOKEN_AT) {
     if (!parser_parse_one_decorator(parser, out)) {
@@ -921,6 +943,7 @@ static ASTNode *parser_parse_decorated_declaration(Parser *parser) {
   fd->is_interrupt = decos.is_interrupt;
   fd->is_rule = decos.is_rule;
   fd->simd_mode = decos.simd_mode;
+  fd->numerics_contract = decos.numerics_contract;
   if (fd->is_naked && fd->is_interrupt) {
     parser_set_error(parser,
                      "'@naked' and '@interrupt' are mutually exclusive: an "

@@ -712,7 +712,7 @@ static int rw_bindings_stable(const IRFunction *fn, const RwMatch *m,
 
 static int rw_guard_admits(RwRule *rule, const RwMatch *m) {
   IRInterpValue args[RW_MAX_VARS];
-  IRInterpValue verdict = {0, 0, 0, 0};
+  IRInterpValue verdict = {0, 0, 0, 0, 0};
   memset(args, 0, sizeof(args));
   if (!rule->where) {
     return 1;

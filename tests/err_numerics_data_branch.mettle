@@ -1,0 +1,46 @@
+import "std/numerics";
+import "std/mem";
+
+const TILES: Numerics = { k_order: k_ascending };
+
+@numerics(TILES) kernel(block = 32) tile_whole(a: int8*, b: uint8*, d: float32*,
+                                            sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k64,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+}
+
+@numerics(TILES) kernel(block = 32) tile_checked(a: int8*, b: uint8*, d: float32*,
+                                              sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k64,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+  var lane: int32 = thread.x;
+  if (d[lane * 32] < 0.0) {
+    d[lane * 32 + 1] = 0.0;
+  }
+}
+
+@numerics(TILES) fn tiles_agree() {
+  var a: int8* = (int8*)numerics_input(2048);
+  var b: uint8* = numerics_input(1024);
+  var sa: float32* = (float32*)numerics_input(256);
+  var sb: uint16* = (uint16*)numerics_input(128);
+  var one: float32* = (float32*)calloc(1024, 4);
+  var two: float32* = (float32*)calloc(1024, 4);
+  dispatch tile_whole[grid: (1, 1, 1), block: (32, 1, 1)](a, b, one, sa, sb);
+  dispatch tile_checked[grid: (1, 1, 1), block: (32, 1, 1)](a, b, two, sa, sb);
+  numerics_same(one, two, 32, 32, 32);
+}

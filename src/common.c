@@ -254,6 +254,23 @@ uint16_t mettle_f32_to_f16bits(float f) {
   return mettle_f32bits_to_f16bits(u);
 }
 
+float mettle_fmaf_exact(float a, float b, float c) {
+  double product = (double)a * (double)b;
+  double addend = (double)c;
+  double sum = product + addend;
+  double back = sum - product;
+  double error = (product - (sum - back)) + (addend - back);
+  if (error != 0.0 && sum == sum && sum - sum == 0.0) {
+    uint64_t bits;
+    memcpy(&bits, &sum, 8);
+    if ((bits & 1u) == 0) {
+      bits = (error > 0.0) == (sum > 0.0) ? bits + 1u : bits - 1u;
+      memcpy(&sum, &bits, 8);
+    }
+  }
+  return (float)sum;
+}
+
 float mettle_bf16bits_to_f32(uint16_t h) {
   uint32_t u = mettle_bf16bits_to_f32bits(h);
   float f;

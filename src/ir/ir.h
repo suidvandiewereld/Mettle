@@ -314,6 +314,7 @@ typedef struct {
   const char *explain_text;
   int is_noalloc;
   int is_test;
+  const char *numerics_contract;
   int is_swappable;
   int is_naked;
   int is_interrupt;
@@ -575,6 +576,7 @@ int ir_program_register_type(IRProgram *program, const char *name,
                              MtlcType *type);
 MtlcType *ir_program_lookup_type(const IRProgram *program, const char *name);
 int ir_program_drop_rules(IRProgram *program);
+int ir_program_drop_numerics_harnesses(IRProgram *program);
 int ir_program_drop_rules_except(IRProgram *program,
                                  int (*keep)(const IRFunction *));
 

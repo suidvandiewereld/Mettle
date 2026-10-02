@@ -1,4 +1,15 @@
-extern fn numerics_tensor_map_2d(map: uint8*, base: uint8*, element_bytes: int32,
+export enum NumericsOrder {
+  k_ascending
+}
+
+export struct Numerics {
+  k_order: NumericsOrder;
+}
+
+export extern fn numerics_input(bytes: int64) -> uint8* = "numerics_input";
+export extern fn numerics_same(a: float32*, b: float32*, rows: int32, cols: int32,
+                        ld: int32) -> int32 = "numerics_same";
+export extern fn numerics_tensor_map_2d(map: uint8*, base: uint8*, element_bytes: int32,
                                  width: int64, height: int64, row_bytes: int64,
                                  box_width: int32, box_height: int32,
                                  swizzle: int32) = "numerics_tensor_map_2d";

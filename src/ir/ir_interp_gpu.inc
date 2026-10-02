@@ -1,3 +1,12 @@
+static NumTerm ii_sym_read_bytes(IRInterpMachine *machine, IIBuffer *buf,
+                                 long long offset, int size);
+static int ii_sym_write_bytes(IRInterpMachine *machine, IIBuffer *buf,
+                              long long offset, int size, NumTerm term);
+static int ii_sym_device_call(IRInterpMachine *machine,
+                              MtlcIntrinsic intrinsic,
+                              const IRInterpValue *args, size_t count,
+                              IRInterpValue *out, int *handled);
+
 static int ii_gpu_is_collective(const IRInstruction *insn) {
   if (insn->op == IR_OP_TENSOR_MMA) {
     return 1;
@@ -58,6 +67,9 @@ static int ii_gpu_read(IRInterpMachine *machine, unsigned long long addr,
   if (!ii_pending_check(machine, buf, offset, length)) {
     return 0;
   }
+  if (g_ii_symbolic && buf->shadow && ii_sym_range(buf, offset, length)) {
+    ii_misuse();
+  }
   memcpy(out, buf->data + offset, (size_t)length);
   return 1;
 }
@@ -73,6 +85,7 @@ static int ii_gpu_write(IRInterpMachine *machine, unsigned long long addr,
   }
   memcpy(buf->data + offset, in, (size_t)length);
   ii_mark_bytes(buf, offset, length, 1);
+  ii_sym_clear(buf, offset, length);
   return 1;
 }
 
@@ -87,8 +100,16 @@ static int ii_gpu_copy(IRInterpMachine *machine, unsigned long long to,
     ii_fail(machine, IR_INTERP_TRAP, "out of memory copying device bytes");
     return 0;
   }
-  ok = ii_gpu_read(machine, from, length, scratch) &&
-       ii_gpu_write(machine, to, length, scratch);
+  {
+    int symbolic = g_ii_symbolic;
+    g_ii_symbolic = 0;
+    ok = ii_gpu_read(machine, from, length, scratch) &&
+         ii_gpu_write(machine, to, length, scratch);
+    g_ii_symbolic = symbolic;
+  }
+  if (ok && machine->num) {
+    ok = ii_sym_copy(machine, to, from, length);
+  }
   if (scratch != stack) {
     free(scratch);
   }
@@ -316,13 +337,23 @@ static int ii_gpu_wait_ready(IRInterpMachine *machine, IIFrame *frame,
 }
 
 static int ii_gpu_device_call(IRInterpMachine *machine,
-                              const IRInstruction *insn,
+                              MtlcIntrinsic intrinsic,
                               const IRInterpValue *args, size_t count,
                               IRInterpValue *out, int *handled) {
   IIMbarrier *bar;
   *handled = 1;
   *out = ii_int_value(0);
-  switch (insn->intrinsic) {
+  if (machine->num) {
+    int symbolic = 0;
+    if (!ii_sym_device_call(machine, intrinsic, args, count, out,
+                            &symbolic)) {
+      return 0;
+    }
+    if (symbolic) {
+      return 1;
+    }
+  }
+  switch (intrinsic) {
   case MTLC_INTRINSIC_GPU_MBARRIER_INIT:
     if (count < 2) break;
     bar = ii_mbarrier_find(machine, (unsigned long long)ii_as_int(&args[0]), 1);
@@ -360,7 +391,7 @@ static int ii_gpu_device_call(IRInterpMachine *machine,
     unsigned long long bits;
     if (count < 1) break;
     bits = (unsigned long long)ii_as_int(&args[0]);
-    if (insn->intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) bits >>= 16;
+    if (intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) bits >>= 16;
     *out = ii_float_value(
         (double)mettle_f16bits_to_f32((uint16_t)(bits & 0xFFFFu)));
     return 1;
@@ -410,8 +441,8 @@ static int ii_gpu_device_call(IRInterpMachine *machine,
   case MTLC_INTRINSIC_GPU_STORE4_F32:
   case MTLC_INTRINSIC_GPU_STORE4_U32: {
     unsigned long long vector, scalar;
-    int load = insn->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
-               insn->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32;
+    int load = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
+               intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32;
     if (count < 2) break;
     vector = (unsigned long long)ii_as_int(&args[0]);
     scalar = (unsigned long long)ii_as_int(&args[1]);
@@ -550,20 +581,318 @@ static int ii_mma_scale(IRInterpMachine *machine, unsigned long long base,
 }
 
 static float ii_fma_f32(float a, float b, float c) {
-  double product = (double)a * (double)b;
-  double addend = (double)c;
-  double sum = product + addend;
-  double back = sum - product;
-  double error = (product - (sum - back)) + (addend - back);
-  if (error != 0.0 && sum == sum && sum - sum == 0.0) {
-    uint64_t bits;
-    memcpy(&bits, &sum, 8);
-    if ((bits & 1u) == 0) {
-      bits = (error > 0.0) == (sum > 0.0) ? bits + 1u : bits - 1u;
-      memcpy(&sum, &bits, 8);
+  return mettle_fmaf_exact(a, b, c);
+}
+
+typedef struct {
+  unsigned long long pointer[4];
+  unsigned long long stride[4];
+  unsigned long long a_scale;
+  unsigned long long b_scale;
+  unsigned long long c_scale;
+  int c_zero;
+  IIMmaOperand a;
+  IIMmaOperand b;
+} IIMmaTile;
+
+static int ii_mma_fetch_tile(IRInterpMachine *machine, IIFrame *frame,
+                             const IRInstruction *insn, size_t base,
+                             size_t per_tile, IIMmaTile *tile) {
+  const MtlcTensorMmaDesc *desc = &IR_TENSOR_MMA(insn);
+  size_t index = 4;
+  unsigned mask = ir_tensor_mma_runtime_stride_mask(desc);
+  memset(tile, 0, sizeof(*tile));
+  tile->stride[0] = desc->a_leading_dimension;
+  tile->stride[1] = desc->b_leading_dimension;
+  tile->stride[2] = desc->c_leading_dimension;
+  tile->stride[3] = desc->d_leading_dimension;
+  tile->c_zero = ir_tensor_c_is_zero(&insn->arguments[base + 2]);
+  for (int i = 0; i < 4; i++) {
+    if (i == 2 && tile->c_zero) continue;
+    if (!ii_fetch_addr(machine, frame, &insn->arguments[base + i],
+                       &tile->pointer[i])) {
+      return 0;
     }
   }
-  return (float)sum;
+  if (desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE) index++;
+  if (desc->a_scale_mode != MTLC_TENSOR_SCALE_NONE &&
+      !ii_fetch_addr(machine, frame, &insn->arguments[base + index++],
+                     &tile->a_scale)) {
+    return 0;
+  }
+  if (desc->b_scale_mode != MTLC_TENSOR_SCALE_NONE &&
+      !ii_fetch_addr(machine, frame, &insn->arguments[base + index++],
+                     &tile->b_scale)) {
+    return 0;
+  }
+  for (int i = 0; i < 4; i++) {
+    long long value = 0;
+    if (!(mask & (1u << i))) continue;
+    if (!ii_fetch_int(machine, frame, &insn->arguments[base + index++],
+                      &value)) {
+      return 0;
+    }
+    tile->stride[i] = (unsigned long long)value;
+  }
+  if (desc->c_scale_mode == MTLC_TENSOR_SCALE_PER_ROW &&
+      !ii_fetch_addr(machine, frame, &insn->arguments[base + per_tile - 1],
+                     &tile->c_scale)) {
+    return 0;
+  }
+  tile->a.base = tile->pointer[0];
+  tile->a.stride = tile->stride[0];
+  tile->a.layout = desc->a_layout;
+  tile->a.element = desc->a_element;
+  tile->a.packing = desc->a_packing;
+  tile->a.zero_point = desc->a_zero_point;
+  tile->a.swizzle = desc->a_swizzle;
+  tile->a.transpose = desc->transpose_a;
+  tile->b.base = tile->pointer[1];
+  tile->b.stride = tile->stride[1];
+  tile->b.layout = desc->b_layout;
+  tile->b.element = desc->b_element;
+  tile->b.packing = desc->b_packing;
+  tile->b.zero_point = desc->b_zero_point;
+  tile->b.swizzle = desc->b_swizzle;
+  tile->b.transpose = desc->transpose_b;
+  return 1;
+}
+
+static int ii_sym_read_at(IRInterpMachine *machine, unsigned long long addr,
+                          int size, NumTerm *out) {
+  long long offset = 0;
+  IIBuffer *buf = ii_addr_to_buffer(machine, addr, size, &offset);
+  if (!buf) {
+    ii_fail(machine, IR_INTERP_TRAP,
+            "a device operation read outside its buffer");
+    return 0;
+  }
+  if (!ii_pending_check(machine, buf, offset, size)) {
+    return 0;
+  }
+  *out = ii_sym_read_bytes(machine, buf, offset, size);
+  return *out != 0;
+}
+
+static int ii_mma_operand_term(IRInterpMachine *machine,
+                               const IIMmaOperand *operand,
+                               unsigned long long row,
+                               unsigned long long column, NumTerm *out) {
+  int row_major =
+      (operand->layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR) != (operand->transpose != 0);
+  unsigned long long position = row_major ? row * operand->stride + column
+                                          : column * operand->stride + row;
+  if (operand->element == MTLC_TENSOR_ELEMENT_INT4 ||
+      operand->element == MTLC_TENSOR_ELEMENT_UINT4) {
+    unsigned long long byte;
+    int high;
+    NumTerm raw;
+    uint64_t imm;
+    if (operand->packing == MTLC_TENSOR_PACKING_HALVES) {
+      byte = 16u * (position / 32u) + position % 16u;
+      high = position % 32u >= 16u;
+    } else {
+      byte = position / 2u;
+      high = (int)(position & 1u);
+    }
+    if (!ii_sym_read_at(machine,
+                        ii_swizzled(operand->base + byte, operand->swizzle), 1,
+                        &raw)) {
+      return 0;
+    }
+    imm = (uint64_t)high |
+          (operand->element == MTLC_TENSOR_ELEMENT_INT4 ? 2u : 0u) |
+          ((uint64_t)operand->zero_point << 8);
+    *out = num_op(machine->num, NUM_NIBBLE, 8, imm, &raw, 1);
+    return *out != 0;
+  }
+  if (operand->element == MTLC_TENSOR_ELEMENT_UINT8) {
+    ii_fail(machine, IR_INTERP_UNSUPPORTED,
+            "an unsigned 8-bit tensor operand under the numerics check");
+    return 0;
+  }
+  {
+    int size = ii_gpu_element_bytes(operand->element);
+    unsigned long long address =
+        operand->base + position * (unsigned long long)size;
+    if (size <= 0) {
+      ii_fail(machine, IR_INTERP_UNSUPPORTED,
+              "a tensor operand format the numerics check does not read");
+      return 0;
+    }
+    return ii_sym_read_at(machine, ii_swizzled(address, operand->swizzle),
+                          size, out);
+  }
+}
+
+static int ii_mma_scale_term(IRInterpMachine *machine, unsigned long long base,
+                             unsigned long long index,
+                             MtlcTensorElement element, NumTerm *out) {
+  int size = ii_gpu_element_bytes(element);
+  NumTerm raw;
+  if (size != 2 && size != 4) {
+    ii_fail(machine, IR_INTERP_UNSUPPORTED,
+            "a block scale format the numerics check does not read");
+    return 0;
+  }
+  if (!ii_sym_read_at(machine, base + index * (unsigned long long)size, size,
+                      &raw)) {
+    return 0;
+  }
+  if (size == 2) {
+    raw = num_op(machine->num, NUM_CVT, 32,
+                 element == MTLC_TENSOR_ELEMENT_BFLOAT16 ? NUM_CVT_BF16_TO_F32
+                                                         : NUM_CVT_F16_TO_F32,
+                 &raw, 1);
+  }
+  *out = raw;
+  return raw != 0;
+}
+
+static int ii_gpu_tensor_mma_symbolic(IRInterpMachine *machine,
+                                      IIFrame *frame,
+                                      const IRInstruction *insn, int f16) {
+  const MtlcTensorMmaDesc *desc = &IR_TENSOR_MMA(insn);
+  size_t per_tile = ir_tensor_mma_operand_count(desc);
+  size_t tiles = ir_tensor_mma_instruction_count(insn);
+  NumTerm *result = (NumTerm *)malloc((size_t)desc->m * desc->n *
+                                      sizeof(NumTerm));
+  NumTerm args[65];
+  if (!result) {
+    ii_fail(machine, IR_INTERP_TRAP, "out of memory running a tensor_mma");
+    return 0;
+  }
+  for (size_t tile_index = 0; tile_index < tiles; tile_index++) {
+    IIMmaTile t;
+    unsigned blocks = desc->k / 32u;
+    unsigned a_ld = desc->a_scale_leading_dimension
+                        ? desc->a_scale_leading_dimension
+                        : blocks;
+    unsigned b_ld = desc->b_scale_leading_dimension
+                        ? desc->b_scale_leading_dimension
+                        : blocks;
+    IRBlockScaleOrder order = ir_tensor_block_scale_order(desc);
+    if (!ii_mma_fetch_tile(machine, frame, insn, tile_index * per_tile,
+                           per_tile, &t)) {
+      free(result);
+      return 0;
+    }
+    for (unsigned r = 0; r < desc->m; r++) {
+      NumTerm row_scale = 0;
+      if (t.c_scale && !ii_sym_read_at(machine, t.c_scale + 4ull * r, 4,
+                                       &row_scale)) {
+        free(result);
+        return 0;
+      }
+      for (unsigned c = 0; c < desc->n; c++) {
+        NumTerm acc = num_const(machine->num, 32, 0);
+        if (!t.c_zero) {
+          unsigned long long position =
+              desc->c_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR
+                  ? (unsigned long long)r * t.stride[2] + c
+                  : (unsigned long long)c * t.stride[2] + r;
+          if (!ii_sym_read_at(machine, t.pointer[2] + position * 4u, 4,
+                              &acc)) {
+            free(result);
+            return 0;
+          }
+        }
+        if (row_scale) {
+          NumTerm pair[2];
+          pair[0] = acc;
+          pair[1] = row_scale;
+          acc = num_op(machine->num, NUM_FMUL, 32, 0, pair, 2);
+        }
+        if (f16) {
+          for (unsigned ks = 0; ks < desc->k; ks += 16) {
+            args[0] = acc;
+            for (unsigned j = 0; j < 16; j++) {
+              if (!ii_mma_operand_term(machine, &t.a, r, ks + j,
+                                       &args[1 + j]) ||
+                  !ii_mma_operand_term(machine, &t.b, ks + j, c,
+                                       &args[17 + j])) {
+                free(result);
+                return 0;
+              }
+            }
+            acc = num_op(machine->num, NUM_MMA, 32,
+                         (uint64_t)desc->a_element, args, 33);
+          }
+        } else {
+          for (unsigned kb = 0; kb < blocks; kb++) {
+            NumTerm dot, sa, sb, scaled, triple[3];
+            for (unsigned j = 0; j < 32; j++) {
+              if (!ii_mma_operand_term(machine, &t.a, r, kb * 32u + j,
+                                       &args[j]) ||
+                  !ii_mma_operand_term(machine, &t.b, kb * 32u + j, c,
+                                       &args[32 + j])) {
+                free(result);
+                return 0;
+              }
+            }
+            dot = num_op(machine->num, NUM_IDOT, 32, 0, args, 64);
+            if (!ii_mma_scale_term(machine, t.a_scale,
+                                   (unsigned long long)r * a_ld + kb,
+                                   desc->a_scale_element, &sa) ||
+                !ii_mma_scale_term(machine, t.b_scale,
+                                   (unsigned long long)c * b_ld + kb,
+                                   desc->b_scale_element, &sb)) {
+              free(result);
+              return 0;
+            }
+            if (order == IR_BLOCK_SCALE_PRODUCT) {
+              NumTerm pair[2], wide;
+              wide = num_resize(machine->num, dot, 64, 1);
+              triple[0] = num_op(machine->num, NUM_CVT, 32, NUM_CVT_S64_TO_F32,
+                                 &wide, 1);
+              pair[0] = sa;
+              pair[1] = sb;
+              triple[1] = num_op(machine->num, NUM_FMUL, 32, 0, pair, 2);
+            } else {
+              NumTerm pair[2];
+              pair[0] = dot;
+              pair[1] = order == IR_BLOCK_SCALE_B_FIRST ? sb : sa;
+              scaled = num_op(machine->num, NUM_BSCALE, 32, 0, pair, 2);
+              triple[0] = scaled;
+              triple[1] = order == IR_BLOCK_SCALE_B_FIRST ? sa : sb;
+            }
+            triple[2] = acc;
+            acc = num_op(machine->num, NUM_FFMA, 32, 0, triple, 3);
+          }
+        }
+        if (!acc) {
+          free(result);
+          ii_fail(machine, IR_INTERP_TRAP, "the numerics check ran out of memory");
+          return 0;
+        }
+        result[(size_t)r * desc->n + c] = acc;
+      }
+    }
+    for (unsigned r = 0; r < desc->m; r++) {
+      for (unsigned c = 0; c < desc->n; c++) {
+        unsigned long long position =
+            desc->d_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR
+                ? (unsigned long long)r * t.stride[3] + c
+                : (unsigned long long)c * t.stride[3] + r;
+        long long offset = 0;
+        IIBuffer *buf = ii_addr_to_buffer(machine, t.pointer[3] + position * 4u,
+                                          4, &offset);
+        if (!buf) {
+          free(result);
+          ii_fail(machine, IR_INTERP_TRAP,
+                  "a tensor_mma wrote outside its D buffer");
+          return 0;
+        }
+        if (!ii_sym_write_bytes(machine, buf, offset, 4,
+                                result[(size_t)r * desc->n + c])) {
+          free(result);
+          return 0;
+        }
+      }
+    }
+  }
+  free(result);
+  return 1;
 }
 
 static int ii_gpu_tensor_mma(IRInterpMachine *machine, IIFrame *frame,
@@ -585,6 +914,9 @@ static int ii_gpu_tensor_mma(IRInterpMachine *machine, IIFrame *frame,
                desc->a_scale_mode == MTLC_TENSOR_SCALE_BLOCK_32 &&
                desc->b_scale_mode == MTLC_TENSOR_SCALE_BLOCK_32;
   float *result = NULL;
+  if (machine->num) {
+    return ii_gpu_tensor_mma_symbolic(machine, frame, insn, f16);
+  }
   if (!per_tile || insn->argument_count != per_tile * tiles ||
       desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE ||
       desc->math_mode != MTLC_TENSOR_MATH_MULTIPLY_ADD ||
@@ -603,100 +935,42 @@ static int ii_gpu_tensor_mma(IRInterpMachine *machine, IIFrame *frame,
   }
   for (size_t tile = 0; tile < tiles; tile++) {
     size_t base = tile * per_tile;
-    size_t index = 4;
-    unsigned long long pointer[4] = {0, 0, 0, 0};
-    unsigned long long stride[4] = {desc->a_leading_dimension,
-                                    desc->b_leading_dimension,
-                                    desc->c_leading_dimension,
-                                    desc->d_leading_dimension};
-    unsigned long long a_scale = 0, b_scale = 0, c_scale = 0;
-    unsigned mask = ir_tensor_mma_runtime_stride_mask(desc);
-    int c_zero = ir_tensor_c_is_zero(&insn->arguments[base + 2]);
-    IIMmaOperand a, b;
-    for (int i = 0; i < 4; i++) {
-      if (i == 2 && c_zero) continue;
-      if (!ii_fetch_addr(machine, frame, &insn->arguments[base + i],
-                         &pointer[i])) {
-        free(result);
-        return 0;
-      }
-    }
-    if (desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE) index++;
-    if (desc->a_scale_mode != MTLC_TENSOR_SCALE_NONE &&
-        !ii_fetch_addr(machine, frame, &insn->arguments[base + index++],
-                       &a_scale)) {
+    IIMmaTile t;
+    if (!ii_mma_fetch_tile(machine, frame, insn, base, per_tile, &t)) {
       free(result);
       return 0;
     }
-    if (desc->b_scale_mode != MTLC_TENSOR_SCALE_NONE &&
-        !ii_fetch_addr(machine, frame, &insn->arguments[base + index++],
-                       &b_scale)) {
-      free(result);
-      return 0;
-    }
-    for (int i = 0; i < 4; i++) {
-      long long value = 0;
-      if (!(mask & (1u << i))) continue;
-      if (!ii_fetch_int(machine, frame, &insn->arguments[base + index++],
-                        &value)) {
-        free(result);
-        return 0;
-      }
-      stride[i] = (unsigned long long)value;
-    }
-    if (desc->c_scale_mode == MTLC_TENSOR_SCALE_PER_ROW &&
-        !ii_fetch_addr(machine, frame, &insn->arguments[base + per_tile - 1],
-                       &c_scale)) {
-      free(result);
-      return 0;
-    }
-    a.base = pointer[0];
-    a.stride = stride[0];
-    a.layout = desc->a_layout;
-    a.element = desc->a_element;
-    a.packing = desc->a_packing;
-    a.zero_point = desc->a_zero_point;
-    a.swizzle = desc->a_swizzle;
-    a.transpose = desc->transpose_a;
-    b.base = pointer[1];
-    b.stride = stride[1];
-    b.layout = desc->b_layout;
-    b.element = desc->b_element;
-    b.packing = desc->b_packing;
-    b.zero_point = desc->b_zero_point;
-    b.swizzle = desc->b_swizzle;
-    b.transpose = desc->transpose_b;
     for (unsigned r = 0; r < desc->m; r++) {
       double row_scale = 1.0;
-      if (c_scale && !ii_mma_scale(machine, c_scale, r,
+      if (t.c_scale && !ii_mma_scale(machine, t.c_scale, r,
                                    MTLC_TENSOR_ELEMENT_FLOAT32, &row_scale)) {
         free(result);
         return 0;
       }
       for (unsigned c = 0; c < desc->n; c++) {
         float acc = 0.0f;
-        if (!c_zero) {
+        if (!t.c_zero) {
           unsigned char bytes[4];
           unsigned long long position =
               desc->c_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR
-                  ? (unsigned long long)r * stride[2] + c
-                  : (unsigned long long)c * stride[2] + r;
-          if (!ii_gpu_read(machine, pointer[2] + position * 4u, 4, bytes)) {
+                  ? (unsigned long long)r * t.stride[2] + c
+                  : (unsigned long long)c * t.stride[2] + r;
+          if (!ii_gpu_read(machine, t.pointer[2] + position * 4u, 4, bytes)) {
             free(result);
             return 0;
           }
           memcpy(&acc, bytes, 4);
-          if (c_scale) {
-            acc = acc * (float)row_scale;
-          }
+        }
+        if (t.c_scale) {
+          acc = acc * (float)row_scale;
         }
         if (f16) {
           for (unsigned ks = 0; ks < desc->k; ks += 16) {
             double sum = (double)acc;
             for (unsigned j = 0; j < 16; j++) {
               double x = 0.0, y = 0.0;
-              if (!ii_mma_operand_value(machine, &a, r, ks + j, &x) ||
-                  !ii_mma_operand_value(machine, &b, ks + j, c, &y)) {
+              if (!ii_mma_operand_value(machine, &t.a, r, ks + j, &x) ||
+                  !ii_mma_operand_value(machine, &t.b, ks + j, c, &y)) {
                 free(result);
                 return 0;
               }
@@ -719,29 +993,31 @@ static int ii_gpu_tensor_mma(IRInterpMachine *machine, IIFrame *frame,
             float f;
             for (unsigned j = 0; j < 32; j++) {
               double x = 0.0, y = 0.0;
-              if (!ii_mma_operand_value(machine, &a, r, kb * 32u + j, &x) ||
-                  !ii_mma_operand_value(machine, &b, kb * 32u + j, c, &y)) {
+              if (!ii_mma_operand_value(machine, &t.a, r, kb * 32u + j, &x) ||
+                  !ii_mma_operand_value(machine, &t.b, kb * 32u + j, c, &y)) {
                 free(result);
                 return 0;
               }
               dot += (long long)x * (long long)y;
             }
-            if (!ii_mma_scale(machine, a_scale,
+            if (!ii_mma_scale(machine, t.a_scale,
                               (unsigned long long)r * a_ld + kb,
                               desc->a_scale_element, &sa) ||
-                !ii_mma_scale(machine, b_scale,
+                !ii_mma_scale(machine, t.b_scale,
                               (unsigned long long)c * b_ld + kb,
                               desc->b_scale_element, &sb)) {
               free(result);
               return 0;
             }
-            f = (float)dot;
+            f = 12582912.0f + (float)dot;
             if (order == IR_BLOCK_SCALE_B_FIRST) {
-              acc = ii_fma_f32(f * (float)sb, (float)sa, acc);
+              float t = ii_fma_f32(f, (float)sb, -(12582912.0f * (float)sb));
+              acc = ii_fma_f32(t, (float)sa, acc);
             } else if (order == IR_BLOCK_SCALE_A_FIRST) {
-              acc = ii_fma_f32(f * (float)sa, (float)sb, acc);
+              float t = ii_fma_f32(f, (float)sa, -(12582912.0f * (float)sa));
+              acc = ii_fma_f32(t, (float)sb, acc);
             } else {
-              acc = ii_fma_f32(f, (float)sa * (float)sb, acc);
+              acc = ii_fma_f32(f - 12582912.0f, (float)sa * (float)sb, acc);
             }
           }
         }
@@ -752,9 +1028,9 @@ static int ii_gpu_tensor_mma(IRInterpMachine *machine, IIFrame *frame,
       for (unsigned c = 0; c < desc->n; c++) {
         unsigned long long position =
             desc->d_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR
-                ? (unsigned long long)r * stride[3] + c
-                : (unsigned long long)c * stride[3] + r;
-        if (!ii_gpu_write(machine, pointer[3] + position * 4u, 4,
+                ? (unsigned long long)r * t.stride[3] + c
+                : (unsigned long long)c * t.stride[3] + r;
+        if (!ii_gpu_write(machine, t.pointer[3] + position * 4u, 4,
                           (const unsigned char *)&result[(size_t)r * desc->n +
                                                          c])) {
           free(result);
@@ -767,9 +1043,50 @@ static int ii_gpu_tensor_mma(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-static IRInterpValue ii_subgroup_combine(MtlcIntrinsic intrinsic,
+static IRInterpValue ii_subgroup_combine(IRInterpMachine *machine,
+                                         MtlcIntrinsic intrinsic,
                                          const IRInterpValue *a,
                                          const IRInterpValue *b) {
+  if (machine->num && (a->term || b->term)) {
+    NumTerm args[2];
+    NumOp op;
+    int is_float = 1;
+    switch (intrinsic) {
+    case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32:
+    case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32:
+    case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32:
+      op = NUM_FADD;
+      break;
+    case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32:
+      op = NUM_FMIN;
+      break;
+    case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32:
+      op = NUM_FMAX;
+      break;
+    default:
+      is_float = 0;
+      op = NUM_ADD;
+      break;
+    }
+    if (!is_float && intrinsic != MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32 &&
+        intrinsic != MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 &&
+        intrinsic != MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32) {
+      ii_misuse();
+      return ii_int_value(0);
+    }
+    if (is_float) {
+      args[0] = ii_sym_term(machine, a, 32, 1);
+      args[1] = ii_sym_term(machine, b, 32, 1);
+      return ii_sym_value(machine, num_op(machine->num, op, 32, 0, args, 2), 1);
+    }
+    args[0] = num_resize(machine->num, ii_sym_term(machine, a, 64, 0), 32, 0);
+    args[1] = num_resize(machine->num, ii_sym_term(machine, b, 64, 0), 32, 0);
+    return ii_sym_value(
+        machine,
+        num_resize(machine->num, num_op(machine->num, NUM_ADD, 32, 0, args, 2),
+                   64, 0),
+        0);
+  }
   switch (intrinsic) {
   case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32:
   case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32:
@@ -846,6 +1163,9 @@ static int ii_gpu_subgroup_collective(IRInterpMachine *machine,
     unsigned long long word = 0;
     for (long long o = 0; o < lanes; o++) {
       int set = values[o].is_float ? values[o].f != 0.0 : values[o].i != 0;
+      if (values[o].term && machine->num) {
+        ii_misuse();
+      }
       any |= set;
       all &= set;
       if (set) word |= 1ULL << o;
@@ -869,7 +1189,7 @@ static int ii_gpu_subgroup_collective(IRInterpMachine *machine,
       for (long long l = 0; l < lanes; l++) round[l] = results[l];
       for (long long l = 0; l < lanes; l++) {
         if (l + offset < lanes) {
-          results[l] = ii_subgroup_combine(op, &round[l], &round[l + offset]);
+          results[l] = ii_subgroup_combine(machine, op, &round[l], &round[l + offset]);
         }
       }
     }
@@ -884,7 +1204,7 @@ static int ii_gpu_subgroup_collective(IRInterpMachine *machine,
       for (long long l = 0; l < lanes; l++) round[l] = results[l];
       for (long long l = 0; l < lanes; l++) {
         if (l >= offset) {
-          results[l] = ii_subgroup_combine(op, &round[l], &round[l - offset]);
+          results[l] = ii_subgroup_combine(machine, op, &round[l], &round[l - offset]);
         }
       }
     }
@@ -1273,10 +1593,22 @@ static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
   return ok;
 }
 
+static int ii_extern_numerics_harness(IRInterpMachine *machine,
+                                      const char *name,
+                                      const IRInterpValue *args,
+                                      size_t arg_count,
+                                      IRInterpValue *result);
+
 static int ii_extern_numerics(IRInterpMachine *machine, const char *name,
                               const IRInterpValue *args, size_t arg_count,
                               IRInterpValue *result) {
-  if (strcmp(name, "numerics_tensor_map_2d") == 0) {
+  if (strncmp(name, "numerics_", 9) != 0) {
+    return II_EXTERN_UNHANDLED;
+  }
+  if (strcmp(name, "numerics_tensor_map_2d") != 0) {
+    return ii_extern_numerics_harness(machine, name, args, arg_count, result);
+  }
+  {
     IITensorMap map;
     if (arg_count < 9) {
       return -1;
@@ -1304,5 +1636,4 @@ static int ii_extern_numerics(IRInterpMachine *machine, const char *name,
     *result = ii_int_value(0);
     return 1;
   }
-  return II_EXTERN_UNHANDLED;
 }

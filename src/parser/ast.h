@@ -137,6 +137,7 @@ typedef struct {
   int is_naked;
   int is_interrupt;
   int is_rule;
+  char *numerics_contract;
   int rewrite_role;
   char **effects_with;
   size_t effects_with_count;

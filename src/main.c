@@ -44,6 +44,7 @@
 #include "ir/ir_trace.h"
 #include "ir/ir_explain_ledger.h"
 #include "ir/ir_interp.h"
+#include "ir/ir_numerics_check.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -5065,6 +5066,28 @@ static void compile_publish_optimizer_costs(void) {
   ir_opt_cost_describe(&cost);
 }
 
+static int compile_check_numerics(IRProgram *ir_program,
+                                  const CompilerOptions *options) {
+  IRNumericsFailure failure;
+  char *report = NULL;
+  if (options->test_mode || !ir_numerics_program_has_contracts(ir_program)) {
+    return 1;
+  }
+  if (!ir_numerics_check(ir_program, &failure, &report)) {
+    fprintf(stderr, "error[%s]: %s\n  --> %s\n", failure.code,
+            failure.message,
+            options->input_filename ? options->input_filename : "?");
+    free(report);
+    return 0;
+  }
+  if (report && (options->explain || options->report_gpu_types)) {
+    fputs(report, stderr);
+  }
+  free(report);
+  ir_program_drop_numerics_harnesses(ir_program);
+  return 1;
+}
+
 static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
                                const CompilerOptions *options) {
   IROptimizeOptions ir_optimize_options = {0};
@@ -5136,6 +5159,9 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
     if (!ir_optimize_had_user_error()) {
       mettle_compiler_ice_report("IR optimization failed", NULL);
     }
+    return 0;
+  }
+  if (!compile_check_numerics(ir_program, options)) {
     return 0;
   }
   if (options->ml_opt) {
@@ -5382,7 +5408,7 @@ static int compile_optimize_device_ir(IRProgram *ir_program, ASTNode *program,
   double phase_start;
   int opt_ok;
   if (!options->optimize) {
-    return 1;
+    return compile_check_numerics(ir_program, options);
   }
   compiler_set_phase(PROFILE_PHASE_IR_OPTIMIZATION);
   phase_start = compiler_profile_begin(profile);

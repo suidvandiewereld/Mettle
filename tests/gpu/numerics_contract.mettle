@@ -1,0 +1,94 @@
+import "std/numerics";
+import "std/mem";
+
+const Q4_TILES: Numerics = { k_order: k_ascending };
+const SOFT_ROWS: Numerics = { k_order: k_ascending };
+
+@numerics(Q4_TILES) kernel(block = 32) q4_whole(a: int8*, b: uint8*, d: float32*,
+                                               sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k64,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+}
+
+@numerics(Q4_TILES) kernel(block = 32) q4_halves(a: int8*, b: uint8*, d: float32*,
+                                                sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k32,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+  tensor_mma(a + 32, b + 16, d, d, shape: m32n32k32,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa + 1, b_scale: sb + 1,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldc: 32, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+}
+
+@numerics(Q4_TILES) fn q4_tiles_agree() {
+  var a: int8* = (int8*)numerics_input(2048);
+  var b: uint8* = numerics_input(1024);
+  var sa: float32* = (float32*)numerics_input(256);
+  var sb: uint16* = (uint16*)numerics_input(128);
+  var whole: float32* = (float32*)calloc(1024, 4);
+  var halves: float32* = (float32*)calloc(1024, 4);
+  dispatch q4_whole[grid: (1, 1, 1), block: (32, 1, 1)](a, b, whole, sa, sb);
+  dispatch q4_halves[grid: (1, 1, 1), block: (32, 1, 1)](a, b, halves, sa, sb);
+  numerics_same(whole, halves, 32, 32, 32);
+}
+
+@inline fn larger(a: float32, b: float32) -> float32 {
+  if (a > b) { return a; }
+  return b;
+}
+
+@numerics(SOFT_ROWS) kernel(block = 32) soft_lane_major(x: float32*, out: float32*) {
+  var lane: int32 = thread.x;
+  var top: float32 = -1.0e30;
+  for k in 0..8 {
+    top = larger(top, x[lane * 8 + k]);
+  }
+  var total: float32 = 0.0;
+  for k in 0..8 {
+    total = total + expf(x[lane * 8 + k] - top);
+  }
+  out[lane] = total;
+}
+
+@numerics(SOFT_ROWS) kernel(block = 64) soft_two_rows(x: float32*, out: float32*) {
+  var t: int32 = thread.x;
+  if (t < 32) {
+    var top: float32 = -1.0e30;
+    for k in 0..8 {
+      top = larger(top, x[t * 8 + k]);
+    }
+    var total: float32 = 0.0;
+    for k in 0..8 {
+      total = total + expf(x[t * 8 + k] - top);
+    }
+    out[t] = total;
+  }
+}
+
+@numerics(SOFT_ROWS) fn soft_rows_agree() {
+  var x: float32* = (float32*)numerics_input(1024);
+  var one: float32* = (float32*)calloc(32, 4);
+  var two: float32* = (float32*)calloc(32, 4);
+  dispatch soft_lane_major[grid: (1, 1, 1), block: (32, 1, 1)](x, one);
+  dispatch soft_two_rows[grid: (1, 1, 1), block: (64, 1, 1)](x, two);
+  numerics_same(one, two, 1, 32, 32);
+}

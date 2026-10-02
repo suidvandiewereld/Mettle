@@ -1,0 +1,7 @@
+import "std/numerics";
+
+const LIMIT: int32 = 4;
+
+@numerics(LIMIT) kernel(block = 32) scaled(x: float32*) {
+  x[thread.x] = x[thread.x] * 2.0;
+}

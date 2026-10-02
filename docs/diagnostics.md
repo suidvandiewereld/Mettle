@@ -207,6 +207,17 @@ Register tiles:
 
 [GPU offload](gpu.md#register-tiles) covers the G codes in context.
 
+Numerics contracts:
+
+| Code | Meaning |
+|------|---------|
+| C0001 | Two kernels of a numerics contract compute an output differently |
+| C0002 | The numerics check cannot follow a computation |
+| C0003 | A numerics contract is unproven for a kernel |
+| C0004 | A kernel walks K in an order its contract does not allow |
+
+[GPU offload](gpu.md#numerics-contracts) covers the C codes in context.
+
 ## JSON output
 
 `--error-format=json` writes one JSON object per diagnostic to stderr, for
