@@ -1284,6 +1284,12 @@ static int type_checker_parse_view_layout(TypeChecker *checker, const char *name
     plain[head] = '\0';
     base = type_checker_get_type_by_name(checker, plain);
     free(plain);
+    if (base && base->kind == TYPE_ARRAY && base->base_type &&
+        base->array_size > 0 && layout == VIEW_LAYOUT_FRAGMENT_C) {
+      *out = type_checker_row_vector_of(checker, base->base_type,
+                                        base->array_size, name);
+      return 1;
+    }
     if (!base || base->kind != TYPE_SLICE) {
       *out = NULL;
       return 1;
@@ -2147,6 +2153,11 @@ static int assignable_narrows_float(Type *dest_type, ASTNode *src_expr) {
 int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
                                     Type *src_type, ASTNode *src_expr) {
   long long folded = 0;
+  int tile = type_checker_tile_assignable(checker, dest_type, src_type,
+                                          src_expr);
+  if (tile >= 0) {
+    return tile;
+  }
 
   if (assignable_widens_effects(checker, dest_type, src_type, src_expr)) {
     const char *named = type_checker_function_value_name(checker, src_expr);

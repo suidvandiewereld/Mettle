@@ -2729,6 +2729,103 @@ static long long ptxas_bytes_before(const char *line, const char *label) {
   return atoll(cursor);
 }
 
+static int function_holds_tiles(const IRFunction *function) {
+  for (size_t i = 0; function && i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_ADDRESS_SPACE_ALLOC &&
+        ir_tile_operand_is_tile(in->value_type)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int program_tile_kernel(const IRProgram *program, const char *name) {
+  for (size_t i = 0; program && name && i < program->function_count; i++) {
+    const IRFunction *function = program->functions[i];
+    if (function && function->name && strcmp(function->name, name) == 0) {
+      return function_holds_tiles(function);
+    }
+  }
+  return 0;
+}
+
+static int confirm_tile_residency(const IRProgram *program,
+                                  const char *ptx_path, const char *arch,
+                                  const char *source) {
+  char cubin[512];
+  char command[1200];
+  char line[512];
+  char entry[256] = {0};
+  int any = 0;
+  int ok = 1;
+  for (size_t i = 0; program && i < program->function_count; i++) {
+    if (program->functions[i] && program->functions[i]->is_kernel &&
+        function_holds_tiles(program->functions[i])) {
+      any = 1;
+    }
+  }
+  if (!any) {
+    return 1;
+  }
+  if (!gpu_detect_ptxas_version()) {
+    fprintf(stderr,
+            "note: the register tiles in '%s' are unconfirmed: ptxas is not "
+            "on PATH, so nothing checked that the assembler kept them in "
+            "registers\n",
+            source ? source : "?");
+    return 1;
+  }
+  char real_arch[64];
+  snprintf(real_arch, sizeof(real_arch), "%s", arch ? arch : "sm_121a");
+  if (strncmp(real_arch, "compute_", 8) == 0) {
+    snprintf(real_arch, sizeof(real_arch), "sm_%s", (arch ? arch : "") + 8);
+  }
+  snprintf(cubin, sizeof(cubin), "%s.tiles.cubin", ptx_path);
+  snprintf(command, sizeof(command), "ptxas -v -arch=%s \"%s\" -o \"%s\" 2>&1",
+           real_arch, ptx_path, cubin);
+#ifdef _WIN32
+  FILE *pipe = _popen(command, "r");
+#else
+  FILE *pipe = popen(command, "r");
+#endif
+  if (!pipe) {
+    fprintf(stderr,
+            "note: the register tiles in '%s' are unconfirmed: ptxas could "
+            "not be started\n",
+            source ? source : "?");
+    return 1;
+  }
+  while (fgets(line, sizeof(line), pipe)) {
+    char name[256];
+    if (sscanf(line, " ptxas info : Compiling entry function '%255[^']'",
+               name) == 1) {
+      snprintf(entry, sizeof(entry), "%s", name);
+      continue;
+    }
+    long long stores = ptxas_bytes_before(line, "bytes spill stores");
+    if (stores >= 0 && entry[0] && program_tile_kernel(program, entry)) {
+      long long loads = ptxas_bytes_before(line, "bytes spill loads");
+      if (stores > 0 || loads > 0) {
+        fprintf(stderr,
+                "error[G0002]: ptxas spilled kernel '%s' (%lld bytes of spill "
+                "stores, %lld of spill loads) and it holds register tiles; "
+                "tiles never spill, so shrink a tile or what is live beside it\n"
+                "  --> %s\n",
+                entry, stores, loads > 0 ? loads : 0, source ? source : "?");
+        ok = 0;
+      }
+    }
+  }
+#ifdef _WIN32
+  _pclose(pipe);
+#else
+  pclose(pipe);
+#endif
+  remove(cubin);
+  return ok;
+}
+
 static void report_ptx_occupancy(const IRProgram *program,
                                  const char *ptx_path, const char *arch,
                                  int sm_count, int sm_count_is_local) {
@@ -5346,13 +5443,28 @@ static int compile_emit_ptx(IRProgram *ir_program, ASTNode *program,
                         &ptx_err);
   fclose(ptx_out);
   if (!ok) {
-    fprintf(stderr, "Error: PTX emission failed: %s\n",
-            ptx_err ? ptx_err : "unknown");
+    if (ptx_err && strlen(ptx_err) > 7 && ptx_err[0] >= 'A' &&
+        ptx_err[0] <= 'Z' && ptx_err[5] == ':' && ptx_err[6] == ' ') {
+      fprintf(stderr, "error[%.5s]: %s\n  --> %s\n", ptx_err, ptx_err + 7,
+              input_filename ? input_filename : "?");
+    } else {
+      fprintf(stderr, "Error: PTX emission failed: %s\n",
+              ptx_err ? ptx_err : "unknown");
+    }
     free(ptx_err);
     return 1;
   }
   if (options->explain && options->optimize) {
     ir_explain_target_flush("PTX");
+  }
+  if (!confirm_tile_residency(ir_program, output_filename, options->ptx_target,
+                              input_filename)) {
+    remove(output_filename);
+    return 1;
+  }
+  if ((options->explain || options->report_gpu_types) &&
+      ptx_tile_report_text()[0]) {
+    printf("register tiles\n%s\n", ptx_tile_report_text());
   }
   printf("Generated PTX: %s\n", output_filename);
   if (!compile_write_kernel_declarations(program, options, input_filename,

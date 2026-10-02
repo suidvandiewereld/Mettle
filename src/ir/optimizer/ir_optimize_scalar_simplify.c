@@ -422,6 +422,19 @@ static int ir_propagate_instruction_operands(IRTempValueMap *temp_map,
   }
 
   switch (instruction->op) {
+  case IR_OP_TILE:
+    if (!ir_try_propagate_operand(temp_map, symbol_map, &instruction->dest,
+                                  changed)) {
+      return 0;
+    }
+    for (size_t i = 0; i < instruction->argument_count; i++) {
+      if (!ir_try_propagate_operand(temp_map, symbol_map,
+                                    &instruction->arguments[i], changed)) {
+        return 0;
+      }
+    }
+    break;
+
   case IR_OP_ASYNC_COPY:
   case IR_OP_TENSOR_EPILOGUE:
     for (size_t i = 0; i < instruction->argument_count; i++) {
@@ -3074,6 +3087,7 @@ static const int IR_HAS_SIDE_EFFECT[IR_OP_KIND_COUNT] = {
     [IR_OP_TENSOR_MATMUL] = 1,
     [IR_OP_TENSOR_EPILOGUE] = 1,
     [IR_OP_TENSOR_COMMIT] = 1,
+    [IR_OP_TILE] = 1,
     [IR_OP_STORE] = 1,
     [IR_OP_CALL] = 1,
     [IR_OP_CALL_INDIRECT] = 1,

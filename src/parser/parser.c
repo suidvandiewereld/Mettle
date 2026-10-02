@@ -3411,6 +3411,9 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
   snprintf(full_type, full_len, "%s[%s]", type_name, size_text);
   free(type_name);
   free(size_text);
+  if (parser_at_contextual_keyword(parser, "layout", TOKEN_IDENTIFIER)) {
+    return parser_parse_layout_suffix(parser, full_type);
+  }
   return parser_parse_array_suffix(parser, full_type);
 }
 
@@ -4798,7 +4801,9 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
           parser_identifier_name_is(expr, "tensor_mma") ||
           parser_identifier_name_is(expr, "tensor_matmul") ||
           parser_identifier_name_is(expr, "tensor_epilogue") ||
-          parser_identifier_name_is(expr, "tensor_transfer_workgroup");
+          parser_identifier_name_is(expr, "tensor_transfer_workgroup") ||
+          parser_identifier_name_is(expr, "tile_load") ||
+          parser_identifier_name_is(expr, "tile_store");
       int atomic_named_call =
           parser_identifier_name_is(expr, "atomic_fetch_add") ||
           parser_identifier_name_is(expr, "atomic_fetch_sub") ||

@@ -245,6 +245,20 @@ typedef struct {
   size_t declaration_count;
 } Program;
 
+typedef enum {
+  TILE_BUILTIN_NONE = 0,
+  TILE_BUILTIN_LOAD,
+  TILE_BUILTIN_STORE,
+  TILE_BUILTIN_ROW,
+  TILE_BUILTIN_COL,
+  TILE_BUILTIN_ROW_MAX,
+  TILE_BUILTIN_ROW_SUM,
+  TILE_BUILTIN_SELECT,
+  TILE_BUILTIN_MAX,
+  TILE_BUILTIN_MIN,
+  TILE_BUILTIN_MATH
+} TileBuiltin;
+
 typedef struct {
   char *function_name;
   ASTNode **arguments;
@@ -274,6 +288,9 @@ typedef struct {
   size_t tensor_transfer_coordinate_arguments[MTLC_TENSOR_MAX_RANK];
   int is_tensor_mma;
   int is_tensor_matmul;
+  int tile_builtin;
+  unsigned tensor_tile_mask;
+  int tensor_c_zero;
   MtlcTensorMmaDesc tensor_mma_desc;
   size_t tensor_metadata_argument;
   size_t tensor_a_scale_argument;

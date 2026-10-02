@@ -87,10 +87,23 @@ typedef struct {
   long long last_lane;
 } IIGpuUniform;
 
+typedef struct {
+  size_t line;
+  unsigned long long hash;
+  long long lane;
+} IITileMark;
+
+typedef struct {
+  IITileMark *marks;
+  size_t count;
+  size_t capacity;
+} IITileTrace;
+
 typedef struct IIGpuThread {
   int started;
   int suspended;
   int finished;
+  size_t tile_cursor;
   size_t pc;
   size_t barrier_site;
   size_t barrier_line;
@@ -113,6 +126,8 @@ typedef struct {
   IIGpuUniform uniforms[II_GPU_MAX_UNIFORMS];
   size_t uniform_count;
   long long threads_run;
+  IITileTrace *tile_traces;
+  size_t tile_trace_warps;
 } IIGpuGrid;
 
 struct IRInterpMachine {
@@ -181,6 +196,7 @@ struct IRInterpMachine {
 
   IIGpuGrid gpu;
   IIGpuThread *gpu_resume;
+  IIGpuThread *gpu_current;
 
   int count_enabled;
   struct {
@@ -4911,6 +4927,19 @@ static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
     ii_fail(machine, IR_INTERP_TRAP, "device storage with no size");
     return 0;
   }
+  if (insn->address_space == MTLC_ADDRESS_SPACE_PRIVATE &&
+      ir_tile_operand_is_tile(insn->value_type) && insn->dest.name) {
+    IIVar *held = ii_env_find(&frame->env, insn->dest.name);
+    if (held && !held->value.is_float && held->value.i) {
+      long long offset = 0;
+      IIBuffer *buffer = ii_addr_to_buffer(
+          machine, (unsigned long long)held->value.i, 1, &offset);
+      if (buffer && offset == 0 && buffer->size == bytes &&
+          buffer->device_space == MTLC_ADDRESS_SPACE_PRIVATE) {
+        return 1;
+      }
+    }
+  }
   if (insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP) {
     for (size_t i = 0; i < gpu->shared_count; i++) {
       if (insn->dest.name && gpu->shared[i].name &&
@@ -5112,6 +5141,8 @@ static const char *ii_gpu_launch_kernel_name(IIFrame *frame,
   return NULL;
 }
 
+#include "ir_interp_tile.inc"
+
 static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
                             const IRInterpValue *args, size_t nargs) {
   IIGpuGrid *gpu = &machine->gpu;
@@ -5136,6 +5167,10 @@ static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
   for (long long t = 0; t < count; t++) {
     threads[t].frame = &frames[t];
   }
+  gpu->tile_trace_warps = (size_t)((count + II_GPU_SUBGROUP - 1) /
+                                   II_GPU_SUBGROUP);
+  gpu->tile_traces = (IITileTrace *)calloc(gpu->tile_trace_warps,
+                                           sizeof(IITileTrace));
 
   while (ok) {
     long long suspended = 0;
@@ -5153,8 +5188,13 @@ static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
       gpu->tid[1] = (t / block_x) % block_y;
       gpu->tid[2] = t / (block_x * block_y);
       gpu->lane = t;
+      if (gpu->tile_traces && t % II_GPU_SUBGROUP == 0) {
+        gpu->tile_traces[t / II_GPU_SUBGROUP].count = 0;
+      }
+      threads[t].tile_cursor = 0;
       threads[t].suspended = 0;
       machine->gpu_resume = &threads[t];
+      machine->gpu_current = &threads[t];
       if (!ii_exec_function(machine, kernel, args, nargs, &thread_result)) {
         machine->gpu_resume = NULL;
         ok = 0;
@@ -5199,6 +5239,13 @@ static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
   }
 
   gpu->threads_run += count;
+  machine->gpu_current = NULL;
+  for (size_t w = 0; gpu->tile_traces && w < gpu->tile_trace_warps; w++) {
+    free(gpu->tile_traces[w].marks);
+  }
+  free(gpu->tile_traces);
+  gpu->tile_traces = NULL;
+  gpu->tile_trace_warps = 0;
   free(threads);
   free(frames);
   return ok;
@@ -6399,6 +6446,13 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     }
     case IR_OP_ADDRESS_SPACE_ALLOC: {
       if (!ii_gpu_address_space_alloc(machine, &frame, insn)) {
+        goto done;
+      }
+      pc++;
+      break;
+    }
+    case IR_OP_TILE: {
+      if (!ii_exec_tile(machine, &frame, insn)) {
         goto done;
       }
       pc++;

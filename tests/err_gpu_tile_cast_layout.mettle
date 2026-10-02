@@ -1,0 +1,5 @@
+kernel(block = 32) wrong_cast(out: float32*) {
+  var c: float32[16, 16] layout fragment_c = 1.0;
+  var b: float16[16, 16] layout fragment_b = (float16[16, 16] layout fragment_b)c;
+  tile_store(out, c, ld: 16);
+}

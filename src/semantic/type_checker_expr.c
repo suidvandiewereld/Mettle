@@ -1371,6 +1371,18 @@ int type_checker_tensor_pointer_matches(Type *type,
          type->base_type->kind == type_checker_tensor_storage_kind(element);
 }
 
+int type_checker_tensor_view_matches(Type *type, MtlcTensorElement element) {
+  TypeKind kind;
+  if (!type || type->kind != TYPE_SLICE || !type->view_extents[0] ||
+      type->view_rank != 2 || type_checker_is_tile(type) || !type->base_type)
+    return 0;
+  kind = type->base_type->kind;
+  if (kind == type_checker_tensor_storage_kind(element))
+    return 1;
+  return (element == MTLC_TENSOR_ELEMENT_FLOAT16 && kind == TYPE_FLOAT16) ||
+         (element == MTLC_TENSOR_ELEMENT_BFLOAT16 && kind == TYPE_BFLOAT16);
+}
+
 static int type_checker_tensor_dimension_option(const char *option,
                                                 const char *prefix,
                                                 unsigned *dimension) {
@@ -2157,7 +2169,23 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
       desc.a_element, desc.b_element, desc.accumulator_element,
       desc.result_element};
   const char *operand_names[4] = {"A", "B", "C", "D"};
+  if (is_matmul) {
+    call->tensor_c_zero = 0;
+    call->tensor_tile_mask = 0;
+  } else if (!type_checker_tile_mma_operands(checker, expression, call, &desc,
+                                             operand_types)) {
+    return NULL;
+  }
   for (size_t i = 0; i < 4; i++) {
+    if ((call->tensor_tile_mask & (1u << i)) ||
+        (i == 2 && call->tensor_c_zero)) {
+      continue;
+    }
+    if (i == 1 && call->tensor_tile_mask &&
+        type_checker_tensor_view_matches(operand_types[i],
+                                         expected_elements[i])) {
+      continue;
+    }
     if (!type_checker_tensor_pointer_matches(operand_types[i],
                                              expected_elements[i])) {
       type_checker_set_error_at_location(
@@ -2203,7 +2231,7 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
         "tensor_matmul has no C row scale; use tensor_mma");
     return NULL;
   }
-  if (needs_c_scale) {
+  if (needs_c_scale && !(call->tensor_tile_mask & 16u)) {
     Type *type = type_checker_infer_type(
         checker, call->arguments[call->tensor_c_scale_argument]);
     if (!type_checker_tensor_pointer_matches(type,
@@ -2697,6 +2725,10 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
                                               operand_type)) {
         return NULL;
       }
+      if (type_checker_is_tile(operand_type)) {
+        return type_checker_tile_unary(checker, "&", operand_type,
+                                       expression->location);
+      }
 
       const char *operand_name =
           operand_type->name ? operand_type->name : "unknown";
@@ -2766,6 +2798,10 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
     if (type_checker_reject_comptime_escape(checker, unop->operand->location,
                                             operand_type)) {
       return NULL;
+    }
+    if (type_checker_is_tile(operand_type)) {
+      return type_checker_tile_unary(checker, unop->operator, operand_type,
+                                     expression->location);
     }
 
     if (strcmp(unop->operator, "+") == 0 || strcmp(unop->operator, "-") == 0) {
@@ -3287,6 +3323,10 @@ for (size_t i = 0; i < call->argument_count; i++) {
           checker, call->arguments[i]->location, arg_type)) {
     return 0;
   }
+  if (type_checker_refuse_tile_argument(checker, call->arguments[i], arg_type,
+                                        call->function_name)) {
+    return 0;
+  }
 
   Type *param_type = func_symbol->data.function.parameter_types[i];
   int is_null_pointer_arg =
@@ -3482,6 +3522,14 @@ static Type *type_checker_infer_call(TypeChecker *checker,
     Type *call_target = checker->aggregate_target_type;
     checker->aggregate_target_type = NULL;
     CallExpression *call = (CallExpression *)expression->data;
+    {
+      int tile_handled = 0;
+      Type *tile_result =
+          type_checker_tile_builtin(checker, expression, call, &tile_handled);
+      if (tile_handled) {
+        return tile_result;
+      }
+    }
     if (call && call->function_name) {
       int builtin_handled = 0;
       Type *builtin = type_checker_infer_named_builtin(
@@ -3924,6 +3972,15 @@ static Type *type_checker_infer_index(TypeChecker *checker,
     if (!array_type) {
       return NULL;
     }
+    if (type_checker_is_tile(array_type)) {
+      type_checker_set_error_at_location(
+          checker, expression->location,
+          "'%s' is spread over a subgroup's registers and has no element "
+          "address; work on every element with tile_row, tile_col and "
+          "select",
+          array_type->name);
+      return NULL;
+    }
 
     if (array_type->kind == TYPE_SEQUENCE) {
       ComptimeValue element = comptime_none();
@@ -4190,6 +4247,18 @@ static Type *type_checker_infer_cast(TypeChecker *checker,
       return NULL;
     }
 
+    if (operand_type->kind == TYPE_POINTER &&
+        target_type->kind == TYPE_SLICE && target_type->view_extents[0] &&
+        !type_checker_is_tile(target_type)) {
+      return type_checker_view_cast(checker, expression, cast_expr->operand,
+                                    operand_type, target_type);
+    }
+    if (type_checker_is_tile(operand_type) ||
+        type_checker_is_tile(target_type)) {
+      return type_checker_tile_cast(checker, expression, operand_type,
+                                    target_type);
+    }
+
     if (!type_checker_is_cast_valid(operand_type, target_type)) {
       char error_msg[512];
       snprintf(error_msg, sizeof(error_msg),
@@ -4366,6 +4435,11 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
   }
 
   const char *op = binop->operator;
+
+  if (type_checker_is_tile(left_type) || type_checker_is_tile(right_type)) {
+    return type_checker_tile_binary(checker, binop, left_type, right_type,
+                                    location);
+  }
 
   if (left_type->refined_base && right_type->refined_base &&
       !type_checker_types_equal(left_type, right_type) &&

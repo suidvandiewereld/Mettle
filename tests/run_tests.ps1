@@ -2652,6 +2652,24 @@ $cases = @(
   @{ Name = "err_gpu_layout_mismatch"; Path = "tests/err_gpu_layout_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this wants elements laid out 'row' and these are laid out 'swizzle128'" },
   @{ Name = "err_gpu_bank_conflict"; Path = "tests/err_gpu_bank_conflict.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "work items 0 and 1 both land in bank 0, so this access is two accesses" },
   @{ Name = "err_gpu_view_index_unbounded"; Path = "tests/err_gpu_view_index_unbounded.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this index is not bounded to 0..31" },
+  @{ Name = "gpu_register_tiles"; Path = "tests/gpu/register_tiles.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("2 passed")
+     OutputMustNotMatch = @("failed") },
+  @{ Name = "err_gpu_tile_layout_mismatch"; Path = "tests/err_gpu_tile_layout_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "A operand for this descriptor is 'float16.16,16. layout fragment_a'; this is 'float32.16,16. layout fragment_c'" },
+  @{ Name = "err_gpu_tile_cast_layout"; Path = "tests/err_gpu_tile_cast_layout.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "is laid out fragment_c and 'float16.16,16. layout fragment_b' is laid out fragment_b" },
+  @{ Name = "err_gpu_tile_spill"; Path = "tests/err_gpu_tile_spill.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "error.G0001.: kernel 'too_many_registers' holds 256 tile registers at line 3, over its budget of 255" },
+  @{ Name = "err_gpu_tile_outside_kernel"; Path = "tests/err_gpu_tile_outside_kernel.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "tile 't' is a subgroup's value held in registers, so it exists only in a kernel body" },
+  @{ Name = "err_gpu_tile_index"; Path = "tests/err_gpu_tile_index.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "is spread over a subgroup's registers and has no element address" },
+  @{ Name = "err_gpu_tile_parameter"; Path = "tests/err_gpu_tile_parameter.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "parameter 't' of 'take' is 'float32.16,16. layout fragment_c': a tile is a subgroup's value in registers and does not cross a call" },
+  @{ Name = "err_gpu_tile_varying_scalar"; Path = "tests/err_gpu_tile_varying_scalar.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "a scalar or address operand of tile operation 'mul' is not the same in every work item of the subgroup" },
+  @{ Name = "err_gpu_tile_divergent"; Path = "tests/err_gpu_tile_divergent.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "tile operation is control-dependent on a work-item-varying condition" },
+  @{ Name = "err_gpu_tile_shape"; Path = "tests/err_gpu_tile_shape.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "a fragment_c tile is 'T.M, N. layout fragment_c' with M a multiple of 16" },
+  @{ Name = "err_gpu_tile_lanes_disagree"; Path = "tests/err_gpu_tile_lanes_disagree.mettle"; ShouldSucceed = $false
+     Args = @("test")
+     SkipBinaryCheck = $true
+     Pattern = "the tile written at line 7 differs between work items 0 and 4 of one subgroup" },
   # Uniformity as a declared type, and the group effects that follow from it.
   @{ Name = "gpu_uniform_and_collectives"; Path = "tests/gpu/uniform_and_collectives.mettle"; ShouldSucceed = $true
      Args = @("test")
@@ -17088,6 +17106,57 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "ptx_emit_gb10_tensor_block_scaled_i8" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $rtPtx = Join-Path $tmpDir "ptx_emit_gb10_register_tiles.ptx"
+  $rtCubin = Join-Path $tmpDir "ptx_emit_gb10_register_tiles.cubin"
+  $rtOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/register_tiles.mettle -o $rtPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "register tile emit failed: $rtOut" }
+  $rtText = Get-Content -Raw $rtPtx
+  $rtRows = [regex]::Match($rtText,
+    "(?s)\.visible \.entry tile_rows\(.*?(?=\.visible \.entry|\z)").Value
+  $rtStep = [regex]::Match($rtText,
+    "(?s)\.visible \.entry tile_attention_step\(.*?(?=\.visible \.entry|\z)").Value
+  if (-not $rtRows -or -not $rtStep -or
+      [regex]::Matches($rtRows, 'shfl\.sync\.bfly\.b32').Count -ne 8 -or
+      [regex]::Matches($rtStep, 'mma\.sync\.aligned\.m16n8k16\.row\.col\.f32\.f16\.f16\.f32').Count -ne 32 -or
+      [regex]::Matches($rtStep, 'ldmatrix\.sync\.aligned\.m8n8\.x4\.shared\.b16').Count -ne 8 -or
+      [regex]::Matches($rtStep, 'ldmatrix\.sync\.aligned\.m8n8\.x4\.trans\.shared\.b16').Count -ne 8 -or
+      [regex]::Matches($rtStep, 'cvt\.rn\.f16x2\.f32').Count -ne 24 -or
+      $rtStep -match '\.local' -or $rtRows -match '\.local' -or
+      $rtRows -match 'add\.f32|mul\.f32|sub\.f32') {
+    throw "register tile PTX contract mismatch"
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $rtAsm = & $ptxas.Source -v -arch=sm_121a $rtPtx -o $rtCubin 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected register tile PTX: $rtAsm" }
+      if ($rtAsm -match '(?m)^\s*[1-9][0-9]* bytes spill (stores|loads)') {
+        throw "register tile kernels spilled: $rtAsm"
+      }
+    } else {
+      Write-Host "[SKIP] ptx_emit_gb10_register_tiles ptxas assembly (toolkit lacks sm_121a)"
+    }
+  } else {
+    Write-Host "[SKIP] ptx_emit_gb10_register_tiles ptxas assembly (ptxas not found)"
+  }
+  $rtReport = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 --report-gpu-types `
+    tests/gpu/register_tiles.mettle -o $rtPtx 2>&1 | Out-String
+  if ($rtReport -notmatch 'tile_attention_step: peak [0-9]+ of 255 registers a work item' -or
+      $rtReport -notmatch 'qt +float16\[16,64\] layout fragment_a +16 registers') {
+    throw "register tile report missing: $rtReport"
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_register_tiles" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_register_tiles" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++

@@ -1,0 +1,8 @@
+fn helper() -> int32 {
+  var t: float32[16, 16] layout fragment_c = 0.0;
+  return 0;
+}
+
+kernel(block = 32) uses_helper(out: int32*) {
+  out[0] = helper();
+}

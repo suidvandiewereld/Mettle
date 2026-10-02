@@ -1,0 +1,6 @@
+kernel(block = 32) varying_scale(out: float32*) {
+  var t: float32[16, 16] layout fragment_c = 1.0;
+  var lane: float32 = (float32)thread.x;
+  t = t * lane;
+  tile_store(out, t, ld: 16);
+}

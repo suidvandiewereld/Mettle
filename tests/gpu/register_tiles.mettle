@@ -1,0 +1,56 @@
+import "register_tiles_reference";
+
+type TileLane = int32 where value >= 0 && value < 32;
+
+kernel(block = 32) tile_rows(x: float32*, out: float32*, valid: int32) {
+  var s: float32[16, 32] layout fragment_c;
+  tile_load(s, x, ld: 32, rows: 16);
+  var m: float32[16] layout fragment_c = row_max(select(tile_col(s) < valid, s, -1.0e30));
+  var p: float32[16, 32] layout fragment_c = select(tile_col(s) < valid, s - m, 0.0);
+  var l: float32[16] layout fragment_c = row_sum(p);
+  tile_store(out, p, ld: 32);
+  tile_store(out + 512, l, ld: 1);
+}
+
+kernel(block = 32) tile_attention_step(q: float32*, k: float16*, v: float16*, out: float32*) {
+  workgroup var ks: float16[32, 64] layout swizzle128;
+  workgroup var vs: float16[32, 64] layout row;
+  var lane: TileLane = (TileLane)thread.x;
+  for r in 0..32 {
+    ks[r][(int32)lane] = k[r * 64 + (int32)lane];
+    ks[r][(int32)lane + 32] = k[r * 64 + (int32)lane + 32];
+    vs[r][(int32)lane] = v[r * 64 + (int32)lane];
+    vs[r][(int32)lane + 32] = v[r * 64 + (int32)lane + 32];
+  }
+  barrier(workgroup, acq_rel);
+  var qt: float16[16, 64] layout fragment_a;
+  tile_load(qt, q, ld: 64);
+  var s: float32[16, 32] layout fragment_c;
+  tensor_mma(qt, ks, 0.0, s, shape: m16n32k64, a_type: f16, b_type: f16,
+             accumulator_type: f32, result_type: f32, b_layout: col);
+  var p: float16[16, 32] layout fragment_a = (float16[16, 32] layout fragment_a)s;
+  var scale: float32[16] layout fragment_c = 2.0;
+  var o: float32[16, 64] layout fragment_c = 1.0;
+  tensor_mma(p, vs, o, o, shape: m16n64k32, a_type: f16, b_type: f16,
+             accumulator_type: f32, result_type: f32, b_layout: row,
+             c_scale_mode: per_row, c_scale: scale);
+  tile_store(out, o, ld: 64);
+}
+
+@test fn rows_reduce_and_mask_on_the_cpu() -> int32 {
+  var x: float32[512];
+  var out: float32[528];
+  for i in 0..512 { x[i] = tile_rows_input(i); }
+  dispatch tile_rows[grid: (1, 1, 1), block: (32, 1, 1)](&x[0], &out[0], 20);
+  return tile_rows_wrong(&x[0], &out[0], 20);
+}
+
+@test fn mma_through_a_swizzled_view_on_the_cpu() -> int32 {
+  var q: float32[1024];
+  var k: float16[2048];
+  var v: float16[2048];
+  var out: float32[1024];
+  tile_mma_inputs(&q[0], &k[0], &v[0]);
+  dispatch tile_attention_step[grid: (1, 1, 1), block: (32, 1, 1)](&q[0], &k[0], &v[0], &out[0]);
+  return tile_mma_wrong(&out[0]);
+}

@@ -17,4 +17,6 @@ typedef struct {
 int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
                      const PtxEmitOptions *options, char **error);
 
+const char *ptx_tile_report_text(void);
+
 #endif

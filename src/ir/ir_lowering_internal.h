@@ -492,6 +492,23 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
 int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
                                ASTNode *expression, IROperand *out_value);
 
+int ir_lower_tile_expression(IRLoweringContext *context, IRFunction *function,
+                             ASTNode *expression, const IROperand *dest,
+                             IROperand *out);
+
+int ir_lower_tile_store_into(IRLoweringContext *context, IRFunction *function,
+                             Type *type, const IROperand *dest, ASTNode *value,
+                             SourceLocation location);
+
+int ir_lower_tile_declaration(IRLoweringContext *context, IRFunction *function,
+                              ASTNode *statement, VarDeclaration *declaration,
+                              Type *type);
+
+int ir_lower_tile_call(IRLoweringContext *context, IRFunction *function,
+                       ASTNode *expression, IROperand *out_value);
+
+int ir_call_is_tile_statement(const CallExpression *call);
+
 int ir_lower_statement_with_defers(IRLoweringContext *context,
                                           IRFunction *function,
                                           ASTNode *statement,

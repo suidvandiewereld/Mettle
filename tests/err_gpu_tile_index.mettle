@@ -1,0 +1,4 @@
+kernel(block = 32) indexes_a_tile(out: float32*) {
+  var t: float32[16, 16] layout fragment_c = 1.0;
+  out[0] = t[0][0];
+}

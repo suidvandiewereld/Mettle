@@ -208,6 +208,7 @@ call :cc src\semantic\type_checker_stmt.c obj\semantic\type_checker_stmt.o
 call :cc src\semantic\type_checker_expr.c obj\semantic\type_checker_expr.o
 call :cc src\semantic\type_checker_aggregate.c obj\semantic\type_checker_aggregate.o
 call :cc src\semantic\type_checker_tensor_epilogue.c obj\semantic\type_checker_tensor_epilogue.o
+call :cc src\semantic\type_checker_tile.c obj\semantic\type_checker_tile.o
 call :cc src\semantic\machine_desc.c obj\semantic\machine_desc.o
 call :cc src\semantic\schedule_expand.c obj\semantic\schedule_expand.o
 call :cc src\semantic\type_checker_memory.c obj\semantic\type_checker_memory.o
@@ -411,7 +412,7 @@ exit /b 0
 :link_frontend
 echo Linking mettle ^(reference frontend^) against libmtlc...
 set "LDFLAGS=%LDFLAGS% -Wl,--disable-runtime-pseudo-reloc -Wl,--stack,67108864"
-%CC% %CCTARGET% -nostdlib -nostartfiles -nodefaultlibs -Wl,--entry,mettle_start -Wl,--subsystem,console obj\runtime\host_startup.o obj\lexer\lexer.o obj\parser\ast.o obj\parser\ast_dump.o obj\parser\ast_print.o obj\parser\parser.o obj\semantic\symbol_table.o obj\semantic\comptime_value.o obj\semantic\type_layout.o obj\semantic\comptime_expand.o obj\semantic\rule_reflect.o obj\semantic\type_checker_refine.o obj\semantic\type_checker_uniform.o obj\semantic\type_checker_gpu_intrinsics.o obj\semantic\type_checker_effects.o obj\semantic\target_desc.o obj\semantic\type_query.o obj\semantic\type_checker.o obj\semantic\type_checker_types.o obj\semantic\type_checker_errors.o obj\semantic\type_checker_safety.o obj\semantic\type_checker_init_tracker.o obj\semantic\type_checker_decl.o obj\semantic\type_checker_match.o obj\semantic\type_checker_stmt.o obj\semantic\type_checker_expr.o obj\semantic\type_checker_aggregate.o obj\semantic\type_checker_tensor_epilogue.o obj\semantic\type_checker_memory.o obj\semantic\schedule_expand.o obj\semantic\machine_desc.o obj\semantic\register_allocator.o obj\semantic\import_resolver.o obj\semantic\monomorphize.o obj\ir\ir_lowering.o obj\ir\ir_lower_address.o obj\ir\ir_lower_defer.o obj\ir\ir_lower_expr.o obj\ir\ir_lower_stmt.o obj\ir\ir_lower_support.o obj\ir\ir_lower_switch_match.o obj\ir\ir_lower_types.o obj\frontend\mtlc_type_from_frontend.o obj\frontend\mtlc_lower_module.o obj\error\error_explain.o obj\main.o bin\mtlc.lib -o bin\mettle.exe -lkernel32 -ldbghelp %LDFLAGS%
+%CC% %CCTARGET% -nostdlib -nostartfiles -nodefaultlibs -Wl,--entry,mettle_start -Wl,--subsystem,console obj\runtime\host_startup.o obj\lexer\lexer.o obj\parser\ast.o obj\parser\ast_dump.o obj\parser\ast_print.o obj\parser\parser.o obj\semantic\symbol_table.o obj\semantic\comptime_value.o obj\semantic\type_layout.o obj\semantic\comptime_expand.o obj\semantic\rule_reflect.o obj\semantic\type_checker_refine.o obj\semantic\type_checker_uniform.o obj\semantic\type_checker_gpu_intrinsics.o obj\semantic\type_checker_effects.o obj\semantic\target_desc.o obj\semantic\type_query.o obj\semantic\type_checker.o obj\semantic\type_checker_types.o obj\semantic\type_checker_errors.o obj\semantic\type_checker_safety.o obj\semantic\type_checker_init_tracker.o obj\semantic\type_checker_decl.o obj\semantic\type_checker_match.o obj\semantic\type_checker_stmt.o obj\semantic\type_checker_expr.o obj\semantic\type_checker_aggregate.o obj\semantic\type_checker_tensor_epilogue.o obj\semantic\type_checker_tile.o obj\semantic\type_checker_memory.o obj\semantic\schedule_expand.o obj\semantic\machine_desc.o obj\semantic\register_allocator.o obj\semantic\import_resolver.o obj\semantic\monomorphize.o obj\ir\ir_lowering.o obj\ir\ir_lower_address.o obj\ir\ir_lower_defer.o obj\ir\ir_lower_expr.o obj\ir\ir_lower_stmt.o obj\ir\ir_lower_support.o obj\ir\ir_lower_switch_match.o obj\ir\ir_lower_tile.o obj\ir\ir_lower_types.o obj\frontend\mtlc_type_from_frontend.o obj\frontend\mtlc_lower_module.o obj\error\error_explain.o obj\main.o bin\mtlc.lib -o bin\mettle.exe -lkernel32 -ldbghelp %LDFLAGS%
 
 if %ERRORLEVEL% NEQ 0 (
     echo Build failed!
@@ -500,7 +501,7 @@ REM ---------------------------------------------------------------------------
 :ar_ir_core
 REM One object for the libmtlc IR core, unless it is a lowering TU.
 set "AR_NAME=%~n1"
-for %%x in (ir_lowering ir_lower_address ir_lower_defer ir_lower_expr ir_lower_stmt ir_lower_support ir_lower_switch_match ir_lower_types) do if /I "%AR_NAME%"=="%%x" goto :eof
+for %%x in (ir_lowering ir_lower_address ir_lower_defer ir_lower_expr ir_lower_stmt ir_lower_support ir_lower_switch_match ir_lower_tile ir_lower_types) do if /I "%AR_NAME%"=="%%x" goto :eof
 call set "AROBJS=%%AROBJS%% %~1"
 goto :eof
 

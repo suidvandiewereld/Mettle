@@ -1,0 +1,7 @@
+kernel(block = 32) wrong_operand(b: uint16*, out: float32*) {
+  var c: float32[16, 16] layout fragment_c = 1.0;
+  var d: float32[16, 8] layout fragment_c = 0.0;
+  tensor_mma(c, b, 0.0, d, shape: m16n8k16, a_type: f16, b_type: f16,
+             accumulator_type: f32, result_type: f32, b_layout: col, ldb: 16);
+  tile_store(out, d, ld: 8);
+}

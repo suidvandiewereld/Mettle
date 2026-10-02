@@ -654,6 +654,10 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
   if (!decl_type && declaration->initializer) {
     decl_type = declaration->initializer->resolved_type;
   }
+  if (decl_type && type_checker_is_tile(decl_type)) {
+    return ir_lower_tile_declaration(context, function, statement, declaration,
+                                     decl_type);
+  }
   const char *decl_type_text = ir_backend_type_name(declaration->type_name);
   if (!decl_type_text && declaration->initializer &&
       declaration->initializer->resolved_type) {
@@ -857,6 +861,24 @@ static int ir_lower_assignment(IRLoweringContext *context, IRFunction *function,
         statement->location);
     ir_operand_destroy(&literal_address);
     return ok;
+  }
+
+  if (assignment->variable_name) {
+    const IRLocalBinding *binding =
+        ir_local_binding_find(context, assignment->variable_name);
+    Type *assign_type =
+        binding && binding->type_text
+            ? ir_resolve_named_type(context, binding->type_text)
+            : NULL;
+    if (assign_type && type_checker_is_tile(assign_type)) {
+      IROperand dest = ir_operand_symbol(
+          ir_local_ir_name(context, assignment->variable_name));
+      int ok = ir_lower_tile_store_into(context, function, assign_type, &dest,
+                                        assignment->value,
+                                        statement->location);
+      ir_operand_destroy(&dest);
+      return ok;
+    }
   }
 
   IROperand value = ir_operand_none();

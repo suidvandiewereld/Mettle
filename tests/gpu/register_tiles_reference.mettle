@@ -1,0 +1,58 @@
+export fn tile_rows_input(i: int32) -> float32 {
+  return (float32)((i * 7) % 13);
+}
+
+export fn tile_rows_wrong(x: float32*, out: float32*, valid: int32) -> int32 {
+  var bad: int32 = 0;
+  for r in 0..16 {
+    var mx: float32 = -1.0e30;
+    for c in 0..32 {
+      if (c < valid && x[r * 32 + c] > mx) { mx = x[r * 32 + c]; }
+    }
+    var sum: float32 = 0.0;
+    for c in 0..32 {
+      var want: float32 = 0.0;
+      if (c < valid) { want = x[r * 32 + c] - mx; }
+      if (out[r * 32 + c] != want) { bad = bad + 1; }
+      sum = sum + want;
+    }
+    if (out[512 + r] != sum) { bad = bad + 1; }
+  }
+  return bad;
+}
+
+export fn tile_q(r: int32, c: int32) -> float32 { return (float32)((r * 3 + c * 5) % 5 - 2); }
+export fn tile_k(n: int32, c: int32) -> float32 { return (float32)((n * 7 + c) % 3 - 1); }
+export fn tile_v(k: int32, d: int32) -> float32 { return (float32)((k + d * 3) % 3 - 1); }
+
+export fn tile_mma_inputs(q: float32*, k: float16*, v: float16*) {
+  for r in 0..16 {
+    for c in 0..64 { q[r * 64 + c] = tile_q(r, c); }
+  }
+  for n in 0..32 {
+    for c in 0..64 {
+      k[n * 64 + c] = (float16)tile_k(n, c);
+      v[n * 64 + c] = (float16)tile_v(n, c);
+    }
+  }
+}
+
+export fn tile_mma_wrong(out: float32*) -> int32 {
+  var s: float32[512];
+  for r in 0..16 {
+    for n in 0..32 {
+      var acc: float32 = 0.0;
+      for c in 0..64 { acc = acc + tile_q(r, c) * tile_k(n, c); }
+      s[r * 32 + n] = acc;
+    }
+  }
+  var bad: int32 = 0;
+  for r in 0..16 {
+    for d in 0..64 {
+      var o: float32 = 2.0;
+      for n in 0..32 { o = o + s[r * 32 + n] * tile_v(n, d); }
+      if (out[r * 64 + d] != o) { bad = bad + 1; }
+    }
+  }
+  return bad;
+}

@@ -1,0 +1,41 @@
+import "std/io";
+import "std/mem";
+import "std/gpu";
+import "register_tiles_reference";
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  if (argc < 2 || gpu_init() == 0) { return 2; }
+  var module: int64 = gpu_module_file(argv[1]);
+  if (module == 0) { return 3; }
+  var rows_kernel: int64 = gpu_func(module, "tile_rows");
+  var step_kernel: int64 = gpu_func(module, "tile_attention_step");
+  var x: float32* = (float32*)malloc(2048);
+  var rows_out: float32* = (float32*)malloc(2112);
+  for i in 0..512 { x[i] = tile_rows_input(i); }
+  var dx: int64 = gpu_malloc(2048);
+  var drows: int64 = gpu_malloc(2112);
+  gpu_to_device(dx, (uint8*)x, 2048);
+  var valid: int32 = 20;
+  dispatch rows_kernel[grid: (1, 1, 1), block: (32, 1, 1)](dx, drows, valid);
+  gpu_sync();
+  gpu_to_host((uint8*)rows_out, drows, 2112);
+  var bad: int32 = tile_rows_wrong(x, rows_out, 20);
+  var q: float32* = (float32*)malloc(4096);
+  var k: float16* = (float16*)malloc(4096);
+  var v: float16* = (float16*)malloc(4096);
+  var out: float32* = (float32*)malloc(4096);
+  tile_mma_inputs(q, k, v);
+  var dq: int64 = gpu_malloc(4096);
+  var dk: int64 = gpu_malloc(4096);
+  var dv: int64 = gpu_malloc(4096);
+  var dout: int64 = gpu_malloc(4096);
+  gpu_to_device(dq, (uint8*)q, 4096);
+  gpu_to_device(dk, (uint8*)k, 4096);
+  gpu_to_device(dv, (uint8*)v, 4096);
+  dispatch step_kernel[grid: (1, 1, 1), block: (32, 1, 1)](dq, dk, dv, dout);
+  gpu_sync();
+  gpu_to_host((uint8*)out, dout, 4096);
+  bad = bad + tile_mma_wrong(out);
+  println("register tiles on the GPU: {bad} outputs differ from the interpreter's reference");
+  return bad;
+}

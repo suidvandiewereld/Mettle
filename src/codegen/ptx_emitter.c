@@ -1,6 +1,7 @@
 #include "ptx_emitter.h"
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -45,6 +46,23 @@ typedef struct {
 } PtxTensorResidency;
 
 typedef struct {
+  char *name;
+  const MtlcType *type;
+  PtxClass cls;
+  int base;
+  int count;
+  int rows;
+  int cols;
+  MtlcViewLayout layout;
+  size_t first;
+  size_t last;
+  size_t line;
+  int scalarized;
+  int temporary;
+  char current[24];
+} PtxTile;
+
+typedef struct {
   char *data;
   size_t len, cap;
 } Sb;
@@ -67,6 +85,14 @@ typedef struct {
   size_t generic_capacity;
   PtxTensorResidency *tensor_residencies;
   size_t tensor_residency_count, tensor_residency_capacity;
+  PtxTile *tiles;
+  size_t tile_count, tile_capacity;
+  int tile_lane, tile_group, tile_thread, tile_pair;
+  int tile_peak, tile_budget;
+  size_t tile_peak_line;
+  unsigned char *tile_role;
+  size_t *tile_window_start;
+  size_t tile_role_count;
   IRProgram *program;
   IRFunction *function;
   const IRModuleSymbol *function_symbol;
@@ -8083,6 +8109,8 @@ static int ptx_type_is_void(const MtlcType *type, const char *fallback_name) {
          (!type && fallback_name && strcmp(fallback_name, "void") == 0);
 }
 
+#include "ptx_emitter_tile.inc"
+
 static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
@@ -8152,6 +8180,9 @@ static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
   }
   case IR_OP_TENSOR_MATMUL:
     ptx_emit_tensor_matmul(fn, in);
+    break;
+  case IR_OP_TILE:
+    ptx_emit_tile(fn, in);
     break;
   case IR_OP_TENSOR_EPILOGUE:
     if (!ptx_tensor_epilogue_was_consumed(fn, in))
@@ -10448,6 +10479,10 @@ static void ptx_emit_allocations(PtxEmit *e) {
     PtxVal pointer;
     int is_dynamic = 0;
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC) continue;
+    if (ptx_tile_is_type(in->value_type)) {
+      ptx_tile_register(&e->fn, in);
+      continue;
+    }
     is_dynamic = in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0;
     if (!ptx_allocation_is_valid(e, in, is_dynamic)) break;
     elem_size = mtlc_type_size(in->value_type->base_type);
@@ -10552,6 +10587,7 @@ static void ptx_emit_allocation_pointers(PtxEmit *e) {
     PtxBinding *binding = NULL;
     char raw[512], storage[512], pointer[24];
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC || !in->dest.name) continue;
+    if (ptx_tile_is_type(in->value_type)) continue;
     binding = find_binding(&e->fn, in->dest.name);
     if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0) {
       snprintf(storage, sizeof(storage), "%s", e->dynamic_storage);
@@ -10738,6 +10774,12 @@ static void ptx_emit_release(PtxEmit *e) {
   free(e->fn.binds);
   free(e->fn.def_counts);
   free(e->fn.tensor_residencies);
+  for (size_t i = 0; i < e->fn.tile_count; i++) {
+    free(e->fn.tiles[i].name);
+  }
+  free(e->fn.tiles);
+  free(e->fn.tile_role);
+  free(e->fn.tile_window_start);
   free(e->fn.asm_out_cls);
   free(e->fn.asm_out_idx);
   free(e->fn.generic_names);
@@ -10805,10 +10847,24 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   ptx_emit_signature(&e);
   ptx_emit_dynamic_workgroup(&e);
   ptx_emit_allocations(&e);
+  ptx_tile_plan(&e.fn, e.func);
   ptx_emit_transfer_barrier(&e);
   ptx_emit_parameter_loads(&e);
   ptx_emit_allocation_pointers(&e);
   ptx_emit_locals(&e);
+  if (e.fn.tile_count) {
+    ptx_tile_lanes(&e.fn);
+    ptx_tile_budget(&e.fn, e.func,
+                    e.func->kernel_block[0] > 0
+                        ? e.func->kernel_block[0] *
+                              (e.func->kernel_block[1] > 0
+                                   ? e.func->kernel_block[1]
+                                   : 1) *
+                              (e.func->kernel_block[2] > 0
+                                   ? e.func->kernel_block[2]
+                                   : 1)
+                        : 0);
+  }
   ptx_emit_body(&e, error, target_arch);
 
   if (e.fn.error) {

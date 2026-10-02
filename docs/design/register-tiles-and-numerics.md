@@ -39,14 +39,20 @@ operation under a branch the subgroup does not agree on is `F0002`, and every
 scalar operand must be the same in every work item of the subgroup, refused
 naming the term that varies (`P0001`).
 
-- `var t: T = scalar;` and `t = scalar;` fill.
-- Element-wise: `+ - * /`, comparisons, `&& || !`, casts between element types,
-  the GPU math intrinsics (`expf`, `sqrtf`, `fabsf`, ...), `select(c, a, b)`,
-  `max(a, b)`, `min(a, b)`. Operands are tiles of the same shape and layout, a
-  scalar (broadcast to every element), or a row vector with the tile's M
-  (broadcast along each row). `max` and `min` are PTX `max.f32`: a NaN operand
-  yields the other, and +0.0 is above -0.0, so a tree of them gives the same
-  bits in any order.
+- `var t: T = scalar;` and `t = scalar;` fill. A declaration without an
+  initializer fills with zero.
+- Element-wise, on `fragment_c` tiles and row vectors: `+ - * /`, comparisons,
+  `&& || !`, casts between element types, the GPU math intrinsics (`expf`,
+  `sqrtf`, `fabsf`, ...), `select(c, a, b)`, `max(a, b)`, `min(a, b)`.
+  Operands are tiles of the same shape and layout, a scalar (broadcast to every
+  element), or a row vector with the tile's M (broadcast along each row). `max`
+  and `min` are PTX `max.f32`: a NaN operand yields the other, and +0.0 is
+  above -0.0, so a tree of them gives the same bits in any order. An operand
+  tile (`fragment_a`, `fragment_b`) is filled, copied, loaded or produced by a
+  cast; arithmetic on one is refused, because its elements are packed pairs.
+- The built-in names (`tile_load`, `row_sum`, `select`, `max`, ...) mean the
+  tile operation only when an operand is a tile, so a program's own `row_sum`
+  keeps working.
 - `tile_row(t)` and `tile_col(t)` are `int32` tiles of `t`'s shape holding each
   element's row and column. They cost no registers.
 - `row_max(t)` and `row_sum(t)` reduce a `fragment_c` tile to a row vector. The
@@ -62,16 +68,21 @@ naming the term that varies (`P0001`).
   `fragment_c` tiles; `c_scale` may be a row vector. B stays in memory: a
   pointer as today, or a shaped view whose layout (`row`, `col`, `swizzle64`,
   `swizzle128`) the MMA honors, so the view's extents and layout replace
-  `ldb` and `b_swizzle`. C may also be the constant `0.0` for any D, tile or
-  memory: the accumulator starts at +0.0 and nothing is loaded. The descriptor
-  must agree with the tile types; a shape, element or layout mismatch is
-  refused naming both.
+  `ldb` and `b_swizzle`. From workgroup memory the PTX backend reads B with
+  `ldmatrix` (`.trans` for a `row` B). C may also be the constant `0.0` for a
+  tile D: the accumulator starts at +0.0 and nothing is loaded (memory D gets
+  the same form with B). The descriptor must agree with the tile types; a
+  shape, element or layout mismatch is refused naming both.
 - `tile_load(t, src, ld: e, rows: r)` and `tile_store(dst, t, ld: e, rows: r)`
   move a tile to and from memory. `src` and `dst` are pointers or shaped views
-  (layout honored; the backend picks `ldmatrix` / `stmatrix` where it can).
-  Rows at or past `r` are not read and load as zero, and are not written. An
-  element type that differs from the tile's converts as a cast would. A row
-  vector stores element `i` to `dst[i * e]`, once per row.
+  with their layout honored. Rows at or past `r` are not read and load as
+  zero, and are not written. An element type that differs from the tile's
+  converts as a cast would. A row vector stores element `i` to `dst[i * e]`,
+  once per row.
+- A shaped view over the dynamic workgroup arena is a cast,
+  `(uint16 shared[32, 256] layout swizzle128)(s16 + offset)`, accepted where
+  the refinement checker proves the address 16-byte aligned and a row is whole
+  16-byte groups. `uint16` elements are read as the MMA's `f16` or `bf16`.
 
 ### Registers
 
@@ -88,13 +99,22 @@ spill (`G0002`, with ptxas's byte counts). Without ptxas the report says the
 residency is unconfirmed. `--explain` lists every tile, its cost, its live
 range and the peak.
 
+A run of element-wise operations on one shape, ending at most in one row
+reduction, is emitted element by element: every operation of the run for
+element 0, then element 1, and so on. A tile made and used only inside the run
+is scalarized and costs nothing, which is what lets attention's masks, scaled
+scores and exponentials sit beside a 128-register output tile.
+
 ### Interpreter
 
 Under `mettle test` every work item holds the whole tile and every operation
 computes every element. Because the scalar operands are subgroup-uniform the
 copies agree, and the grid runner checks they do, which re-asks the uniformity
-proof. Tile arithmetic is emitted with `.rn`, so ptxas cannot fuse it, and the
-interpreter's per-element arithmetic is the device's. The approximate
+proof: the first work item of each subgroup records what each tile operation
+wrote and the rest compare. The static uniformity analysis does not follow a
+value assigned under a divergent branch, and this check is what catches that
+case today. Tile arithmetic is emitted with `.rn`, so ptxas cannot fuse it,
+and the interpreter's per-element arithmetic is the device's. The approximate
 intrinsics are the exception: `expf` is `ex2.approx` on the device (within 2
 ulp), so a CPU-to-GPU comparison through it states its tolerance.
 
@@ -102,9 +122,9 @@ ulp), so a CPU-to-GPU comparison through it states its tolerance.
 
 A tile outside a kernel body or in any storage; a tile operation in divergent
 control; a subgroup-varying scalar operand; a layout, shape or element
-mismatch; a layout change other than `fragment_c` to `fragment_a`; a register
-peak over the budget; a ptxas spill; SPIR-V, which has no cooperative-matrix
-profile here.
+mismatch; arithmetic on an operand tile; a layout change other than
+`fragment_c` to `fragment_a`; a register peak over the budget; a ptxas
+spill; SPIR-V, which has no cooperative-matrix profile here.
 
 ## B. Numerics contracts
 

@@ -1,0 +1,4 @@
+kernel(block = 32) odd_tile(out: float32*) {
+  var t: float32[10, 8] layout fragment_c = 0.0;
+  tile_store(out, t, ld: 8);
+}

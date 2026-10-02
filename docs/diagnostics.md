@@ -198,6 +198,15 @@ Reference twins:
 [Translation validation](translation-validation.md) covers the differential
 machinery both the twins and `--verify` run on.
 
+Register tiles:
+
+| Code | Meaning |
+|------|---------|
+| G0001 | A kernel holds more tile registers at once than its budget |
+| G0002 | ptxas spilled a kernel that holds register tiles |
+
+[GPU offload](gpu.md#register-tiles) covers the G codes in context.
+
 ## JSON output
 
 `--error-format=json` writes one JSON object per diagnostic to stderr, for

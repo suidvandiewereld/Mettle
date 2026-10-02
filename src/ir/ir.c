@@ -158,6 +158,8 @@ const char *ir_gpu_only_construct_name(IROpcode op) {
     return "tensor_epilogue";
   case IR_OP_TENSOR_COMMIT:
     return "tensor_commit";
+  case IR_OP_TILE:
+    return "tile operation";
   default:
     return NULL;
   }
@@ -571,6 +573,14 @@ int mtlc_tensor_mma_desc_is_valid(const MtlcTensorMmaDesc *desc) {
          (desc->d_leading_dimension == 0 ||
           desc->d_leading_dimension >=
               ir_tensor_leading_min(desc->m, desc->n, desc->d_layout));
+}
+
+int ir_tile_operand_is_tile(const MtlcType *type) {
+  return type &&
+         (type->view_layout == MTLC_VIEW_LAYOUT_FRAGMENT_A ||
+          type->view_layout == MTLC_VIEW_LAYOUT_FRAGMENT_B ||
+          type->view_layout == MTLC_VIEW_LAYOUT_FRAGMENT_C) &&
+         type->view_extents[0] > 0;
 }
 
 int ir_tensor_mma_desc_valid(const MtlcTensorMmaDesc *desc) {
@@ -2417,6 +2427,7 @@ static const char *const IR_OPCODE_NAMES[IR_OP_KIND_COUNT] = {
     [IR_OP_SAFETY_CHECK] = "safety_check",
     [IR_OP_PHI] = "phi",
     [IR_OP_ASM_RESULT] = "asm_result",
+    [IR_OP_TILE] = "tile",
     [IR_OP_BINARY] = "binary",
     [IR_OP_ROTATE_ADD] = "rotate_add",
     [IR_OP_UNARY] = "unary",
@@ -2743,6 +2754,30 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
   (void)rhs;
   *handled = 1;
   switch (instruction->op) {
+  case IR_OP_TILE: {
+    char target[128];
+    size_t used = 0;
+    if (instruction->argument_count) {
+      ir_format_operand(&instruction->arguments[0], target, sizeof(target));
+    } else {
+      snprintf(target, sizeof(target), "_");
+    }
+    written = snprintf(buffer, buffer_size, "tile.%s %s <-",
+                       instruction->text ? instruction->text : "?", target);
+    used = written > 0 ? (size_t)written : 0;
+    for (size_t i = 1; i < instruction->argument_count && used < buffer_size;
+         i++) {
+      char argument[128];
+      int more;
+      ir_format_operand(&instruction->arguments[i], argument,
+                        sizeof(argument));
+      more = snprintf(buffer + used, buffer_size - used, "%s%s",
+                      i > 1 ? ", " : " ", argument);
+      if (more > 0) used += (size_t)more;
+    }
+    written = (int)used;
+    break;
+  }
   case IR_OP_ADDRESS_SPACE_ALLOC:
     if (instruction->rhs.kind == IR_OPERAND_INT &&
         instruction->rhs.int_value == 0) {
@@ -5510,6 +5545,9 @@ static int ir_gpu_instruction_collective_requirement(
                ? IR_GPU_COLLECTIVE_WORKGROUP
                : IR_GPU_COLLECTIVE_SUBGROUP;
   }
+  if (instruction->op == IR_OP_TILE) {
+    return IR_GPU_COLLECTIVE_SUBGROUP;
+  }
   if (instruction->op == IR_OP_CALL &&
       ir_gpu_subgroup_collective(instruction->intrinsic)) {
     return IR_GPU_COLLECTIVE_SUBGROUP;
@@ -5555,6 +5593,7 @@ static const char *ir_gpu_uniformity_rank_name(unsigned char rank) {
 
 static const char *ir_gpu_collective_name(const IRInstruction *instruction,
                                           int requirement) {
+  if (instruction && instruction->op == IR_OP_TILE) return "tile operation";
   if (instruction && instruction->op == IR_OP_TENSOR_MMA) return "tensor MMA";
   if (instruction && instruction->op == IR_OP_TENSOR_MATMUL)
     return "bounded tensor matrix operation";
@@ -5725,6 +5764,29 @@ static int ir_gpu_validate_function_uniformity(
                                                       : "subgroup");
             goto done;
           }
+        }
+      }
+      if (instruction->op == IR_OP_TILE) {
+        int bad = 0;
+        for (size_t arg = 0; !bad && arg < instruction->argument_count; arg++) {
+          if (instruction->arguments[arg].kind == IR_OPERAND_NONE ||
+              (instruction->argument_types &&
+               ir_tile_operand_is_tile(instruction->argument_types[arg])))
+            continue;
+          if (ir_gpu_uniform_operand(&uniformity,
+                                     &instruction->arguments[arg]) >
+              IR_GPU_UNIFORM_SUBGROUP)
+            bad = 1;
+        }
+        if (bad) {
+          ir_gpu_graph_fail(
+              builder,
+              "GPU collective uniformity violation in '%s'%s: a scalar or "
+              "address operand of tile operation '%s' is not the same in "
+              "every work item of the subgroup",
+              function->name ? function->name : "?", location,
+              instruction->text ? instruction->text : "?");
+          goto done;
         }
       }
       if (instruction->op == IR_OP_TENSOR_EPILOGUE) {

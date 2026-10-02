@@ -1528,6 +1528,10 @@ int ir_lower_call_expression(IRLoweringContext *context,
     return 0;
   }
 
+  if (ir_call_is_tile_statement(call)) {
+    return ir_lower_tile_call(context, function, expression, out_value);
+  }
+
   if (strcmp(call->function_name, "layout_copy") == 0 &&
       call->argument_count == 2) {
     *out_value = ir_operand_int(0);
@@ -3280,6 +3284,11 @@ static int ir_lower_expression_inner(IRLoweringContext *context,
                                      IROperand *out_value) {
   if (!context || !function || !expression || !out_value) {
     return 0;
+  }
+  if (expression->resolved_type &&
+      type_checker_is_tile(expression->resolved_type)) {
+    return ir_lower_tile_expression(context, function, expression, NULL,
+                                    out_value);
   }
 
   *out_value = ir_operand_none();

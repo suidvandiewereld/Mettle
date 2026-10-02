@@ -1,0 +1,6 @@
+kernel(block = 256) too_many_registers(out: float32*) {
+  var a: float32[16, 256] layout fragment_c = 1.0;
+  var b: float32[16, 256] layout fragment_c = 2.0;
+  a = a + b;
+  tile_store(out, a, ld: 256);
+}

@@ -319,7 +319,7 @@ and nothing in the grammar moves:
 | `interleave(k)` | `(j / k) * (E0 * k) + i * k + (j % k)` |
 | `swizzle64` | `i * E1 + ((j / C) ^ (i % (E1 / C))) * C + (j % C)`, C = 8 bytes |
 | `swizzle128` | the same with C = 16 bytes |
-| `fragment_a`, `fragment_b`, `fragment_c` | one work item's share of an MMA tile, in registers; these have no element address |
+| `fragment_a`, `fragment_b`, `fragment_c` | one work item's share of an MMA tile, in registers; these have no element address, and a kernel local of such a type is a [register tile](#register-tiles) |
 
 The layout is part of the type, so a view laid out one way does not flow into a
 parameter that names another, and the refusal names the layout that was
@@ -1250,6 +1250,149 @@ The current
 SPIR-V OpenCL 2.0 profile likewise rejects tensor MMA because it has no enabled
 cooperative-matrix capability; adding a newer SPIR-V device profile is separate
 backend work, not a frontend redesign.
+
+### Register tiles
+
+A view type whose layout is a fragment layout, declared as a local in a kernel
+body, is a register tile: one value the subgroup holds in registers, each work
+item its share. Which work item holds which element, and in which register, is
+the backend's business, and nothing in the language names a lane, a register
+or a vendor instruction.
+
+```mettle
+var q: float16[16, 256] layout fragment_a;
+var o: float32[16, 256] layout fragment_c = 0.0;
+var m: float32[16] layout fragment_c = -1.0e30;
+```
+
+| Type | Holds |
+|---|---|
+| `T[M, K] layout fragment_a` | an MMA A operand, `float16` or `bfloat16`, M a multiple of 16, K of 16 |
+| `T[M, N] layout fragment_c` | an accumulator, `float32` or `int32`, or with `bool` a mask; M a multiple of 16, N of 8 |
+| `T[M] layout fragment_c` | a row vector: one value per row of an M-row `fragment_c` tile |
+
+A tile has no address. Taking one, indexing `t[r][c]`, passing one to a
+function, returning one, or keeping one anywhere but a kernel local is
+refused. A declaration without an initializer fills the tile with zero, as an
+array is.
+
+Every tile operation is a subgroup collective. One under a branch the subgroup
+does not agree on is refused, and so is a scalar operand that differs between
+the work items of a subgroup (`thread.x >> 5`, the warp's index, is the same
+in all of them; `thread.x` is not).
+
+- `t = scalar` fills. Element-wise math on `fragment_c` tiles and row vectors
+  is the ordinary operators, `+ - * /`, comparisons, `&&`, `||`, `!`, and the
+  math intrinsics (`expf`, `sqrtf`, `fabsf`, ...), plus `select(c, a, b)`,
+  `max(a, b)` and `min(a, b)`. A scalar operand broadcasts to every element
+  and a row vector along its rows. `max` and `min` are `max.f32`: a NaN
+  operand yields the other, and +0.0 is above -0.0, so any tree of them gives
+  the same bits.
+- `tile_row(t)` and `tile_col(t)` give each element's row and column as an
+  `int32` tile, which is how a mask is written.
+- `row_max(t)` and `row_sum(t)` reduce along rows into a row vector. The order
+  is part of the operation: the N columns fall into four classes by
+  `(column / 2) % 4`, each class is folded left to right from its first
+  column, and the classes combine as `(C0 + C1) + (C2 + C3)`. The CPU grid
+  runner computes exactly this order, and so must every backend.
+- A cast converts. `(float16[16, 32] layout fragment_a)p` turns an f32
+  accumulator into the next MMA's A operand in registers. A cast that changes
+  layout any other way is refused, naming both layouts.
+- `tensor_mma` takes tiles: A may be a `fragment_a` tile, C and D
+  `fragment_c` tiles, `c_scale` a row vector, and C may be `0.0`. B stays in
+  memory, a pointer or a shaped view whose layout the MMA honors; from
+  workgroup memory the backend reads it with `ldmatrix`. The descriptor must
+  agree with the tiles' types, and a mismatch names both.
+- `tile_load(t, src, ld: e, rows: r)` and `tile_store(dst, t, ld: e, rows: r)`
+  move tiles through memory. Rows at or past `r` are not touched, and load as
+  zero. An element type that differs from the tile's converts as a cast
+  would, so an f32 activation row loads straight into an f16 operand tile.
+
+A shaped view over the dynamic workgroup arena is a cast,
+`(uint16 shared[32, 256] layout swizzle128)(s16 + offset)`. The cast is
+accepted where the address is proven 16-byte aligned and a row is whole
+16-byte groups; its extent inside the arena is the same launch precondition
+every dynamic view carries.
+
+Attention's softmax step, from the inference engine's `attention_fr`:
+
+```mettle
+var s: float32[16, 32] layout fragment_c;
+tensor_mma(qt, kt, 0.0, s, shape: m16n32k256, a_type: f16, b_type: f16,
+           accumulator_type: f32, result_type: f32, b_layout: col);
+s = s * scale;
+var mx: float32[16] layout fragment_c =
+    row_max(select(tile_col(s) + keyc <= hi && tile_col(s) + keyc >= lo, s, -1.0e30));
+var mn: float32[16] layout fragment_c = max(m, mx);
+var alpha: float32[16] layout fragment_c = expf(m - mn);
+var p: float32[16, 32] layout fragment_c =
+    select(tile_col(s) + keyc <= hi && tile_col(s) + keyc >= lo, expf(s - mn), 0.0);
+l = l * alpha + row_sum(p);
+m = mn;
+var pa: float16[16, 32] layout fragment_a = (float16[16, 32] layout fragment_a)p;
+tensor_mma(pa, vt, o, o, shape: m16n256k32, a_type: f16, b_type: f16,
+           accumulator_type: f32, result_type: f32, b_layout: row,
+           c_scale_mode: per_row, c_scale: alpha);
+```
+
+#### Registers
+
+Tiles never spill. The backend states what each tile costs a work item (PTX:
+an f32 `fragment_c` M x N tile costs M*N/32 registers, an f16 `fragment_a`
+M x K tile M*K/64, a row vector M/8) and compares the peak of the tiles live
+at once with the work item's limit: 255, or the multiple of 8 below 65536 /
+block threads when that is smaller. Over it, the build fails:
+
+```text
+error[G0001]: kernel 'too_many_registers' holds 256 tile registers at line 3,
+over its budget of 255 registers a work item; tiles never spill. Live there: a
+128, b 128
+```
+
+A run of element-wise operations, ending at most in one row reduction, is
+emitted one element at a time, so a tile made and used only inside the run
+costs nothing. When `ptxas` is on `PATH` the build also assembles the module
+and refuses a kernel with tiles that the assembler spilled (`G0002`); without
+it the build says the tiles are unconfirmed. `--explain` and
+`--report-gpu-types` list every tile:
+
+```text
+register tiles
+  attention_fr: peak 236 of 255 registers a work item, at line 201
+    qt       float16[16,256] layout fragment_a        64 registers, lines 129..217
+    o        float32[16,256] layout fragment_c       128 registers, lines 131..222
+    ...
+    25 of 27 intermediate tiles computed one element at a time, no registers held
+```
+
+Element-wise tile arithmetic is emitted with `.rn`, so the assembler does not
+fuse it into FMA and what runs is what the program wrote.
+
+#### On the CPU
+
+Under `mettle test` every work item holds the whole tile, and every operation
+computes every element in the order the semantics define. The copies should
+agree, because the operands are the same in every work item, and the grid
+runner checks that they do: the first work item of each subgroup records what
+each tile operation wrote and the rest compare, which catches a scalar that
+varies by a route the static analysis missed:
+
+```text
+the tile written at line 7 differs between work items 0 and 4 of one
+subgroup: a scalar it is built from varies
+```
+
+The interpreter's arithmetic is the device's except where the device
+approximates: `expf` is `ex2.approx` on the device, within 2 ulp.
+`tests/gpu/register_tiles.mettle` runs the same kernels on the CPU and, through
+the hardware gate, on the GPU, against one reference, bit for bit.
+
+The inference engine's `attention_fr` (16 query rows a warp, eight warps, Q, S,
+P and O in tiles) was inline PTX written by a Python generator. In tiles it is
+plain Mettle at 255 registers with no spill, where the inline-asm version
+spilled 76 bytes, and on the RTX 5060 Ti (`fa256bench`, depths 384 / 896 /
+1920) it runs 68.0 / 125.6 / 139.7 us at 128 rows against 77.1 / 144.1 / 157.4,
+and 597.2 / 733.2 / 832.6 us at 1024 rows against 641.8 / 787.9 / 888.0.
 
 ### Multidimensional tensor transfers
 

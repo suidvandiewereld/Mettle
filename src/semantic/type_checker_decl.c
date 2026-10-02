@@ -1281,6 +1281,10 @@ static int type_checker_check_address_space(TypeChecker *checker,
                                             Scope *current_scope,
                                             Type **var_type_io) {
   Type *var_type = *var_type_io;
+  if (type_checker_is_tile(var_type)) {
+    return type_checker_check_tile_declaration(checker, declaration, var_decl,
+                                               current_scope, var_type);
+  }
   if (var_decl->address_space != AST_ADDRESS_SPACE_DEFAULT) {
     return type_checker_check_declared_address_space(
         checker, declaration, var_decl, current_scope, var_type_io);
@@ -1613,6 +1617,7 @@ if (checker->current_function && !var_decl->is_extern) {
   if (declare_scope && declare_scope->type != SCOPE_GLOBAL) {
     int track_definite_init =
         !var_symbol->is_address_space_binding &&
+        !type_checker_is_tile(var_type) &&
         !(var_type &&
           (var_type->kind == TYPE_ARRAY || var_type->kind == TYPE_STRUCT ||
            var_type->kind == TYPE_STRING));
@@ -1938,6 +1943,16 @@ static Symbol *type_checker_build_function_symbol(
         free(param_types);
         return 0;
       }
+      if (type_checker_is_tile(param_types[i])) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "parameter '%s' of '%s' is '%s': a tile is a subgroup's value in "
+            "registers and does not cross a call",
+            func_decl->parameter_names[i], func_decl->name,
+            param_types[i]->name);
+        free(param_types);
+        return 0;
+      }
       if (func_decl->is_kernel &&
           !gpu_kernel_parameter_type(param_types[i])) {
         type_checker_set_error_at_location(
@@ -2160,6 +2175,14 @@ static Type *type_checker_function_return_type(
     }
     if (type_checker_reject_no_runtime_repr(checker, declaration->location,
                                             return_type)) {
+      return 0;
+    }
+    if (type_checker_is_tile(return_type)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "'%s' returns '%s': a tile is a subgroup's value in registers and "
+          "does not cross a call",
+          func_decl->name, return_type->name);
       return 0;
     }
   } else {

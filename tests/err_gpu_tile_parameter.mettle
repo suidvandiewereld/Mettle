@@ -1,0 +1,7 @@
+fn take(t: float32[16, 16] layout fragment_c) -> int32 {
+  return 0;
+}
+
+kernel(block = 32) passes_a_tile(out: int32*) {
+  out[0] = 0;
+}

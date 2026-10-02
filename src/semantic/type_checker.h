@@ -163,6 +163,8 @@ int type_checker_predicate_is_relational(TypeChecker *checker,
 int type_checker_float_bound(const struct Type *type, double *min, double *max,
                              double *err);
 int type_checker_type_excludes_zero(const struct Type *type);
+int type_checker_is_tile(const struct Type *type);
+int type_checker_is_row_vector(const struct Type *type);
 int type_checker_check_field_write(TypeChecker *checker, struct ASTNode *object,
                                    const char *field, struct ASTNode *value,
                                    SourceLocation location);

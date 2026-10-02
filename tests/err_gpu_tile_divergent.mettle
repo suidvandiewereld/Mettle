@@ -1,0 +1,7 @@
+kernel(block = 32) divergent_tile(out: float32*) {
+  var t: float32[16, 16] layout fragment_c = 1.0;
+  if (thread.x < 4) {
+    t = t * 2.0;
+  }
+  tile_store(out, t, ld: 16);
+}

@@ -664,6 +664,35 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: narrow the parameters to shapes the prober can build, or accept\n"
      "that this pair is unchecked and know that it is.\n"},
+    {"G0001", "A kernel holds more tile registers at once than its budget",
+     "A register tile is a subgroup's value held in registers, each work\n"
+     "item its share, and tiles never spill. The backend states what each\n"
+     "tile costs a work item (PTX: an f32 fragment_c M x N tile costs\n"
+     "M*N/32 registers, an f16 fragment_a M x K tile M*K/64, a row vector\n"
+     "M/8), takes the tiles live at each point of the kernel, and compares\n"
+     "the peak with the work item's register limit: 255, or the multiple\n"
+     "of 8 below 65536 / block threads when that is smaller. This kernel\n"
+     "went over. The message names the line of the peak and every tile\n"
+     "live there with its cost.\n"
+     "\n"
+     "A run of element-wise tile operations is computed one element at a\n"
+     "time, so a tile made inside such a run and used only there costs\n"
+     "nothing. `--explain` and `--report-gpu-types` print every tile, its\n"
+     "cost, its live lines and the peak.\n"
+     "\n"
+     "Fix: shrink a tile, end one's life earlier, or keep an operand in\n"
+     "memory and let tensor_mma read it there.\n"},
+    {"G0002", "ptxas spilled a kernel that holds register tiles",
+     "The tiles fit the compiler's own budget, and when ptxas is on PATH\n"
+     "the build also assembles the module and reads what the assembler\n"
+     "did. It spilled this kernel: its tiles plus everything else live\n"
+     "beside them did not fit. The build fails, because a tile that does\n"
+     "not stay in registers is not what the program asked for.\n"
+     "\n"
+     "Without ptxas on PATH the build says the tiles are unconfirmed and\n"
+     "goes on, so the gap is stated.\n"
+     "\n"
+     "Fix: shrink a tile or what is live beside it.\n"},
     {"F0004", "A function declared @pure performs something",
      "`@pure` is a contract, and this build checked it. The function\n"
      "carries the decorator and its body, or something it calls, writes\n"

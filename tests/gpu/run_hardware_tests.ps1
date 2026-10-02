@@ -493,6 +493,16 @@ try {
   & $harness @harnessArgs
   if ($LASTEXITCODE -ne 0) { throw "hardware differential suite failed" }
 
+  $tilePtx = Join-Path $temp "register_tiles.ptx"
+  $tileHost = Join-Path $temp "register_tiles_host.exe"
+  $tileArch = if ($GpuArch -eq "gb10") { "gb10" } elseif ($computeMajor -ge 9) { "sm_$computeMajor$($computeMinor)a" } else { $GpuArch }
+  & $compiler -O --emit-ptx "--gpu-arch=$tileArch" (Join-Path $root "tests/gpu/register_tiles.mettle") -o $tilePtx
+  if ($LASTEXITCODE -ne 0) { throw "register tile PTX compilation failed" }
+  & $compiler --build (Join-Path $root "tests/gpu/register_tiles_host.mettle") -o $tileHost --link-arg (Join-Path $env:CUDA_PATH "lib/x64/cuda.lib")
+  if ($LASTEXITCODE -ne 0) { throw "register tile host compilation failed" }
+  & $tileHost $tilePtx
+  if ($LASTEXITCODE -ne 0) { throw "register tiles on the GPU differ from the interpreter reference" }
+
   if ($Sanitizer) {
     $computeSanitizer = Get-Command compute-sanitizer -ErrorAction SilentlyContinue
     if (-not $computeSanitizer) {

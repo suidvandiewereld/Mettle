@@ -1,0 +1,15 @@
+kernel(block = 32) laundered_scale(out: float32*) {
+  var t: float32[16, 16] layout fragment_c = 1.0;
+  var factor: float32 = 1.0;
+  if (thread.x < 4) {
+    factor = 2.0;
+  }
+  t = t * factor;
+  tile_store(out, t, ld: 16);
+}
+
+@test fn copies_of_a_tile_agree() -> int32 {
+  var out: float32[256];
+  dispatch laundered_scale[grid: (1, 1, 1), block: (32, 1, 1)](&out[0]);
+  return 0;
+}

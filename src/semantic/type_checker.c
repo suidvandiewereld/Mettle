@@ -293,6 +293,14 @@ int type_checker_register_function_signature(TypeChecker *checker,
         type_checker_get_type_by_name(checker, func_decl->return_type);
     if (!return_type)
       return 0;
+    if (type_checker_is_tile(return_type)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "'%s' returns '%s': a tile is a subgroup's value in registers and "
+          "does not cross a call",
+          func_decl->name, return_type->name);
+      return 0;
+    }
   } else {
     return_type = checker->builtin_void;
   }
@@ -311,6 +319,16 @@ int type_checker_register_function_signature(TypeChecker *checker,
       param_types[i] =
           type_checker_get_type_by_name(checker, func_decl->parameter_types[i]);
       if (!param_types[i]) {
+        free(param_types);
+        return 0;
+      }
+      if (type_checker_is_tile(param_types[i])) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "parameter '%s' of '%s' is '%s': a tile is a subgroup's value in "
+            "registers and does not cross a call",
+            func_decl->parameter_names[i], func_decl->name,
+            param_types[i]->name);
         free(param_types);
         return 0;
       }

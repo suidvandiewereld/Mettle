@@ -288,6 +288,38 @@ MtlcTensorElement type_checker_tensor_element_name(const char *name);
 MtlcTensorLayout type_checker_tensor_layout_name(const char *name);
 int type_checker_tensor_pointer_matches(Type *type,
                                         MtlcTensorElement element);
+const char *type_checker_tile_layout_word(unsigned char layout);
+Type *type_checker_row_vector_of(TypeChecker *checker, Type *element,
+                                 size_t rows, const char *name);
+Type *type_checker_tile_of(TypeChecker *checker, Type *element, size_t rows,
+                           size_t columns, unsigned char layout);
+int type_checker_in_kernel_body(TypeChecker *checker);
+int type_checker_check_tile_type(TypeChecker *checker, Type *type,
+                                 SourceLocation location);
+int type_checker_check_tile_declaration(TypeChecker *checker,
+                                        ASTNode *declaration,
+                                        VarDeclaration *var_decl,
+                                        Scope *scope, Type *type);
+int type_checker_tile_assignable(TypeChecker *checker, Type *dest,
+                                 Type *value, ASTNode *value_expr);
+Type *type_checker_tile_binary(TypeChecker *checker, BinaryExpression *binop,
+                               Type *left, Type *right,
+                               SourceLocation location);
+Type *type_checker_tile_unary(TypeChecker *checker, const char *op,
+                              Type *operand, SourceLocation location);
+Type *type_checker_tile_cast(TypeChecker *checker, ASTNode *expression,
+                             Type *operand, Type *target);
+Type *type_checker_tile_builtin(TypeChecker *checker, ASTNode *expression,
+                                CallExpression *call, int *handled);
+Type *type_checker_view_cast(TypeChecker *checker, ASTNode *expression,
+                             ASTNode *operand, Type *pointer, Type *view);
+int type_checker_tensor_view_matches(Type *type, MtlcTensorElement element);
+int type_checker_refuse_tile_argument(TypeChecker *checker, ASTNode *argument,
+                                      Type *type, const char *callee);
+int type_checker_tile_mma_operands(TypeChecker *checker, ASTNode *expression,
+                                   CallExpression *call,
+                                   const MtlcTensorMmaDesc *desc,
+                                   Type **operand_types);
 Type *type_checker_tensor_epilogue_builtin(TypeChecker *checker,
                                            ASTNode *expression,
                                            CallExpression *call,

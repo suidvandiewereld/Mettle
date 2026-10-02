@@ -202,6 +202,12 @@ MtlcType *mtlc_type_from_frontend(const Type *type) {
   out->alignment = type->alignment;
   out->array_size = type->array_size;
   out->address_space = translate_space(type->device_space);
+  if (type->kind == TYPE_SLICE && type->view_extents[0] &&
+      (type->view_layout == VIEW_LAYOUT_FRAGMENT_A ||
+       type->view_layout == VIEW_LAYOUT_FRAGMENT_B ||
+       type->view_layout == VIEW_LAYOUT_FRAGMENT_C)) {
+    out->address_space = MTLC_ADDRESS_SPACE_PRIVATE;
+  }
   out->pointee_align = type->declared_align;
   out->view_layout = translate_layout(type->view_layout);
   out->view_layout_param = type->view_layout_param;
