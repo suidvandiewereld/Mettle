@@ -17162,6 +17162,55 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $czPtx = Join-Path $tmpDir "ptx_emit_gb10_tensor_c_zero.ptx"
+  $czCubin = Join-Path $tmpDir "ptx_emit_gb10_tensor_c_zero.cubin"
+  $czOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_c_zero.mettle -o $czPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "C = 0.0 tensor emit failed: $czOut" }
+  $czText = Get-Content -Raw $czPtx
+  $czExpect = @(
+    @{ Name = 's8_zero_tile'; Zero = 32; LoadF32 = 4; Note = 'native-mma s8-block-scaled whole-tile' },
+    @{ Name = 's8_zero_region'; Zero = 32; LoadF32 = 8; Note = 'tensor_region resident native-mma s8-block-scaled' },
+    @{ Name = 'f16_zero_tile'; Zero = 16; LoadF32 = 0; Note = 'native-mma f16 whole-tile' },
+    @{ Name = 'f16_zero_loop'; Zero = 16; LoadF32 = 0; Note = 'tensor_loop resident native-mma f16' },
+    @{ Name = 'f16_zero_loop_runtime_ld'; Zero = 16; LoadF32 = 0; Note = 'tensor_loop resident native-mma f16' },
+    @{ Name = 'f16_wmma_zero'; Zero = 8; LoadF32 = 0; Note = '' },
+    @{ Name = 'f16_wmma_zero_wide'; Zero = 32; LoadF32 = 0; Note = 'tensor_mma tiled' })
+  foreach ($czCase in $czExpect) {
+    $czEntry = [regex]::Match(
+      $czText,
+      "(?s)\.visible \.entry $($czCase.Name)\(.*?(?=\.visible \.entry|\z)"
+    ).Value
+    if (-not $czEntry -or
+        [regex]::Matches($czEntry, 'mov\.f32 %f[0-9]+, 0f00000000').Count -ne $czCase.Zero -or
+        [regex]::Matches($czEntry, 'ld\.global\.f32').Count -ne $czCase.LoadF32 -or
+        $czEntry -match 'wmma\.load\.c' -or
+        ($czCase.Note -and $czEntry -notmatch [regex]::Escape($czCase.Note))) {
+      throw "C = 0.0 tensor contract mismatch in $($czCase.Name)"
+    }
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $czAsm = & $ptxas.Source -arch=sm_121a $czPtx -o $czCubin 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected C = 0.0 tensor PTX: $czAsm" }
+    } else {
+      Write-Host "[SKIP] ptx_emit_gb10_tensor_c_zero ptxas assembly (toolkit lacks sm_121a)"
+    }
+  } else {
+    Write-Host "[SKIP] ptx_emit_gb10_tensor_c_zero ptxas assembly (ptxas not found)"
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_tensor_c_zero" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_tensor_c_zero" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   # Dense f16 tiles that stable WMMA cannot take in one operation (K above
   # 16) run on the native m16n8k16 MMA, unrolled, with operands in
   # workgroup memory read through ldmatrix (x4 per A fragment, x4 per two

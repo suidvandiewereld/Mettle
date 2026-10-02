@@ -2679,6 +2679,7 @@ typedef struct {
   const char *c_scale_space;
   char metadata_stride[24];
   int dense_contiguous[2];
+  int c_zero;
 } PtxMmaTileMemory;
 
 typedef struct {
@@ -3077,6 +3078,21 @@ static void ptx_mma_load_f32(PtxFn *fn, const char *base,
             address);
 }
 
+static void ptx_mma_load_c(PtxFn *fn, const PtxMmaTileMemory *memory,
+                           MtlcTensorLayout layout, PtxMmaCoordinate row,
+                           PtxMmaCoordinate column, const char *group,
+                           const char *thread, int destination_register) {
+  if (memory->c_zero) {
+    char destination[24];
+    reg_name(PC_F32, destination_register, destination);
+    sb_printf(&fn->body, "\tmov.f32 %s, 0f00000000;\n", destination);
+    return;
+  }
+  ptx_mma_load_f32(fn, memory->bases[2], memory->strides[2], layout,
+                   memory->spaces[2], row, column, group, thread,
+                   destination_register);
+}
+
 static void ptx_mma_store_f32(PtxFn *fn, const char *base,
                               const char *leading_dimension,
                               MtlcTensorLayout layout, const char *space,
@@ -3140,6 +3156,10 @@ static int ptx_mma_prepare_tile_memory(PtxFn *fn,
                                        PtxMmaTileMemory *memory) {
   memset(memory, 0, sizeof(*memory));
   for (size_t pointer = 0; pointer < 4; pointer++) {
+    if (pointer == 2 && ir_tensor_c_is_zero(&in->arguments[base + pointer])) {
+      memory->c_zero = 1;
+      continue;
+    }
     PtxVal value = operand_desc(fn, &in->arguments[base + pointer]);
     memory->spaces[pointer] = ptx_wmma_space(value);
     if (!value.is_ptr || !memory->spaces[pointer]) return 0;
@@ -3282,10 +3302,8 @@ static void ptx_emit_mma_byte_subtile(
           1, 0, m_offset + (element >= 2 ? 8u : 0u)};
       PtxMmaCoordinate column = {
           0, 2, n_offset + (unsigned)(element & 1)};
-      ptx_mma_load_f32(fn, memory->bases[2], memory->strides[2],
-                       IR_TENSOR_MMA(in).c_layout, memory->spaces[2], row, column,
-                       group, thread,
-                       accumulator_base + element);
+      ptx_mma_load_c(fn, memory, IR_TENSOR_MMA(in).c_layout, row, column,
+                     group, thread, accumulator_base + element);
     }
   }
 
@@ -3422,9 +3440,8 @@ static void ptx_emit_mma_fp4_subtile(
           1, 0, m_offset + (element >= 2 ? 8u : 0u)};
       PtxMmaCoordinate column = {
           0, 2, n_offset + (unsigned)(element & 1)};
-      ptx_mma_load_f32(fn, memory->bases[2], memory->strides[2],
-                       IR_TENSOR_MMA(in).c_layout, memory->spaces[2], row,
-                       column, group, thread, accumulator_base + element);
+      ptx_mma_load_c(fn, memory, IR_TENSOR_MMA(in).c_layout, row, column,
+                     group, thread, accumulator_base + element);
     }
   }
 
@@ -3569,9 +3586,8 @@ static void ptx_emit_mma_sparse_f16_subtile(
           1, 0, m_offset + (element >= 2 ? 8u : 0u)};
       PtxMmaCoordinate column = {
           0, 2, n_offset + (unsigned)(element & 1)};
-      ptx_mma_load_f32(fn, memory->bases[2], memory->strides[2],
-                       IR_TENSOR_MMA(in).c_layout, memory->spaces[2], row,
-                       column, group, thread, accumulator_base + element);
+      ptx_mma_load_c(fn, memory, IR_TENSOR_MMA(in).c_layout, row, column,
+                     group, thread, accumulator_base + element);
     }
   }
 
@@ -3995,9 +4011,8 @@ static void ptx_emit_mma_s8_scaled_tile(
                                   (unsigned)mt * 16u + (e >= 2 ? 8u : 0u)};
           PtxMmaCoordinate column = {0, 2,
                                      (unsigned)nt * 8u + (unsigned)(e & 1)};
-          ptx_mma_load_f32(fn, memory->bases[2], memory->strides[2],
-                           desc->c_layout, memory->spaces[2], row, column,
-                           group, thread, acc + e);
+          ptx_mma_load_c(fn, memory, desc->c_layout, row, column, group,
+                         thread, acc + e);
         }
       }
     }
@@ -4320,9 +4335,8 @@ static void ptx_emit_mma_f16_tile(
                                   (unsigned)mt * 16u + (e >= 2 ? 8u : 0u)};
           PtxMmaCoordinate column = {0, 2,
                                      (unsigned)nt * 8u + (unsigned)(e & 1)};
-          ptx_mma_load_f32(fn, memory->bases[2], memory->strides[2],
-                           desc->c_layout, memory->spaces[2], row, column,
-                           group, thread, acc + e);
+          ptx_mma_load_c(fn, memory, desc->c_layout, row, column, group,
+                         thread, acc + e);
         }
       }
     }
@@ -4816,7 +4830,7 @@ static int ptx_emit_wmma_tiled_subtile(
     const char *c_space, const char *d_space, char strides[4][24],
     unsigned m_tile, unsigned n_tile, const char *a, const char *b,
     const char *c, const char *scratch_d, int accumulator_base,
-    int load_accumulator, int store_accumulator) {
+    int load_accumulator, int store_accumulator, int c_zero_base) {
   unsigned row = m_tile * profile->tile_m;
   unsigned column = n_tile * profile->tile_n;
   int subtile = (int)(m_tile * (unsigned)profile->n_tiles + n_tile);
@@ -4829,7 +4843,14 @@ static int ptx_emit_wmma_tiled_subtile(
   } else {
     snprintf(accumulator, sizeof(accumulator), "%s", scratch_d);
   }
-  if (load_accumulator) {
+  if (load_accumulator && c_zero_base >= 0) {
+    for (int i = 0; i < profile->c_registers; i++) {
+      char zero[24];
+      reg_name(profile->c_class, c_zero_base + i, zero);
+      sb_printf(&fn->body, "\tmov%s %s, %s;\n", cls_regtype(profile->c_class),
+                zero, profile->c_class == PC_F32 ? "0f00000000" : "0");
+    }
+  } else if (load_accumulator) {
     if (!ptx_wmma_offset_pointer(fn, c_base, strides[2],
                                  IR_TENSOR_MMA(in).c_layout, row, column,
                                  IR_TENSOR_MMA(in).accumulator_element, cp)) {
@@ -4872,29 +4893,35 @@ static int ptx_emit_wmma_tiled_tile(
   }
   PtxVal av = operand_desc(fn, &in->arguments[base]);
   PtxVal bv = operand_desc(fn, &in->arguments[base + 1]);
+  int c_zero = ir_tensor_c_is_zero(&in->arguments[base + 2]);
   PtxVal cv = operand_desc(fn, &in->arguments[base + 2]);
   PtxVal dv = operand_desc(fn, &in->arguments[base + 3]);
   const char *spaces[4] = {ptx_wmma_space(av), ptx_wmma_space(bv),
-                           ptx_wmma_space(cv), ptx_wmma_space(dv)};
-  if (!av.is_ptr || !bv.is_ptr || !cv.is_ptr || !dv.is_ptr ||
+                           c_zero ? "" : ptx_wmma_space(cv),
+                           ptx_wmma_space(dv)};
+  if (!av.is_ptr || !bv.is_ptr || (!c_zero && !cv.is_ptr) || !dv.is_ptr ||
       !spaces[0] || !spaces[1] || !spaces[2] || !spaces[3]) {
     fn_error(fn,
              "PTX tiled WMMA requires generic/global/workgroup tile pointers");
     return 0;
   }
-  char pointers[4][24], strides[4][24];
+  char pointers[4][24] = {{0}}, strides[4][24];
   for (size_t operand = 0; operand < 4; operand++)
-    use_as(fn, &in->arguments[base + operand], PC_B64, pointers[operand]);
+    if (operand != 2 || !c_zero)
+      use_as(fn, &in->arguments[base + operand], PC_B64, pointers[operand]);
   if (!ptx_tensor_stride_registers(fn, in, base, per_tile, strides)) {
     fn_error(fn, "PTX tiled WMMA has inconsistent stride operands");
     return 0;
   }
 
   char a[256], b[256], c[256] = {0}, scratch_d[256] = {0};
+  int c_zero_base = -1;
   ptx_reg_tuple(fn, profile->a_class, profile->a_registers, a, sizeof(a));
   ptx_reg_tuple(fn, profile->b_class, profile->b_registers, b, sizeof(b));
-  if (load_accumulator)
+  if (load_accumulator) {
+    if (c_zero) c_zero_base = fn->count[profile->c_class];
     ptx_reg_tuple(fn, profile->c_class, profile->c_registers, c, sizeof(c));
+  }
   if (accumulator_base < 0)
     ptx_reg_tuple(fn, profile->d_class, profile->d_registers, scratch_d,
                   sizeof(scratch_d));
@@ -4941,7 +4968,7 @@ static int ptx_emit_wmma_tiled_tile(
                 fn, in, profile, pointers[2], pointers[3], spaces[2],
                 spaces[3], strides, (unsigned)m, (unsigned)n, a, b, c,
                 scratch_d, accumulator_base, load_accumulator,
-                store_accumulator))
+                store_accumulator, c_zero_base))
           return 0;
       }
     }
@@ -4978,7 +5005,7 @@ static int ptx_emit_wmma_tiled_tile(
                 fn, in, profile, pointers[2], pointers[3], spaces[2],
                 spaces[3], strides, (unsigned)m, (unsigned)n, a, b, c,
                 scratch_d, accumulator_base, load_accumulator,
-                store_accumulator))
+                store_accumulator, c_zero_base))
           return 0;
       }
     }

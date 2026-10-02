@@ -227,6 +227,19 @@ static int tile_scalar_literal(const ASTNode *node) {
   return 0;
 }
 
+int type_checker_tensor_c_is_zero_literal(const ASTNode *node) {
+  const NumberLiteral *literal;
+  if (!node || node->type != AST_NUMBER_LITERAL) {
+    return 0;
+  }
+  literal = (const NumberLiteral *)node->data;
+  if (!literal) {
+    return 0;
+  }
+  return (literal->is_float ? literal->float_value
+                            : (double)literal->int_value) == 0.0;
+}
+
 static int tile_scalar_fits(Type *element, Type *scalar, ASTNode *node) {
   if (!element || !scalar || type_checker_is_tile(scalar)) {
     return 0;

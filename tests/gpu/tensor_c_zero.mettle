@@ -1,0 +1,112 @@
+kernel(block = 32) s8_zero_tile(a: int8*, b: int8*, d: float32*,
+                                sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 128, ldb: 128, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+}
+
+kernel(block = 32) s8_zero_region(a: int8*, b: int8*, d: float32*,
+                                  sa: float32*, sb: uint16*, nb: int32) {
+  workgroup var s32: uint32*;
+  var lane: int32 = thread.x;
+  var aw: uint32* = (uint32*)a;
+  var as: int8 shared* = (int8 shared*)s32;
+  var bs: int8 shared* = (int8 shared*)(s32 + 256);
+  var w: int32 = 0;
+  while (w < 8) {
+    s32[lane * 8 + w] = aw[lane * 32 + w];
+    w = w + 1;
+  }
+  async_copy_workgroup(&s32[256 + lane * 8], (uint32*)b + lane * 32, 8,
+                       transaction: 16, cache: global);
+  async_copy_commit();
+  async_copy_wait(0);
+  barrier(workgroup, acq_rel);
+  tensor_mma(as, bs, 0.0, d, shape: m32n32k32,
+             a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 32, ldb: 32, ldd: 32,
+             a_scale_ld: 4, b_scale_ld: 4);
+  var kb: int32 = 1;
+  while (kb < nb) {
+    barrier(workgroup, acq_rel);
+    w = 0;
+    while (w < 8) {
+      s32[lane * 8 + w] = aw[lane * 32 + kb * 8 + w];
+      w = w + 1;
+    }
+    async_copy_workgroup(&s32[256 + lane * 8], (uint32*)b + lane * 32 + kb * 8, 8,
+                         transaction: 16, cache: global);
+    async_copy_commit();
+    async_copy_wait(0);
+    barrier(workgroup, acq_rel);
+    tensor_mma(as, bs, d, d, shape: m32n32k32,
+               a_type: i8, b_type: i8, accumulator_type: f32, result_type: f32,
+               a_scale_mode: block32, b_scale_mode: block32,
+               a_scale_type: f32, b_scale_type: f16,
+               a_scale: sa + kb, b_scale: sb + kb,
+               a_layout: row, b_layout: col,
+               lda: 32, ldb: 32, ldc: 32, ldd: 32,
+               a_scale_ld: 4, b_scale_ld: 4);
+    kb = kb + 1;
+  }
+}
+
+kernel(block = 32) f16_zero_loop_runtime_ld(a: uint16*, b: uint16*, d: float32*, nk: int32,
+                                             ld: uint32) {
+  tensor_mma(a, b, 0.0, d, shape: m16n32k64,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, d_layout: row,
+             lda: 256, ldb: 256, ldd: ld);
+  var kb: int32 = 1;
+  while (kb < nk) {
+    tensor_mma(a + kb * 64, b + kb * 64, d, d, shape: m16n32k64,
+               a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+               a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+               lda: 256, ldb: 256, ldc: ld, ldd: ld);
+    kb = kb + 1;
+  }
+}
+
+kernel(block = 32) f16_zero_tile(a: uint16*, b: uint16*, d: float32*) {
+  tensor_mma(a, b, 0.0, d, shape: m16n32k64,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, d_layout: row,
+             lda: 64, ldb: 64, ldd: 32);
+}
+
+kernel(block = 32) f16_zero_loop(a: uint16*, b: uint16*, d: float32*, nk: int32) {
+  tensor_mma(a, b, 0.0, d, shape: m16n32k64,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, d_layout: row,
+             lda: 256, ldb: 256, ldd: 32);
+  var kb: int32 = 1;
+  while (kb < nk) {
+    tensor_mma(a + kb * 64, b + kb * 64, d, d, shape: m16n32k64,
+               a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+               a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+               lda: 256, ldb: 256, ldc: 32, ldd: 32);
+    kb = kb + 1;
+  }
+}
+
+kernel(block = 32) f16_wmma_zero(a: uint16*, b: uint16*, d: float32*) {
+  tensor_mma(a, b, 0.0, d, shape: m16n16k16,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, d_layout: row,
+             lda: 16, ldb: 16, ldd: 16);
+}
+kernel(block = 32) f16_wmma_zero_wide(a: uint16*, b: uint16*, d: float32*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k16,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, d_layout: row,
+             lda: 16, ldb: 16, ldd: 32);
+}

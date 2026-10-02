@@ -754,6 +754,11 @@ kernel gemm_tile(a: uint16*, b: uint16*, c: float32*, d: float32*) {
 }
 ```
 
+C may be the constant `0.0`: the accumulator starts at +0.0 and no C is read.
+`tensor_mma(a, b, 0.0, d, ...)` is the first update of a K loop that does not
+need a zero buffer, and two kernels that start this way start from the same
+value whatever memory holds. Any other constant C is refused.
+
 For whole problems, `tensor_matmul` applies that same target-neutral descriptor
 to one bounded output region. A typical 2-D launch assigns one subgroup to one
 logical region:

@@ -314,6 +314,7 @@ Type *type_checker_tile_builtin(TypeChecker *checker, ASTNode *expression,
 Type *type_checker_view_cast(TypeChecker *checker, ASTNode *expression,
                              ASTNode *operand, Type *pointer, Type *view);
 int type_checker_tensor_view_matches(Type *type, MtlcTensorElement element);
+int type_checker_tensor_c_is_zero_literal(const ASTNode *node);
 int type_checker_refuse_tile_argument(TypeChecker *checker, ASTNode *argument,
                                       Type *type, const char *callee);
 int type_checker_tile_mma_operands(TypeChecker *checker, ASTNode *expression,

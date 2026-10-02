@@ -231,6 +231,7 @@ MtlcTypeKind ir_intrinsic_atomic_result_kind(MtlcIntrinsic intrinsic);
 int ir_intrinsic_is_subgroup(MtlcIntrinsic intrinsic);
 MtlcTypeKind ir_intrinsic_subgroup_result_kind(MtlcIntrinsic intrinsic);
 int ir_tile_operand_is_tile(const MtlcType *type);
+int ir_tensor_c_is_zero(const IROperand *operand);
 int ir_tensor_mma_desc_valid(const MtlcTensorMmaDesc *desc);
 int ir_tensor_epilogue_desc_valid(const MtlcTensorEpilogueDesc *desc);
 int ir_tensor_transfer_desc_valid(const MtlcTensorTransferDesc *desc);

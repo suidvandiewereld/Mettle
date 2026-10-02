@@ -2,6 +2,7 @@
 #include "../common.h"
 #include "../string_intern.h"
 #include <ctype.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -581,6 +582,11 @@ int ir_tile_operand_is_tile(const MtlcType *type) {
           type->view_layout == MTLC_VIEW_LAYOUT_FRAGMENT_B ||
           type->view_layout == MTLC_VIEW_LAYOUT_FRAGMENT_C) &&
          type->view_extents[0] > 0;
+}
+
+int ir_tensor_c_is_zero(const IROperand *operand) {
+  return operand && operand->kind == IR_OPERAND_FLOAT &&
+         operand->float_value == 0.0 && !signbit(operand->float_value);
 }
 
 int ir_tensor_mma_desc_valid(const MtlcTensorMmaDesc *desc) {
@@ -4220,6 +4226,7 @@ static int ir_tensor_region_tensor_op_disjoint(const IRProgram *program,
   for (size_t tile = 0; tile < tiles; tile++) {
     size_t base = tile * per_tile;
     for (size_t i = 0; i < pointers; i++) {
+      if (i == 2 && ir_tensor_c_is_zero(&op->arguments[base + i])) continue;
       if (!ir_tensor_region_access_disjoint(program, function,
                                             &op->arguments[base + i], output,
                                             i == 3))
@@ -4615,6 +4622,9 @@ static int ir_gpu_tensor_signature_matches(const IRProgram *program,
     size_t base = tile * per_tile;
     size_t index = 0;
     for (; index < 4; index++) {
+      if (index == 2 && tile == 0 &&
+          ir_tensor_c_is_zero(&instruction->arguments[base + index]))
+        continue;
       if (!ir_gpu_tensor_pointer_matches(
               ir_gpu_operand_type(program, function, instruction,
                                   base + index),

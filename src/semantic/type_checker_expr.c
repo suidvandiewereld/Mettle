@@ -2141,6 +2141,15 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
   if (!have.stride[3])
     desc.d_leading_dimension =
         desc.d_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR ? desc.n : desc.m;
+  if (!is_matmul && !have.stride[2] && call->argument_count > 3 &&
+      type_checker_tensor_c_is_zero_literal(call->arguments[2]) &&
+      (call->tensor_d_stride_argument == SIZE_MAX ||
+       call->arguments[call->tensor_d_stride_argument]->type ==
+           AST_IDENTIFIER)) {
+    desc.c_layout = desc.d_layout;
+    desc.c_leading_dimension = desc.d_leading_dimension;
+    call->tensor_c_stride_argument = call->tensor_d_stride_argument;
+  }
   if (!mtlc_tensor_mma_desc_is_valid(&desc)) {
     type_checker_set_error_at_location(checker, expression->location,
                                        "Invalid tensor MMA descriptor");
