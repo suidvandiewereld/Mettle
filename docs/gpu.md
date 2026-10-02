@@ -67,6 +67,31 @@ calls, external calls, host launches from device code, and calling a kernel as a
 normal function are rejected by a shared IR call-graph verifier, so the rule is
 the same for every frontend and GPU backend.
 
+### Inline PTX
+
+An `asm { ... }` block in device code is emitted into the PTX as written,
+for the instructions Mettle has no construct for -- `mma.sync` fragments held
+in registers, `ldmatrix`, `cvt.rn.f16x2.f32`. Each `{name}` becomes the
+register that holds the scalar local or parameter `name`, which the block
+reads and writes in place: a function with asm keeps every local in one named
+register for its whole body, and the optimizer treats the block as opaque.
+
+```mettle
+// s0..s3, a0..a3 and b0..b1 declared as scalars: the accumulator, the
+// A fragment and the B fragment of one m16n8k16 tile.
+asm {
+  mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{s0}, {s1}, {s2}, {s3}}, {{a0}, {a1}, {a2}, {a3}}, {{b0}, {b1}}, {{s0}, {s1}, {s2}, {s3}};
+}
+```
+
+A brace that does not enclose a bare name is PTX's own, as in the vector
+operands above or a `{ .reg .pred p; ... }` scope. The block ends at its
+matching brace, counted with `;` starting a comment to the end of the line
+(the x86 rule), so a PTX scope closes on a line of its own. A name that is not
+a register-held scalar -- an array, a record, a local whose address is taken,
+or nothing at all -- is an error naming it. The target, the register classes
+and every instruction's validity are ptxas's to check.
+
 ### Records
 
 Structs, fixed arrays, and arrays of structs work in device code the way they do

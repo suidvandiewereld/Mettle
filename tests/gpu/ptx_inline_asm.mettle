@@ -1,0 +1,29 @@
+// PTX inline assembly in device code: `{name}` binds a scalar local or
+// parameter to the register that holds it, read and written in place;
+// braces around anything else stay PTX's own (vector operands, scopes).
+
+kernel(block = 32) asm_bindings(out: float32*, a: float32, n: int32) {
+  var x: float32 = a + 1.0;
+  var y: float32 = 0.0;
+  asm {
+    add.f32 {y}, {x}, {x};
+  }
+  // A vector operand of two bound registers, then a scope with its own
+  // predicate. The block's end is found by counting braces, and `;` starts
+  // a comment for that count (x86 syntax), so a PTX scope closes on a line
+  // of its own.
+  var lo: uint32 = 3;
+  var hi: uint32 = 5;
+  var both: uint64 = 0;
+  asm {
+    mov.b64 {both}, {{lo}, {hi}};
+  }
+  var m: int32 = 0;
+  asm {
+    { .reg .pred p;
+      setp.lt.s32 p, {n}, 4;
+      selp.s32 {m}, 1, 2, p;
+    }
+  }
+  out[thread.x] = y + (float32)m + (float32)(both >> 32);
+}

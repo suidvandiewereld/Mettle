@@ -9677,6 +9677,74 @@ static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
     }
     break;
   }
+  case IR_OP_INLINE_ASM: {
+    // PTX inline assembly: the block's lines as written, each `{name}`
+    // replaced by the register holding the local or parameter `name` -- a
+    // scalar kept in a register, not an aggregate or a local whose address
+    // is taken. A function with asm keeps every local as one named register
+    // (no SSA promotion), so a binding is read and written in place, and
+    // the optimizer treats the block as opaque. A brace that does not
+    // enclose a bare name is PTX's own: `{{d0}, {d1}}` is a vector operand
+    // of two bound registers, `{ .reg .pred p; ... }` a scope.
+    const char *t = in->text ? in->text : "";
+    Sb line = {0};
+    int line_has_text = 0;
+    for (const char *c = t;; c++) {
+      if (*c == '\n' || *c == '\0') {
+        if (line_has_text) {
+          sb_puts(&fn->body, "\t");
+          sb_puts(&fn->body, line.data ? line.data : "");
+          sb_puts(&fn->body, "\n");
+        }
+        free(line.data);
+        memset(&line, 0, sizeof(line));
+        line_has_text = 0;
+        if (*c == '\0') break;
+        continue;
+      }
+      if (!line_has_text && (*c == ' ' || *c == '\t' || *c == '\r')) continue;
+      line_has_text = 1;
+      if (*c == '{') {
+        const char *q = c + 1;
+        while (*q == ' ' || *q == '\t') q++;
+        const char *name0 = q;
+        if ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') || *q == '_') {
+          while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                 (*q >= '0' && *q <= '9') || *q == '_')
+            q++;
+          const char *name1 = q;
+          while (*q == ' ' || *q == '\t') q++;
+          if (*q == '}') {
+            char name[128];
+            size_t n = (size_t)(name1 - name0);
+            if (n >= sizeof(name)) n = sizeof(name) - 1;
+            memcpy(name, name0, n);
+            name[n] = '\0';
+            PtxBinding *b = find_binding(fn, name);
+            if (!b) {
+              fn_error(fn, "PTX asm: `{%s}` names no local or parameter of '%s'",
+                       name, func->name ? func->name : "?");
+            } else if (b->val.mem_local || b->val.mem_aggregate ||
+                       b->val.cls == PC_NONE) {
+              fn_error(fn, "PTX asm: `{%s}` is not a scalar held in a register "
+                           "(an aggregate, or a local whose address is taken)",
+                       name);
+            } else {
+              char r[24];
+              reg_name(b->val.cls, b->val.idx, r);
+              sb_puts(&line, r);
+            }
+            c = q;
+            continue;
+          }
+        }
+      }
+      char one[2] = {*c, '\0'};
+      sb_puts(&line, one);
+    }
+    free(line.data);
+    break;
+  }
   default:
     fn_error(fn, "PTX: unsupported IR opcode %d in device function '%s'", in->op,
              func->name ? func->name : "?");

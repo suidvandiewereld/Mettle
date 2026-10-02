@@ -16694,6 +16694,52 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  # PTX inline asm: `{name}` becomes the register holding a scalar local or
+  # parameter, read and written in place; other braces stay PTX's own (a
+  # vector operand, a scope); an unknown name is an error naming it.
+  $piaPtx = Join-Path $tmpDir "ptx_inline_asm.ptx"
+  $piaOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/ptx_inline_asm.mettle -o $piaPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "inline asm PTX emission failed: $piaOut" }
+  $piaText = Get-Content -Raw $piaPtx
+  if ($piaText -notmatch 'add\.f32 %f[0-9]+, %f[0-9]+, %f[0-9]+;' -or
+      $piaText -notmatch 'mov\.b64 %rd[0-9]+, \{%r[0-9]+, %r[0-9]+\};' -or
+      $piaText -notmatch '\{ \.reg \.pred p;' -or
+      $piaText -notmatch 'selp\.s32 %r[0-9]+, 1, 2, p;' -or
+      $piaText -match '\{[A-Za-z_][A-Za-z0-9_]*\}') {
+    throw "inline asm bindings were not substituted: $piaText"
+  }
+  $piaBad = Join-Path $tmpDir "ptx_inline_asm_bad.mettle"
+  Set-Content -Path $piaBad -Encoding ascii -Value @(
+    "kernel(block = 32) bad(out: float32*) {",
+    "  asm {",
+    "    mov.f32 {nothere}, 0f00000000;",
+    "  }",
+    "}")
+  $piaBadOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 $piaBad `
+    -o (Join-Path $tmpDir "ptx_inline_asm_bad.ptx") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $piaBadOut -notmatch 'nothere') {
+    throw "an unbound asm name was not rejected by name: $piaBadOut"
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $piaAsm = & $ptxas.Source -arch=sm_121a $piaPtx `
+        -o (Join-Path $tmpDir "ptx_inline_asm.cubin") 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected inline asm PTX: $piaAsm" }
+    }
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_inline_asm" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_inline_asm" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   # Block-scaled i8 tensor MMA: exact int32 K32 dots scaled per block into
   # f32, 4-bit halves-packed B widened in registers, and region residency
   # across a K loop staged through workgroup memory.
