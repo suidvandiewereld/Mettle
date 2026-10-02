@@ -5,7 +5,7 @@
 
 typedef struct {
   char code[8];
-  char message[1600];
+  char message[2400];
 } IRNumericsFailure;
 
 int ir_numerics_program_has_contracts(const IRProgram *program);

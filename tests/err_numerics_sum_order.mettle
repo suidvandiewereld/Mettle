@@ -1,0 +1,31 @@
+import "std/numerics";
+import "std/mem";
+
+const ROWS: Numerics = { k_order: k_ascending };
+
+@numerics(ROWS) kernel(block = 32) sum_up(x: float32*, out: float32*) {
+  var lane: int32 = thread.x;
+  var s: float32 = x[lane * 4 + 0];
+  s = s + x[lane * 4 + 1];
+  s = s + x[lane * 4 + 2];
+  s = s + x[lane * 4 + 3];
+  out[lane] = s;
+}
+
+@numerics(ROWS) kernel(block = 32) sum_down(x: float32*, out: float32*) {
+  var lane: int32 = thread.x;
+  var s: float32 = x[lane * 4 + 3];
+  s = s + x[lane * 4 + 2];
+  s = s + x[lane * 4 + 1];
+  s = s + x[lane * 4 + 0];
+  out[lane] = s;
+}
+
+@numerics(ROWS) fn sums_agree() {
+  var x: float32* = (float32*)numerics_input(512);
+  var one: float32* = (float32*)calloc(32, 4);
+  var two: float32* = (float32*)calloc(32, 4);
+  dispatch sum_up[grid: (1, 1, 1), block: (32, 1, 1)](x, one);
+  dispatch sum_down[grid: (1, 1, 1), block: (32, 1, 1)](x, two);
+  numerics_same(one, two, 1, 32, 32);
+}

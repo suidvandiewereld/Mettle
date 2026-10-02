@@ -2672,6 +2672,8 @@ $cases = @(
   @{ Name = "err_numerics_zero_product"; Path = "tests/err_numerics_zero_product.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0001.: contract TILES: tile_whole and tile_padded compute output .0..0. of the claim at line 46 differently. They part at fma.rn.f32 at line 8 of tile_whole" },
   @{ Name = "err_numerics_no_claim"; Path = "tests/err_numerics_no_claim.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0003.: harness tiles_run of contract TILES makes no claim" },
   @{ Name = "err_numerics_contract_name"; Path = "tests/err_numerics_contract_name.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "names a contract: a const of type Numerics from std/numerics" },
+  @{ Name = "err_numerics_sum_order"; Path = "tests/err_numerics_sum_order.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0001.: contract ROWS: sum_up and sum_down compute output .0..0. of the claim at line 30 differently. They add the same 4 terms in a different order: add.rn.f32 at line 11 of sum_up" },
+  @{ Name = "err_numerics_zero_operand"; Path = "tests/err_numerics_zero_operand.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "They part at mma.m16n8k16 step at line 8 of update_zeroed, against mma.m16n8k16 step at line 16 of update_data: B element 0 is .the constant 0x0. on one side and .input 1 bytes 0..1. on the other" },
   @{ Name = "gpu_register_tiles"; Path = "tests/gpu/register_tiles.mettle"; ShouldSucceed = $true
      Args = @("test")
      SkipBinaryCheck = $true

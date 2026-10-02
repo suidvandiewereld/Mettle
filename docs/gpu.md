@@ -1515,7 +1515,7 @@ gemm_q4_0_i8_tma, gemm_q4_0_i8_s16, gemm_q4_0_i8_s32, gemm_q4_0_i8_s64
 
 | Code | When |
 |---|---|
-| `C0001` | two members compute an element differently; the message names the element and the first operation where the chains part, with its line in each kernel |
+| `C0001` | two members compute an element differently; the message names the element and the first operation where the chains part, with its line in each kernel: for an MMA step the A or B element that differs, for a sum the same terms added in another order |
 | `C0002` | the check cannot decide: a branch, address or loop bound computed from the inputs, inline asm, an extern call, a read of bytes still in flight |
 | `C0003` | a member no harness launches, or a harness that claims nothing |
 | `C0004` | a member reorders K or splits it into partial sums |

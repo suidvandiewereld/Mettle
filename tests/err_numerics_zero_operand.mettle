@@ -1,0 +1,36 @@
+import "std/numerics";
+import "std/mem";
+
+const UPDATES: Numerics = { k_order: k_ascending };
+
+@numerics(UPDATES) kernel(block = 32) update_zeroed(p: uint16*, v: uint16*, zb: uint16*,
+                                                d: float32*) {
+  tensor_mma(p, zb, d, d, shape: m16n8k16,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: row, c_layout: row, d_layout: row,
+             lda: 16, ldb: 8, ldc: 8, ldd: 8);
+}
+
+@numerics(UPDATES) kernel(block = 32) update_data(p: uint16*, v: uint16*, zb: uint16*,
+                                              d: float32*) {
+  tensor_mma(p, v, d, d, shape: m16n8k16,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: row, c_layout: row, d_layout: row,
+             lda: 16, ldb: 8, ldc: 8, ldd: 8);
+}
+
+@numerics(UPDATES) fn updates_agree() {
+  var c: float32* = (float32*)numerics_input(512);
+  var v: uint16* = (uint16*)numerics_input(256);
+  var p: uint16* = (uint16*)calloc(256, 2);
+  var zb: uint16* = (uint16*)calloc(128, 2);
+  var one: float32* = (float32*)calloc(128, 4);
+  var two: float32* = (float32*)calloc(128, 4);
+  for i in 0..128 {
+    one[i] = c[i];
+    two[i] = c[i];
+  }
+  dispatch update_zeroed[grid: (1, 1, 1), block: (32, 1, 1)](p, v, zb, one);
+  dispatch update_data[grid: (1, 1, 1), block: (32, 1, 1)](p, v, zb, two);
+  numerics_same(one, two, 16, 8, 8);
+}

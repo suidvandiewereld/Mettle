@@ -270,30 +270,281 @@ static void nc_launch(void *context, const char *kernel,
   nc_names_add(&session->launched, kernel);
 }
 
-static void nc_part(const NumStore *store, NumTerm a, NumTerm b, NumTerm *pa,
-                    NumTerm *pb) {
+#define NC_PART_FANOUT 8
+#define NC_PART_DEPTH 64
+#define NC_PART_VISITS 1000000
+
+typedef struct {
+  NumTerm a, b, pa, pb;
+} NcPartEntry;
+
+typedef struct {
+  NcPartEntry *slots;
+  size_t capacity;
+  size_t used;
+  size_t visits;
+} NcPartMemo;
+
+static size_t nc_part_slot(const NcPartEntry *slots, size_t capacity,
+                           NumTerm a, NumTerm b) {
+  uint64_t hash = (uint64_t)a * 0x9E3779B97F4A7C15ull ^
+                  (uint64_t)b * 0xC2B2AE3D27D4EB4Full;
+  size_t i = (size_t)(hash >> 17) & (capacity - 1);
+  while (slots[i].a && !(slots[i].a == a && slots[i].b == b)) {
+    i = (i + 1) & (capacity - 1);
+  }
+  return i;
+}
+
+static int nc_part_lookup(const NcPartMemo *memo, NumTerm a, NumTerm b,
+                          NumTerm *pa, NumTerm *pb) {
+  size_t i;
+  if (!memo->slots) return 0;
+  i = nc_part_slot(memo->slots, memo->capacity, a, b);
+  if (!memo->slots[i].a) return 0;
+  *pa = memo->slots[i].pa;
+  *pb = memo->slots[i].pb;
+  return 1;
+}
+
+static int nc_part_store(NcPartMemo *memo, NumTerm a, NumTerm b, NumTerm pa,
+                         NumTerm pb) {
+  size_t i;
+  if ((memo->used + 1) * 2 > memo->capacity) {
+    size_t capacity = memo->capacity ? memo->capacity * 2 : 1024;
+    NcPartEntry *slots = (NcPartEntry *)calloc(capacity, sizeof(NcPartEntry));
+    if (!slots) return 0;
+    for (size_t k = 0; k < memo->capacity; k++) {
+      if (memo->slots[k].a) {
+        slots[nc_part_slot(slots, capacity, memo->slots[k].a,
+                           memo->slots[k].b)] = memo->slots[k];
+      }
+    }
+    free(memo->slots);
+    memo->slots = slots;
+    memo->capacity = capacity;
+  }
+  i = nc_part_slot(memo->slots, memo->capacity, a, b);
+  if (!memo->slots[i].a) memo->used++;
+  memo->slots[i].a = a;
+  memo->slots[i].b = b;
+  memo->slots[i].pa = pa;
+  memo->slots[i].pb = pb;
+  return 1;
+}
+
+static int nc_same_site(const NumStore *store, NumTerm x, NumTerm y) {
+  const char *fx = num_function(store, x);
+  const char *fy = num_function(store, y);
+  return x == y ||
+         (num_opcode(store, x) == num_opcode(store, y) &&
+          num_line(store, x) == num_line(store, y) &&
+          (fx == fy || (fx && fy && strcmp(fx, fy) == 0)));
+}
+
+#define NC_SUM_LEAVES 4096
+
+static size_t nc_sum_leaves(const NumStore *store, NumTerm term,
+                            NumTerm *leaves) {
+  NumTerm stack[1024];
+  size_t depth = 0, count = 0;
+  stack[depth++] = term;
+  while (depth) {
+    NumTerm t = stack[--depth];
+    if (num_opcode(store, t) == NUM_FADD && num_arg_count(store, t) == 2) {
+      if (depth + 2 > sizeof(stack) / sizeof(stack[0])) return 0;
+      stack[depth++] = num_arg(store, t, 1);
+      stack[depth++] = num_arg(store, t, 0);
+    } else {
+      if (count >= NC_SUM_LEAVES) return 0;
+      leaves[count++] = t;
+    }
+  }
+  return count;
+}
+
+static int nc_compare_term(const void *a, const void *b) {
+  NumTerm x = *(const NumTerm *)a, y = *(const NumTerm *)b;
+  return x < y ? -1 : x > y;
+}
+
+static size_t nc_reordered_sum(const NumStore *store, NumTerm a, NumTerm b) {
+  static NumTerm left[NC_SUM_LEAVES], right[NC_SUM_LEAVES];
+  size_t nl, nr;
+  if (a == b || num_opcode(store, a) != NUM_FADD ||
+      num_opcode(store, b) != NUM_FADD) {
+    return 0;
+  }
+  nl = nc_sum_leaves(store, a, left);
+  nr = nc_sum_leaves(store, b, right);
+  if (nl < 3 || nl != nr) {
+    return 0;
+  }
+  qsort(left, nl, sizeof(NumTerm), nc_compare_term);
+  qsort(right, nr, sizeof(NumTerm), nc_compare_term);
+  return memcmp(left, right, nl * sizeof(NumTerm)) == 0 ? nl : 0;
+}
+
+static void nc_reorder_narrow(const NumStore *store, NumTerm *a, NumTerm *b) {
   for (int guard = 0; guard < 100000; guard++) {
-    unsigned count = num_arg_count(store, a), i, differing = 0, at = 0;
+    unsigned na = num_arg_count(store, *a), nb = num_arg_count(store, *b);
+    int moved = 0;
+    for (unsigned i = 0; i < na && !moved; i++) {
+      for (unsigned j = 0; j < nb && !moved; j++) {
+        NumTerm x = num_arg(store, *a, i), y = num_arg(store, *b, j);
+        if (nc_reordered_sum(store, x, y)) {
+          *a = x;
+          *b = y;
+          moved = 1;
+        }
+      }
+    }
+    if (!moved) return;
+  }
+}
+
+static unsigned nc_interchangeable(const NumStore *store, NumTerm term) {
+  NumOp op = num_opcode(store, term);
+  unsigned count = num_arg_count(store, term);
+  uint64_t imm = num_imm(store, term);
+  if (op == NUM_FMAX || op == NUM_FMIN) return count;
+  if ((op == NUM_FADD || op == NUM_FMUL || op == NUM_FFMA) && count >= 2) {
+    return 2;
+  }
+  if (op == NUM_FCMP && count == 2 &&
+      (imm == NUM_CMP_EQ || imm == NUM_CMP_NE)) {
+    return 2;
+  }
+  return 0;
+}
+
+static unsigned nc_differing(const NumStore *store, NumTerm a, NumTerm b,
+                             unsigned *which_a, unsigned *which_b) {
+  unsigned count = num_arg_count(store, a), loose = nc_interchangeable(store, a);
+  unsigned char used_a[128], used_b[128];
+  unsigned differing = 0, i, j, next_b = 0;
+  if (count > 128) loose = 0;
+  memset(used_a, 0, sizeof(used_a));
+  memset(used_b, 0, sizeof(used_b));
+  for (i = 0; i < loose; i++) {
+    for (j = 0; j < loose; j++) {
+      if (!used_b[j] && num_arg(store, a, i) == num_arg(store, b, j)) {
+        used_a[i] = 1;
+        used_b[j] = 1;
+        break;
+      }
+    }
+  }
+  for (i = 0; i < count; i++) {
+    unsigned at_b = i;
+    if (i < loose) {
+      if (used_a[i]) continue;
+      while (next_b < loose && used_b[next_b]) next_b++;
+      at_b = next_b++;
+    } else if (num_arg(store, a, i) == num_arg(store, b, i)) {
+      continue;
+    }
+    if (differing < NC_PART_FANOUT) {
+      which_a[differing] = i;
+      which_b[differing] = at_b;
+    }
+    differing++;
+  }
+  return differing;
+}
+
+static void nc_part_walk(const NumStore *store, NcPartMemo *memo, NumTerm a,
+                         NumTerm b, unsigned depth, NumTerm *pa, NumTerm *pb) {
+  for (int guard = 0; guard < 100000; guard++) {
+    unsigned count = num_arg_count(store, a), differing;
+    unsigned which[NC_PART_FANOUT], which_b[NC_PART_FANOUT];
+    NumTerm ca = 0, cb = 0;
+    int agree = 1;
     if (num_opcode(store, a) != num_opcode(store, b) ||
         num_width(store, a) != num_width(store, b) ||
         num_imm(store, a) != num_imm(store, b) ||
         count != num_arg_count(store, b)) {
       break;
     }
-    for (i = 0; i < count; i++) {
-      if (num_arg(store, a, i) != num_arg(store, b, i)) {
-        if (!differing) at = i;
-        differing++;
-      }
+    differing = nc_differing(store, a, b, which, which_b);
+    if (differing == 1) {
+      a = num_arg(store, a, which[0]);
+      b = num_arg(store, b, which_b[0]);
+      continue;
     }
-    if (differing != 1) {
+    if (differing > 1 && nc_reordered_sum(store, a, b)) {
+      nc_reorder_narrow(store, &a, &b);
       break;
     }
-    a = num_arg(store, a, at);
-    b = num_arg(store, b, at);
+    if (differing == 0 || differing > NC_PART_FANOUT ||
+        depth >= NC_PART_DEPTH || memo->visits >= NC_PART_VISITS) {
+      break;
+    }
+    for (unsigned k = 0; k < differing && agree; k++) {
+      NumTerm xa = num_arg(store, a, which[k]);
+      NumTerm xb = num_arg(store, b, which_b[k]);
+      NumTerm ra = 0, rb = 0;
+      if (!nc_part_lookup(memo, xa, xb, &ra, &rb)) {
+        memo->visits++;
+        nc_part_walk(store, memo, xa, xb, depth + 1, &ra, &rb);
+        if (!nc_part_store(memo, xa, xb, ra, rb)) {
+          agree = 0;
+          break;
+        }
+      }
+      if (k == 0) {
+        ca = ra;
+        cb = rb;
+      } else if (!nc_same_site(store, ca, ra) || !nc_same_site(store, cb, rb)) {
+        agree = 0;
+      }
+    }
+    if (agree) {
+      a = ca;
+      b = cb;
+    }
+    break;
   }
   *pa = a;
   *pb = b;
+}
+
+static void nc_part(const NumStore *store, NumTerm a, NumTerm b, NumTerm *pa,
+                    NumTerm *pb) {
+  NcPartMemo memo;
+  memset(&memo, 0, sizeof(memo));
+  nc_part_walk(store, &memo, a, b, 0, pa, pb);
+  free(memo.slots);
+}
+
+static void nc_operand(const NumStore *store, NumTerm a, NumTerm b, char *out,
+                       size_t size) {
+  NumOp op = num_opcode(store, a);
+  unsigned count = num_arg_count(store, a);
+  char da[200], db[200];
+  out[0] = '\0';
+  if ((op != NUM_MMA && op != NUM_IDOT) || op != num_opcode(store, b) ||
+      count != num_arg_count(store, b)) {
+    return;
+  }
+  unsigned first = op == NUM_MMA ? 1 : 0;
+  unsigned half = (count - first) / 2;
+  for (unsigned i = first; i < count; i++) {
+    NumTerm x = num_arg(store, a, i), y = num_arg(store, b, i);
+    if (x == y) continue;
+    num_describe(store, x, da, sizeof(da));
+    num_describe(store, y, db, sizeof(db));
+    snprintf(out, size, ": %s element %u is [%s] on one side and [%s] on "
+             "the other", i - first < half ? "A" : "B", (i - first) % half,
+             da, db);
+    return;
+  }
+  if (first && num_arg(store, a, 0) != num_arg(store, b, 0)) {
+    num_describe(store, num_arg(store, a, 0), da, sizeof(da));
+    num_describe(store, num_arg(store, b, 0), db, sizeof(db));
+    snprintf(out, size, ": the accumulator is [%s] on one side and [%s] on "
+             "the other", da, db);
+  }
 }
 
 static void nc_explain(const NumStore *store, NumTerm term, char *out,
@@ -380,12 +631,13 @@ static void nc_mismatch(const NcSession *session, IRNumericsFailure *failure) {
   const NumStore *store = session->store;
   const IRInterpClaim *claim = &session->mismatch;
   NumTerm pa = 0, pb = 0;
-  char da[600], db[600];
+  char da[600], db[600], operand[500];
   const char *left = num_function(store, claim->left);
   const char *right = num_function(store, claim->right);
   nc_part(store, claim->left, claim->right, &pa, &pb);
   nc_explain(store, pa, da, sizeof(da));
   nc_explain(store, pb, db, sizeof(db));
+  nc_operand(store, pa, pb, operand, sizeof(operand));
   if (num_opcode(store, claim->left) == NUM_CONCAT ||
       num_opcode(store, claim->right) == NUM_CONCAT) {
     nc_fail(failure, "C0001",
@@ -414,11 +666,21 @@ static void nc_mismatch(const NcSession *session, IRNumericsFailure *failure) {
             (unsigned long long)claim->line, da, db);
     return;
   }
+  if (nc_reordered_sum(store, pa, pb)) {
+    nc_fail(failure, "C0001",
+            "contract %s: %s and %s compute output [%lld][%lld] of the claim "
+            "at line %llu differently. They add the same %zu terms in a "
+            "different order: %s, against %s",
+            session->contract, left, right, claim->row, claim->column,
+            (unsigned long long)claim->line,
+            nc_reordered_sum(store, pa, pb), da, db);
+    return;
+  }
   nc_fail(failure, "C0001",
           "contract %s: %s and %s compute output [%lld][%lld] of the claim at "
-          "line %llu differently. They part at %s, against %s",
+          "line %llu differently. They part at %s, against %s%s",
           session->contract, left, right, claim->row, claim->column,
-          (unsigned long long)claim->line, da, db);
+          (unsigned long long)claim->line, da, db, operand);
 }
 
 int ir_numerics_program_has_contracts(const IRProgram *program) {
