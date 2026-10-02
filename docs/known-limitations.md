@@ -356,10 +356,10 @@ Nsight Compute's Python interface (see [GPU offload](gpu.md)).
 ## Running a kernel's grid on the CPU
 
 `mettle test` runs a dispatched grid in the compiler's interpreter, one block
-at a time and one barrier phase at a time. A barrier inside a device helper is
-refused rather than counted: the runner stops a work item in the kernel's own
-frame, and a helper's frame is not one it can resume. Move the barrier into the
-kernel.
+at a time and one barrier phase at a time, each work item on its own stack.
+Dense f16 `tensor_mma` sums each 16-deep K step exactly and rounds once; the
+device's tensor cores accumulate differently, so f16 results can differ in the
+last place. Block-scaled int8 is the device's arithmetic exactly.
 
 The grid is capped at 65536 work items. Beyond that the run reports the cap
 rather than trying.

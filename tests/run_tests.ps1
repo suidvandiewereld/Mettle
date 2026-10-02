@@ -2652,6 +2652,15 @@ $cases = @(
   @{ Name = "err_gpu_layout_mismatch"; Path = "tests/err_gpu_layout_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this wants elements laid out 'row' and these are laid out 'swizzle128'" },
   @{ Name = "err_gpu_bank_conflict"; Path = "tests/err_gpu_bank_conflict.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "work items 0 and 1 both land in bank 0, so this access is two accesses" },
   @{ Name = "err_gpu_view_index_unbounded"; Path = "tests/err_gpu_view_index_unbounded.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this index is not bounded to 0..31" },
+  @{ Name = "gpu_grid_runner"; Path = "tests/gpu/grid_runner.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("5 passed")
+     OutputMustNotMatch = @("failed") },
+  @{ Name = "err_gpu_async_read_in_flight"; Path = "tests/err_gpu_async_read_in_flight.mettle"; ShouldSucceed = $false
+     Args = @("test")
+     SkipBinaryCheck = $true
+     Pattern = "a read of workgroup bytes that the asynchronous copy at line 4 has not delivered yet" },
   @{ Name = "gpu_register_tiles"; Path = "tests/gpu/register_tiles.mettle"; ShouldSucceed = $true
      Args = @("test")
      SkipBinaryCheck = $true

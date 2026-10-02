@@ -1,0 +1,16 @@
+kernel(block = 32) early(src: uint32*, out: uint32*) {
+  workgroup var s32: uint32*;
+  var lane: int32 = thread.x;
+  async_copy_workgroup(&s32[lane * 4], src + lane * 4, 4, transaction: 16, cache: global);
+  async_copy_commit();
+  out[lane] = s32[lane * 4];
+  async_copy_wait(0);
+}
+
+@test fn reading_before_the_wait() -> int32 {
+  var src: uint32[128];
+  var out: uint32[32];
+  for i in 0..128 { src[i] = (uint32)i; }
+  dispatch early[grid: (1, 1, 1), block: (32, 1, 1), shared: 512](&src[0], &out[0]);
+  return 0;
+}

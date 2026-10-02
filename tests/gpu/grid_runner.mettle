@@ -1,0 +1,170 @@
+import "std/warp";
+import "std/numerics";
+import "std/mem";
+import "grid_runner_reference";
+
+extern fn mbarrier_init(bar: uint64 shared*, count: uint32) = "mbarrier_init";
+extern fn mbarrier_arrive_expect_tx(bar: uint64 shared*, bytes: uint32) = "mbarrier_arrive_expect_tx";
+extern fn mbarrier_wait_parity(bar: uint64 shared*, parity: uint32) = "mbarrier_wait_parity";
+extern fn fence_mbarrier_init() = "fence_mbarrier_init";
+extern fn tma_load_2d(dst: uint8 shared*, map: uint8*, x: int32, y: int32, bar: uint64 shared*) = "tma_load_2d";
+
+@noinline fn sum_in_helper(v: float32) -> float32 requires Warp {
+  return warp_sum_f32(v);
+}
+
+kernel(block = 64) warp_ops(out: float32*) {
+  var lane: int32 = thread.x & 31;
+  var tid: int32 = thread.x;
+  out[tid * 4] = sum_in_helper((float32)tid);
+  out[tid * 4 + 1] = warp_max_f32((float32)((tid * 7) % 23));
+  out[tid * 4 + 2] = subgroup_shuffle((float32)tid, (uint32)(lane ^ 1));
+  out[tid * 4 + 3] = (float32)subgroup_scan_inclusive_add((uint32)1);
+}
+
+kernel(block = 32) staged_copy(src: uint32*, out: uint32*) {
+  workgroup var s32: uint32*;
+  var lane: int32 = thread.x;
+  async_copy_workgroup(&s32[lane * 4], src + lane * 4, 4, transaction: 16, cache: global);
+  async_copy_commit();
+  async_copy_wait(0);
+  barrier(workgroup, acq_rel);
+  out[lane] = s32[((lane + 5) % 32) * 4 + 2];
+}
+
+kernel(block = 32) q4_scaled(a: int8*, b: uint8*, d: float32*, sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k64,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+}
+
+kernel(block = 32) f16_tile(a: uint16*, b: uint16*, c: float32*, d: float32*) {
+  tensor_mma(a, b, c, d, shape: m16n32k64,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: 64, ldb: 64, ldc: 32, ldd: 32);
+}
+
+kernel(block = 32) tma_box(map: uint8*, out: uint8*) {
+  workgroup var s8: uint8 align(1024)*;
+  var lane: int32 = thread.x;
+  var bar: uint64 shared* = (uint64 shared*)(s8 + 2048);
+  if (lane == 0) {
+    mbarrier_init(bar, 1);
+    fence_mbarrier_init();
+  }
+  barrier(workgroup, acq_rel);
+  if (lane == 0) {
+    mbarrier_arrive_expect_tx(bar, 1024);
+    tma_load_2d((uint8 shared*)s8, map, 64, 16, bar);
+  }
+  mbarrier_wait_parity(bar, 0);
+  var r: int32 = lane >> 1;
+  var half: int32 = (lane & 1) * 32;
+  for c in 0..32 {
+    var p: int32 = r * 64 + half + c;
+    var q: int32 = p ^ (((p >> 7) & 3) << 4);
+    out[r * 64 + half + c] = s8[q];
+  }
+}
+
+@test fn subgroup_operations_run_together() -> int32 {
+  var out: float32[256];
+  dispatch warp_ops[grid: (1, 1, 1), block: (64, 1, 1)](&out[0]);
+  for t in 0..64 {
+    var warp: int32 = t / 32;
+    var lane: int32 = t % 32;
+    var total: int32 = 32 * 31 / 2 + warp * 32 * 32;
+    var top: int32 = 0;
+    for l in 0..32 {
+      var v: int32 = ((warp * 32 + l) * 7) % 23;
+      if (v > top) { top = v; }
+    }
+    if ((int32)out[t * 4] != total) { return 1; }
+    if ((int32)out[t * 4 + 1] != top) { return 2; }
+    if ((int32)out[t * 4 + 2] != warp * 32 + (lane ^ 1)) { return 3; }
+    if ((int32)out[t * 4 + 3] != lane + 1) { return 4; }
+  }
+  return 0;
+}
+
+@test fn asynchronous_copies_land_at_their_wait() -> int32 {
+  var src: uint32[128];
+  var out: uint32[32];
+  for i in 0..128 { src[i] = (uint32)(i * 11 + 3); }
+  dispatch staged_copy[grid: (1, 1, 1), block: (32, 1, 1), shared: 512](&src[0], &out[0]);
+  for t in 0..32 {
+    if (out[t] != src[((t + 5) % 32) * 4 + 2]) { return 1; }
+  }
+  return 0;
+}
+
+@test fn block_scaled_int8_is_the_devices_arithmetic() -> int32 {
+  var a: int8* = (int8*)malloc(2048);
+  defer free(a);
+  var b: uint8* = (uint8*)malloc(2048);
+  defer free(b);
+  var sa: float32* = (float32*)malloc(256);
+  defer free(sa);
+  var sb: uint16* = (uint16*)malloc(128);
+  defer free(sb);
+  var d: float32* = (float32*)malloc(4096);
+  defer free(d);
+  grid_q4_inputs(a, b, sa, sb);
+  dispatch q4_scaled[grid: (1, 1, 1), block: (32, 1, 1)](a, b, d, sa, sb);
+  assert_eq((int64)grid_hash((uint32*)d, 1024), GRID_Q4_HASH);
+  return 0;
+}
+
+@test fn f16_steps_round_once_each() -> int32 {
+  var a: float16[1024];
+  var b: float16[2048];
+  var c: float32[512];
+  var d: float32[512];
+  for i in 0..1024 { a[i] = (float16)((float32)((i * 37) % 900) / 256.0 - 1.5); }
+  for i in 0..2048 { b[i] = (float16)((float32)((i * 53) % 700) / 128.0 - 2.5); }
+  for i in 0..512 { c[i] = (float32)(i % 7) * 0.25; }
+  dispatch f16_tile[grid: (1, 1, 1), block: (32, 1, 1)]((uint16*)&a[0], (uint16*)&b[0], &c[0], &d[0]);
+  for r in 0..16 {
+    for n in 0..32 {
+      var acc: float32 = c[r * 32 + n];
+      for ks in 0..4 {
+        var sum: float64 = (float64)acc;
+        for j in 0..16 {
+          var x: float64 = (float64)a[r * 64 + ks * 16 + j];
+          var y: float64 = (float64)b[n * 64 + ks * 16 + j];
+          sum = sum + x * y;
+        }
+        acc = (float32)sum;
+      }
+      if (d[r * 32 + n] != acc) { return 1; }
+    }
+  }
+  return 0;
+}
+
+@test fn a_tensor_map_load_lands_swizzled() -> int32 {
+  var src: uint8* = (uint8*)malloc(4096);
+  defer free(src);
+  var map: uint8* = (uint8*)malloc(128);
+  defer free(map);
+  var out: uint8* = (uint8*)malloc(1024);
+  defer free(out);
+  for i in 0..4096 { src[i] = (uint8)((i * 29 + 7) & 255); }
+  numerics_tensor_map_2d(map, src, 1, 128, 32, 128, 64, 16, 64);
+  dispatch tma_box[grid: (1, 1, 1), block: (32, 1, 1), shared: 4096](map, out);
+  for r in 0..16 {
+    for c in 0..64 {
+      var want: uint8 = 0;
+      if (16 + r < 32) { want = src[(16 + r) * 128 + 64 + c]; }
+      if (out[r * 64 + c] != want) { return 1; }
+    }
+  }
+  return 0;
+}

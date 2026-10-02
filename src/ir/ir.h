@@ -232,6 +232,12 @@ int ir_intrinsic_is_subgroup(MtlcIntrinsic intrinsic);
 MtlcTypeKind ir_intrinsic_subgroup_result_kind(MtlcIntrinsic intrinsic);
 int ir_tile_operand_is_tile(const MtlcType *type);
 int ir_tensor_c_is_zero(const IROperand *operand);
+typedef enum {
+  IR_BLOCK_SCALE_PRODUCT = 0,
+  IR_BLOCK_SCALE_B_FIRST,
+  IR_BLOCK_SCALE_A_FIRST
+} IRBlockScaleOrder;
+IRBlockScaleOrder ir_tensor_block_scale_order(const MtlcTensorMmaDesc *desc);
 int ir_tensor_mma_desc_valid(const MtlcTensorMmaDesc *desc);
 int ir_tensor_epilogue_desc_valid(const MtlcTensorEpilogueDesc *desc);
 int ir_tensor_transfer_desc_valid(const MtlcTensorTransferDesc *desc);

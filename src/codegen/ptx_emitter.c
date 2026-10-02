@@ -3834,11 +3834,10 @@ static void ptx_emit_mma_s8_scaled_tile(
   const char *neg_start = x16 ? "0fC9400000" : "0fCB400000";
   // Scales with at most 11 significant bits (f16, or f32 declared to hold
   // f16 or bf16 values) make -start * scale exact.
-  int prefactor_b = desc->b_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
-                    desc->b_scale_values != MTLC_TENSOR_ELEMENT_INVALID;
-  int prefactor_a = !prefactor_b &&
-                    (desc->a_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
-                     desc->a_scale_values != MTLC_TENSOR_ELEMENT_INVALID);
+  int prefactor_b =
+      ir_tensor_block_scale_order(desc) == IR_BLOCK_SCALE_B_FIRST;
+  int prefactor_a =
+      ir_tensor_block_scale_order(desc) == IR_BLOCK_SCALE_A_FIRST;
 
   char lane_id[24];
   reg_name(PC_B32, new_reg(fn, PC_B32), lane_id);

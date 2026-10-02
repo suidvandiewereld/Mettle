@@ -1,5 +1,6 @@
 #include "ir_interp.h"
 #include "ir_trace.h"
+#include "ir_fiber.h"
 #include "../runtime/mt_math.h"
 #include "../common.h"
 #include <limits.h>
@@ -29,6 +30,7 @@ typedef struct {
   size_t alloc_line;
   unsigned char *init_map;
   unsigned char device_space;
+  uint32_t *pending;
 } IIBuffer;
 
 typedef struct {
@@ -62,7 +64,6 @@ typedef struct {
 } IIEnv;
 
 #define II_GPU_MAX_SHARED 32
-#define II_GPU_MAX_BARRIERS 64
 #define II_GPU_MAX_UNIFORMS 64
 #define II_GPU_MAX_THREADS 65536
 #define II_GPU_SUBGROUP 32
@@ -73,11 +74,6 @@ typedef struct {
   size_t buffer_index;
 } IIGpuShared;
 
-typedef struct {
-  size_t site;
-  long long arrivals;
-  size_t line;
-} IIGpuBarrier;
 
 typedef struct {
   const char *name;
@@ -99,16 +95,55 @@ typedef struct {
   size_t capacity;
 } IITileTrace;
 
+typedef enum {
+  II_STOP_NONE = 0,
+  II_STOP_BARRIER,
+  II_STOP_COLLECTIVE,
+  II_STOP_WAIT
+} IIStopKind;
+
+typedef struct {
+  unsigned long long destination;
+  unsigned long long source;
+  long long bytes;
+  unsigned group;
+  size_t line;
+} IIAsyncCopy;
+
 typedef struct IIGpuThread {
   int started;
   int suspended;
   int finished;
+  int ok;
+  IIStopKind stop;
   size_t tile_cursor;
   size_t pc;
-  size_t barrier_site;
+  const IRInstruction *site;
   size_t barrier_line;
   void *frame;
+  IIAsyncCopy *copies;
+  size_t copy_count;
+  size_t copy_capacity;
+  unsigned committed;
+  struct IRInterpMachine *machine;
+  IRFiber *fiber;
+  int depth;
+  int pure_depth;
+  const char *pure_fn;
+  int pure_declared;
+  void *effects;
+  size_t effect_count;
 } IIGpuThread;
+
+typedef struct {
+  unsigned long long address;
+  long long expected;
+  long long arrived;
+  long long transaction;
+  unsigned phase;
+} IIMbarrier;
+
+#define II_GPU_MAX_MBARRIERS 64
 
 typedef struct {
   int active;
@@ -121,13 +156,24 @@ typedef struct {
   long long threads_per_block;
   IIGpuShared shared[II_GPU_MAX_SHARED];
   size_t shared_count;
-  IIGpuBarrier barriers[II_GPU_MAX_BARRIERS];
-  size_t barrier_count;
   IIGpuUniform uniforms[II_GPU_MAX_UNIFORMS];
   size_t uniform_count;
   long long threads_run;
   IITileTrace *tile_traces;
   size_t tile_trace_warps;
+  long long dynamic_shared;
+  unsigned long long dynamic_base;
+  IIMbarrier mbarriers[II_GPU_MAX_MBARRIERS];
+  size_t mbarrier_count;
+  IRFiberScheduler *scheduler;
+  IRFunction *kernel;
+  const IRInterpValue *args;
+  size_t nargs;
+  int base_depth;
+  int base_pure_depth;
+  const char *base_pure_fn;
+  int base_pure_declared;
+  size_t base_effects;
 } IIGpuGrid;
 
 struct IRInterpMachine {
@@ -156,7 +202,7 @@ struct IRInterpMachine {
   long long fuel;
   int depth;
   IRInterpStatus status;
-  char detail[128];
+  char detail[320];
 
   SourceLocation current_call_loc;
 
@@ -195,7 +241,6 @@ struct IRInterpMachine {
   int recheck_inferred_purity;
 
   IIGpuGrid gpu;
-  IIGpuThread *gpu_resume;
   IIGpuThread *gpu_current;
 
   int count_enabled;
@@ -299,6 +344,7 @@ void ir_interp_destroy(IRInterpMachine *machine) {
   for (size_t i = 0; i < machine->buffer_count; i++) {
     free(machine->buffers[i].data);
     free(machine->buffers[i].init_map);
+    free(machine->buffers[i].pending);
   }
   free(machine->buffers);
   free(machine->free_slots);
@@ -412,8 +458,10 @@ static void ii_reclaim_buffer(IRInterpMachine *machine, size_t index) {
   IIBuffer *buf = &machine->buffers[index];
   free(buf->data);
   free(buf->init_map);
+  free(buf->pending);
   buf->data = NULL;
   buf->init_map = NULL;
+  buf->pending = NULL;
   buf->freed = 1;
   buf->escaped_local = 0;
   ii_free_slot_push(machine, index);
@@ -461,6 +509,7 @@ static unsigned long long ii_add_buffer_ex(IRInterpMachine *machine,
   buf->alloc_line = 0;
   buf->base = II_ADDR_BASE + (unsigned long long)index * II_ADDR_STRIDE;
   buf->init_map = NULL;
+  buf->pending = NULL;
   buf->device_space = MTLC_ADDRESS_SPACE_DEFAULT;
   buf->data = (unsigned char *)malloc(size > 0 ? (size_t)size : 1);
   if (buf->data) {
@@ -682,12 +731,18 @@ static IRFunction *ii_token_function(IRInterpMachine *machine,
   return NULL;
 }
 
+static int ii_pending_check(IRInterpMachine *machine, IIBuffer *buf,
+                            long long offset, long long length);
+
 static int ii_mem_read(IRInterpMachine *machine, unsigned long long addr,
                        int size, unsigned long long *out) {
   long long offset = 0;
   IIBuffer *buf = ii_addr_to_buffer(machine, addr, size, &offset);
   if (!buf) {
     ii_fail(machine, IR_INTERP_TRAP, "load out of bounds / after free");
+    return 0;
+  }
+  if (buf->pending && !ii_pending_check(machine, buf, offset, size)) {
     return 0;
   }
   unsigned long long value = 0;
@@ -3279,7 +3334,12 @@ typedef int (*IIExternHandler)(IRInterpMachine *machine,
                                size_t arg_count,
                                IRInterpValue *result);
 
+static int ii_extern_numerics(IRInterpMachine *machine, const char *name,
+                              const IRInterpValue *args, size_t arg_count,
+                              IRInterpValue *result);
+
 static const IIExternHandler II_EXTERN_HANDLERS[] = {
+    ii_extern_numerics,
     ii_extern_allocate,
     ii_extern_stream,
     ii_extern_swap,
@@ -4918,6 +4978,11 @@ static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
   long long bytes = elements > 0 ? elements * element_size : 4096;
   unsigned long long base = 0;
   IRInterpValue value;
+  int dynamic = insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
+                elements <= 0;
+  if (dynamic && gpu->dynamic_shared > 0) {
+    bytes = gpu->dynamic_shared;
+  }
   if (!gpu->active) {
     ii_fail(machine, IR_INTERP_UNSUPPORTED,
             "device storage outside a dispatched grid");
@@ -4940,7 +5005,10 @@ static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
       }
     }
   }
-  if (insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP) {
+  if (dynamic && gpu->dynamic_base) {
+    base = gpu->dynamic_base;
+  }
+  if (!base && insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP) {
     for (size_t i = 0; i < gpu->shared_count; i++) {
       if (insn->dest.name && gpu->shared[i].name &&
           strcmp(gpu->shared[i].name, insn->dest.name) == 0) {
@@ -4959,6 +5027,9 @@ static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
         insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP
             ? MTLC_ADDRESS_SPACE_WORKGROUP
             : MTLC_ADDRESS_SPACE_PRIVATE;
+    if (dynamic) {
+      gpu->dynamic_base = base;
+    }
     if (insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
         gpu->shared_count < II_GPU_MAX_SHARED) {
       gpu->shared[gpu->shared_count].name = insn->dest.name;
@@ -4970,23 +5041,6 @@ static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
   }
   value = ii_int_value((long long)base);
   return ii_store_dest(machine, frame, &insn->dest, &value);
-}
-
-static void ii_gpu_barrier_arrive(IRInterpMachine *machine, size_t site,
-                                  size_t line) {
-  IIGpuGrid *gpu = &machine->gpu;
-  for (size_t i = 0; i < gpu->barrier_count; i++) {
-    if (gpu->barriers[i].site == site) {
-      gpu->barriers[i].arrivals++;
-      return;
-    }
-  }
-  if (gpu->barrier_count < II_GPU_MAX_BARRIERS) {
-    gpu->barriers[gpu->barrier_count].site = site;
-    gpu->barriers[gpu->barrier_count].arrivals = 1;
-    gpu->barriers[gpu->barrier_count].line = line;
-    gpu->barrier_count++;
-  }
 }
 
 static const char *ii_gpu_value_name(const IRFunction *fn, size_t index,
@@ -5143,113 +5197,7 @@ static const char *ii_gpu_launch_kernel_name(IIFrame *frame,
 
 #include "ir_interp_tile.inc"
 
-static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
-                            const IRInterpValue *args, size_t nargs) {
-  IIGpuGrid *gpu = &machine->gpu;
-  long long count = gpu->threads_per_block;
-  IIGpuThread *threads = NULL;
-  IIFrame *frames = NULL;
-  long long block_x = gpu->block[0];
-  long long block_y = gpu->block[1];
-  int ok = 1;
-
-  if (count <= 0) {
-    return 1;
-  }
-  threads = (IIGpuThread *)calloc((size_t)count, sizeof(IIGpuThread));
-  frames = (IIFrame *)calloc((size_t)count, sizeof(IIFrame));
-  if (!threads || !frames) {
-    free(threads);
-    free(frames);
-    ii_fail(machine, IR_INTERP_TRAP, "out of memory running a workgroup");
-    return 0;
-  }
-  for (long long t = 0; t < count; t++) {
-    threads[t].frame = &frames[t];
-  }
-  gpu->tile_trace_warps = (size_t)((count + II_GPU_SUBGROUP - 1) /
-                                   II_GPU_SUBGROUP);
-  gpu->tile_traces = (IITileTrace *)calloc(gpu->tile_trace_warps,
-                                           sizeof(IITileTrace));
-
-  while (ok) {
-    long long suspended = 0;
-    long long finished = 0;
-    long long live = 0;
-    size_t phase_site = 0;
-    size_t phase_line = 0;
-    for (long long t = 0; t < count && ok; t++) {
-      IRInterpValue thread_result = ii_int_value(0);
-      if (threads[t].finished) {
-        continue;
-      }
-      live++;
-      gpu->tid[0] = t % block_x;
-      gpu->tid[1] = (t / block_x) % block_y;
-      gpu->tid[2] = t / (block_x * block_y);
-      gpu->lane = t;
-      if (gpu->tile_traces && t % II_GPU_SUBGROUP == 0) {
-        gpu->tile_traces[t / II_GPU_SUBGROUP].count = 0;
-      }
-      threads[t].tile_cursor = 0;
-      threads[t].suspended = 0;
-      machine->gpu_resume = &threads[t];
-      machine->gpu_current = &threads[t];
-      if (!ii_exec_function(machine, kernel, args, nargs, &thread_result)) {
-        machine->gpu_resume = NULL;
-        ok = 0;
-        break;
-      }
-      machine->gpu_resume = NULL;
-      if (threads[t].suspended) {
-        suspended++;
-        if (!phase_site) {
-          phase_site = threads[t].barrier_site;
-          phase_line = threads[t].barrier_line;
-        } else if (phase_site != threads[t].barrier_site) {
-          snprintf(machine->detail, sizeof(machine->detail),
-                   "two work items of one block stopped at different barriers, "
-                   "one at line %llu and one at line %llu",
-                   (unsigned long long)phase_line,
-                   (unsigned long long)threads[t].barrier_line);
-          machine->status = IR_INTERP_TRAP;
-          ok = 0;
-        }
-      } else {
-        threads[t].finished = 1;
-        finished++;
-      }
-    }
-    if (!ok) {
-      break;
-    }
-    if (suspended == 0) {
-      break;
-    }
-    if (finished > 0) {
-      snprintf(machine->detail, sizeof(machine->detail),
-               "the barrier at line %llu was reached by %lld of the %lld work "
-               "items still running in this workgroup",
-               (unsigned long long)phase_line, suspended, live);
-      machine->status = IR_INTERP_TRAP;
-      ok = 0;
-      break;
-    }
-    gpu->threads_run += suspended;
-  }
-
-  gpu->threads_run += count;
-  machine->gpu_current = NULL;
-  for (size_t w = 0; gpu->tile_traces && w < gpu->tile_trace_warps; w++) {
-    free(gpu->tile_traces[w].marks);
-  }
-  free(gpu->tile_traces);
-  gpu->tile_traces = NULL;
-  gpu->tile_trace_warps = 0;
-  free(threads);
-  free(frames);
-  return ok;
-}
+#include "ir_interp_gpu.inc"
 
 static int ii_op_gpu_launch(IRInterpMachine *machine, IIFrame *frame,
                             const IRInstruction *insn, size_t index) {
@@ -5308,6 +5256,7 @@ static int ii_op_gpu_launch(IRInterpMachine *machine, IIFrame *frame,
 
   memset(&machine->gpu, 0, sizeof(machine->gpu));
   machine->gpu.active = 1;
+  machine->gpu.dynamic_shared = controls_value[6].i > 0 ? controls_value[6].i : 0;
   machine->gpu.kernel_name = kernel_name;
   machine->gpu.threads_per_block = block[0] * block[1] * block[2];
   for (size_t d = 0; d < 3; d++) {
@@ -5321,8 +5270,9 @@ static int ii_op_gpu_launch(IRInterpMachine *machine, IIFrame *frame,
         machine->gpu.ctaid[1] = by;
         machine->gpu.ctaid[2] = bz;
         machine->gpu.shared_count = 0;
-        machine->gpu.barrier_count = 0;
         machine->gpu.uniform_count = 0;
+        machine->gpu.dynamic_base = 0;
+        machine->gpu.mbarrier_count = 0;
         ok = ii_gpu_run_block(machine, kernel, args, nargs);
       }
     }
@@ -5375,6 +5325,16 @@ static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
   if (!callee && machine->gpu.active &&
       ii_gpu_index_intrinsic(machine, insn->intrinsic, &call_result)) {
     return ii_store_dest(machine, frame, &insn->dest, &call_result);
+  }
+  if (!callee && machine->gpu.active && insn->intrinsic != MTLC_INTRINSIC_NONE) {
+    int handled = 0;
+    if (!ii_gpu_device_call(machine, insn, call_args, call_arg_count,
+                            &call_result, &handled)) {
+      return 0;
+    }
+    if (handled) {
+      return ii_store_dest(machine, frame, &insn->dest, &call_result);
+    }
   }
   if (callee && callee->instruction_count > 0) {
     if (!ii_exec_function(machine, callee, call_args, call_arg_count,
@@ -6189,28 +6149,19 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
 
   IIPureFrame pure = ii_enter_pure(machine, fn);
 
-  IIGpuThread *resume = machine->gpu_resume;
-  int resumed = resume && resume->started;
-  machine->gpu_resume = NULL;
-
   IIFrame frame;
-  if (resumed) {
-    frame = *(IIFrame *)resume->frame;
-  } else {
-    memset(&frame, 0, sizeof(frame));
-    frame.fn = fn;
-  }
+  memset(&frame, 0, sizeof(frame));
+  frame.fn = fn;
 
   int ok = 0;
 
-  if (!resumed &&
-      !ii_open_frame(machine, &frame, fn, args, arg_count)) {
+  if (!ii_open_frame(machine, &frame, fn, args, arg_count)) {
     goto done;
   }
 
   long long *exec_counts = ii_counts_for(machine, fn);
 
-  size_t pc = resumed ? resume->pc : 0;
+  size_t pc = 0;
   while (pc < fn->instruction_count) {
     if (--machine->fuel < 0) {
       ii_fail(machine, IR_INTERP_FUEL, fn->name ? fn->name : "?");
@@ -6218,6 +6169,29 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     }
     const IRInstruction *insn = &fn->instructions[pc];
     size_t executed_pc = pc;
+
+    if (machine->gpu.active && ii_gpu_is_collective(insn)) {
+      if (!ii_gpu_stop(machine, &frame, pc, insn, II_STOP_COLLECTIVE)) {
+        goto done;
+      }
+      pc++;
+      continue;
+    }
+    if (machine->gpu.active && insn->op == IR_OP_CALL &&
+        insn->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY) {
+      int ready = 0;
+      for (;;) {
+        if (!ii_gpu_wait_ready(machine, &frame, insn, &ready)) {
+          goto done;
+        }
+        if (ready) {
+          break;
+        }
+        if (!ii_gpu_stop(machine, &frame, pc, insn, II_STOP_WAIT)) {
+          goto done;
+        }
+      }
+    }
 
     switch (insn->op) {
     case IR_OP_NOP:
@@ -6464,22 +6438,11 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
                 "barrier outside a dispatched grid");
         goto done;
       }
-      if (!resume) {
-        ii_fail(machine, IR_INTERP_UNSUPPORTED,
-                "a barrier inside a device helper; `mettle test` runs a "
-                "block's work items in the phases the kernel's own barriers "
-                "cut it into, so move this one into the kernel");
+      if (!ii_gpu_stop(machine, &frame, pc, insn, II_STOP_BARRIER)) {
         goto done;
       }
-      ii_gpu_barrier_arrive(machine, pc, insn->location.line);
-      *(IIFrame *)resume->frame = frame;
-      resume->pc = pc + 1;
-      resume->started = 1;
-      resume->suspended = 1;
-      resume->barrier_site = pc;
-      resume->barrier_line = insn->location.line;
-      ok = 1;
-      goto done;
+      pc++;
+      break;
     }
     case IR_OP_RETURN: {
       IRInterpValue value = ii_int_value(0);
@@ -6517,6 +6480,31 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       ii_fail(machine, IR_INTERP_UNSUPPORTED, "inline_asm");
       goto done;
 
+    case IR_OP_ASYNC_COPY:
+      if (!ii_gpu_async_copy(machine, &frame, insn)) {
+        goto done;
+      }
+      pc++;
+      break;
+    case IR_OP_ASYNC_COMMIT:
+      if (!machine->gpu.active || !machine->gpu_current) {
+        ii_fail(machine, IR_INTERP_UNSUPPORTED,
+                "an asynchronous commit outside a dispatched grid");
+        goto done;
+      }
+      machine->gpu_current->committed++;
+      pc++;
+      break;
+    case IR_OP_ASYNC_WAIT:
+      if (!ii_gpu_async_wait(machine, insn->async_copy_pending_groups)) {
+        goto done;
+      }
+      pc++;
+      break;
+    case IR_OP_TENSOR_COMMIT:
+      pc++;
+      break;
+
     default:
       if (!ii_exec_simd(machine, &frame, insn)) {
         goto done;
@@ -6541,10 +6529,6 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
 
 done:
   ii_leave_pure(machine, &pure);
-  if (resume && resume->suspended) {
-    machine->depth--;
-    return ok;
-  }
   ii_close_frame(machine, &frame,
                  (ok && !result->is_float) ? (unsigned long long)result->i
                                            : 0);

@@ -1,0 +1,25 @@
+const GRID_Q4_HASH: int64 = 1307796836;
+
+fn grid_hash(words: uint32*, n: int32) -> uint32 {
+  var h: uint32 = (uint32)2166136261;
+  for i in 0..n {
+    h = (h ^ words[i]) * (uint32)16777619;
+  }
+  return h;
+}
+
+fn grid_q4_inputs(a: int8*, b: uint8*, sa: float32*, sb: uint16*) {
+  var r: uint32 = (uint32)99;
+  for i in 0..32 * 64 {
+    r = r * (uint32)1664525 + (uint32)1013904223;
+    a[i] = (int8)((int32)(r >> 24) - 128);
+    r = r * (uint32)1664525 + (uint32)1013904223;
+    b[i] = (uint8)(r >> 24);
+  }
+  for i in 0..64 {
+    r = r * (uint32)1664525 + (uint32)1013904223;
+    sa[i] = (float32)((int32)((r >> 16) & (uint32)1023)) / 4096.0 + 0.01;
+    r = r * (uint32)1664525 + (uint32)1013904223;
+    sb[i] = (uint16)((uint32)0x2C00 | ((r >> 16) & (uint32)0x03FF));
+  }
+}

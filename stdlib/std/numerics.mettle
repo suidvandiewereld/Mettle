@@ -1,0 +1,4 @@
+extern fn numerics_tensor_map_2d(map: uint8*, base: uint8*, element_bytes: int32,
+                                 width: int64, height: int64, row_bytes: int64,
+                                 box_width: int32, box_height: int32,
+                                 swizzle: int32) = "numerics_tensor_map_2d";

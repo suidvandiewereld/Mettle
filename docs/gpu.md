@@ -469,6 +469,34 @@ to the same barrier, and only then do they all go on. So a kernel that writes a
 tile, barriers, and reads the tile back gives the same answers it gives on the
 device.
 
+Each work item runs on its own stack, so it can stop anywhere, in a helper as
+well as in the kernel. The work items of a subgroup run together at every
+subgroup operation: a shuffle, broadcast, ballot, reduction or scan waits until
+all of them reach it and then computes in the order the PTX backend emits (a
+reduction folds at offsets 16, 8, 4, 2, 1). A `barrier(subgroup, ...)` is the
+same meeting with no data. Every pointer-typed `workgroup var` of a kernel
+names the one dynamic arena, sized by the dispatch's `shared:` bytes, as on the
+device.
+
+The runner also executes what the tensor kernels use:
+
+- `async_copy_workgroup` copies land when the issuing work item's
+  `async_copy_wait` retires their group; a read of bytes still in flight stops
+  the run and names the copy's line.
+- `tensor_mma` from memory runs once per subgroup, element by element: dense
+  f16/bf16 with f32 accumulators (each 16-deep K step summed exactly and
+  rounded once, which can differ from the device in the last place), and
+  block-scaled int8 with i8 or halves-packed 4-bit B, in the backend's own
+  sequence of roundings, which is the device's bit for bit. Layouts, leading
+  dimensions, swizzles, zero points, C = `0.0` and the per-row C scale are
+  honored.
+- Transaction barriers and `tma_load_2d` work from a map described with
+  `numerics_tensor_map_2d`: the load copies the box (zeros past the edges),
+  swizzled as the map says, and counts its bytes against the barrier.
+
+`gemm_q4_0_i8` and `gemm_q4_0_i8_64` from the inference engine, run this way
+and on an RTX 5060 Ti from the same inputs, agree bit for bit.
+
 What the run is for is the re-checks. It is a machine that executes and proves
 nothing, so what it finds is what the analyses got wrong:
 
@@ -481,10 +509,8 @@ nothing, so what it finds is what the analyses got wrong:
   `the barrier at line 9 was reached by 2 of the 4 work items still running in
   this workgroup`.
 
-Two limits are worth knowing. A barrier inside a device helper is refused
-rather than counted, because a phase boundary has to be in the frame the runner
-can stop; move it into the kernel. And the grid is capped at 65536 work items,
-which is a CPU twin's size and not a launch's.
+One limit is worth knowing: the grid is capped at 65536 work items, which is
+a CPU twin's size and not a launch's.
 
 ### Static and launch-sized workgroup memory, private memory, and barriers
 

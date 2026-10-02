@@ -589,6 +589,16 @@ int ir_tensor_c_is_zero(const IROperand *operand) {
          operand->float_value == 0.0 && !signbit(operand->float_value);
 }
 
+IRBlockScaleOrder ir_tensor_block_scale_order(const MtlcTensorMmaDesc *desc) {
+  if (desc->b_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
+      desc->b_scale_values != MTLC_TENSOR_ELEMENT_INVALID)
+    return IR_BLOCK_SCALE_B_FIRST;
+  if (desc->a_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
+      desc->a_scale_values != MTLC_TENSOR_ELEMENT_INVALID)
+    return IR_BLOCK_SCALE_A_FIRST;
+  return IR_BLOCK_SCALE_PRODUCT;
+}
+
 int ir_tensor_mma_desc_valid(const MtlcTensorMmaDesc *desc) {
   return mtlc_tensor_mma_desc_is_valid(desc);
 }

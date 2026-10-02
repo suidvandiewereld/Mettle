@@ -1,0 +1,33 @@
+import "std/io";
+import "std/mem";
+import "std/gpu";
+import "grid_runner_reference";
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  if (argc < 2 || gpu_init() == 0) { return 2; }
+  var module: int64 = gpu_module_file(argv[1]);
+  if (module == 0) { return 3; }
+  var q4: int64 = gpu_func(module, "q4_scaled");
+  var a: int8* = (int8*)malloc(2048);
+  var b: uint8* = (uint8*)malloc(2048);
+  var sa: float32* = (float32*)malloc(256);
+  var sb: uint16* = (uint16*)malloc(128);
+  var d: float32* = (float32*)malloc(4096);
+  grid_q4_inputs(a, b, sa, sb);
+  var da: int64 = gpu_malloc(2048);
+  var db: int64 = gpu_malloc(2048);
+  var dsa: int64 = gpu_malloc(256);
+  var dsb: int64 = gpu_malloc(128);
+  var dd: int64 = gpu_malloc(4096);
+  gpu_to_device(da, (uint8*)a, 2048);
+  gpu_to_device(db, b, 2048);
+  gpu_to_device(dsa, (uint8*)sa, 256);
+  gpu_to_device(dsb, (uint8*)sb, 128);
+  dispatch q4[grid: (1, 1, 1), block: (32, 1, 1)](da, db, dd, dsa, dsb);
+  gpu_sync();
+  gpu_to_host((uint8*)d, dd, 4096);
+  var hash: int64 = (int64)grid_hash((uint32*)d, 1024);
+  println("block-scaled int8 on the GPU: hash {hash}, the CPU grid runner's {GRID_Q4_HASH}");
+  if (hash != GRID_Q4_HASH) { return 1; }
+  return 0;
+}

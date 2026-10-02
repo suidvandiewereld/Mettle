@@ -503,6 +503,15 @@ try {
   & $tileHost $tilePtx
   if ($LASTEXITCODE -ne 0) { throw "register tiles on the GPU differ from the interpreter reference" }
 
+  $gridPtx = Join-Path $temp "grid_runner.ptx"
+  $gridHost = Join-Path $temp "grid_runner_host.exe"
+  & $compiler -O --emit-ptx "--gpu-arch=$tileArch" (Join-Path $root "tests/gpu/grid_runner.mettle") -o $gridPtx
+  if ($LASTEXITCODE -ne 0) { throw "grid runner PTX compilation failed" }
+  & $compiler --build (Join-Path $root "tests/gpu/grid_runner_host.mettle") -o $gridHost --link-arg (Join-Path $env:CUDA_PATH "lib/x64/cuda.lib")
+  if ($LASTEXITCODE -ne 0) { throw "grid runner host compilation failed" }
+  & $gridHost $gridPtx
+  if ($LASTEXITCODE -ne 0) { throw "block-scaled int8 on the GPU differs from the CPU grid runner" }
+
   if ($Sanitizer) {
     $computeSanitizer = Get-Command compute-sanitizer -ErrorAction SilentlyContinue
     if (-not $computeSanitizer) {
