@@ -1,0 +1,12 @@
+kernel(block = 256) shadow_acc(src: uint32*, out: float32*, n: int32) {
+  if (block.x > 0) {
+    var acc: uint32 = (uint32)0;
+    acc = acc ^ src[thread.x];
+    if (n < 0 && acc == (uint32)7) { out[0] = (float32)0.0; }
+    return;
+  }
+  private var acc: float32[2];
+  acc[0] = (float32)1.0;
+  acc[1] = (float32)2.0;
+  out[thread.x] = acc[0] + acc[1];
+}

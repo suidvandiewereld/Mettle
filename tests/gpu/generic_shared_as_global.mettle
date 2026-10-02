@@ -1,0 +1,18 @@
+@inline fn fill(dst: uint32*, v: uint32) {
+  dst[0] = v;
+  dst[1] = v;
+}
+
+kernel(block = 32) generic_shared(a: uint16*, out: float32*) {
+  workgroup var ws: uint32*;
+  fill(ws + thread.x * 2, (uint32)0x3C003C00);
+  barrier(workgroup, acq_rel);
+  var b: uint16* = (uint16*)ws;
+  var acc: float32* = (float32*)(ws + 1024);
+  tensor_matmul(a, b, acc, acc, (uint32)0, (uint32)0,
+                (uint32)16, (uint32)16, (uint32)16,
+                shape: m16n16k16, input_type: f16, output_type: f32,
+                a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+                lda: (uint32)16, ldb: (uint32)16, ldc: (uint32)16, ldd: (uint32)16);
+  out[thread.x] = acc[thread.x];
+}

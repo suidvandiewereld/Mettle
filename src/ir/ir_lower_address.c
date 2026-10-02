@@ -356,13 +356,15 @@ static int ir_symbol_is_address_space_allocation(const IRFunction *function,
 }
 
 static int ir_expression_is_address_space_allocation(
-    const IRFunction *function, const ASTNode *expression) {
+    IRLoweringContext *context, const IRFunction *function,
+    const ASTNode *expression) {
   if (!expression || expression->type != AST_IDENTIFIER || !expression->data) {
     return 0;
   }
   const Identifier *identifier = (const Identifier *)expression->data;
   return identifier->name &&
-         ir_symbol_is_address_space_allocation(function, identifier->name);
+         ir_symbol_is_address_space_allocation(
+             function, ir_local_ir_name(context, identifier->name));
 }
 
 int ir_emit_local_declaration(IRLoweringContext *context,
@@ -1310,7 +1312,7 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
     IROperand index = ir_operand_none();
     int lowered_base = 0;
     int is_address_space_allocation =
-        ir_expression_is_address_space_allocation(function,
+        ir_expression_is_address_space_allocation(context, function,
                                                   index_expression->array);
     IROperand slice_address = ir_operand_none();
     if (base_is_string) {

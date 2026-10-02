@@ -1,0 +1,19 @@
+@inline fn fill(dst: uint32*, v: uint32) {
+  dst[0] = v;
+  dst[1] = v + (uint32)1;
+}
+
+@noinline fn fill_call(dst: uint32*, v: uint32) {
+  dst[0] = v;
+  dst[1] = v + (uint32)2;
+}
+
+kernel(block = 32) generic_views(out: uint32*) {
+  workgroup var ws: uint32*;
+  var t: uint32 = (uint32)thread.x;
+  fill(ws + thread.x * 2, t * (uint32)10);
+  fill_call(ws + 64 + thread.x * 2, t * (uint32)100);
+  barrier(workgroup, acq_rel);
+  var g: uint32* = (uint32*)ws;
+  out[thread.x] = g[thread.x * 2] + g[thread.x * 2 + 1] + g[64 + thread.x * 2] + g[64 + thread.x * 2 + 1];
+}

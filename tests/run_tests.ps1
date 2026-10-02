@@ -16904,6 +16904,67 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $b45Ptxas = $null
+  $b45Tool = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($b45Tool -and ((& $b45Tool.Source --help 2>&1 | Out-String) -match "sm_121a")) {
+    $b45Ptxas = $b45Tool.Source
+  }
+  foreach ($opt in @("-O", "")) {
+    $b45Pas = Join-Path $tmpDir "private_array_shadow$opt.ptx"
+    $b45Args = @("--emit-ptx", "--gpu-arch=gb10", "tests/gpu/private_array_shadow.mettle", "-o", $b45Pas)
+    if ($opt) { $b45Args = @($opt) + $b45Args }
+    $b45Out = & $CompilerPath @b45Args 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "a private array named like an inner scalar did not compile ($opt): $b45Out" }
+    $b45Text = Get-Content -Raw $b45Pas
+    if ($b45Text -notmatch '\.local \.align 4 \.b8 \S+_storage\[8\]' -or
+        $b45Text -notmatch 'st\.local\.f32' -or $b45Text -notmatch 'ld\.local\.f32') {
+      throw "the renamed private array did not lower to local storage ($opt): $b45Text"
+    }
+    if ($b45Ptxas) {
+      $b45Asm = & $b45Ptxas -arch=sm_121a $b45Pas -o (Join-Path $tmpDir "private_array_shadow.cubin") 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the private array PTX: $b45Asm" }
+    }
+  }
+  $b45Gsg = Join-Path $tmpDir "generic_shared_as_global.ptx"
+  $b45Out = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 tests/gpu/generic_shared_as_global.mettle -o $b45Gsg 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "generic_shared_as_global did not compile: $b45Out" }
+  $b45Text = Get-Content -Raw $b45Gsg
+  if ($b45Text -match 'wmma\.load\.b\.sync\.aligned\.m16n16k16\.global' -or
+      $b45Text -match 'wmma\.load\.c\.sync\.aligned\.m16n16k16\.global' -or
+      $b45Text -match 'wmma\.store\.d\.sync\.aligned\.m16n16k16\.global' -or
+      $b45Text -match 'st\.global\.u32') {
+    throw "a workgroup pointer cast to a plain pointer was still accessed as .global: $b45Text"
+  }
+  if ($b45Text -notmatch 'cvta\.shared\.u64' -or
+      $b45Text -notmatch 'wmma\.load\.b\.sync\.aligned\.m16n16k16\.col\.f16' -or
+      $b45Text -notmatch 'wmma\.load\.a\.sync\.aligned\.m16n16k16\.global\.row\.f16') {
+    throw "plain views of workgroup memory should be generic, the global A operand global: $b45Text"
+  }
+  $b45Help = Join-Path $tmpDir "generic_shared_helper.ptx"
+  $b45Out = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 tests/gpu/generic_shared_helper.mettle -o $b45Help 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "generic_shared_helper did not compile: $b45Out" }
+  $b45Text = Get-Content -Raw $b45Help
+  $b45Func = [regex]::Match($b45Text, '\.func fill_call\((?s:.*?)\r?\n\}').Value
+  if ($b45Text -notmatch 'cvta\.shared\.u64 (%rd\d+), %rd\d+;\s*st\.param\.b64 \[__mtlc_call_\d+_arg_0\], \1;' -or
+      -not $b45Func -or $b45Func -match '\.global' -or $b45Text -match 'ld\.global\.u32') {
+    throw "a workgroup pointer passed to a plain T* parameter was not made generic: $b45Text"
+  }
+  if ($b45Ptxas) {
+    foreach ($b45File in @($b45Gsg, $b45Help)) {
+      $b45Asm = & $b45Ptxas -arch=sm_121a $b45File -o (Join-Path $tmpDir "generic_shared.cubin") 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected ${b45File}: $b45Asm" }
+    }
+  }
+  Write-CaseResult -Name "ptx_private_array_shadow_and_generic_shared" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_private_array_shadow_and_generic_shared" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   # Block-scaled i8 tensor MMA: exact int32 K32 dots scaled per block into
   # f32, 4-bit halves-packed B widened in registers, and region residency
   # across a K loop staged through workgroup memory.

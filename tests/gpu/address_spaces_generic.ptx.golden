@@ -94,7 +94,7 @@ ir_errdefer_ok_6:
 {
 	.reg .pred %p<4>;
 	.reg .b32 %r<20>;
-	.reg .b64 %rd<10>;
+	.reg .b64 %rd<11>;
 	.reg .f32 %f<4>;
 	.param .b64 __mtlc_call_0_arg_0;
 	.param .f32 __mtlc_call_0_ret;
@@ -142,7 +142,8 @@ ir_if_end_12:
 	selp.u32 %r14, 1, 0, %p2;
 	setp.eq.s32 %p3, %r14, 0;
 	@%p3 bra ir_errdefer_ok_16;
-	st.param.b64 [__mtlc_call_1_arg_0], %rd0;
+	cvta.shared.u64 %rd8, %rd0;
+	st.param.b64 [__mtlc_call_1_arg_0], %rd8;
 	mov.u32 %r15, 64;
 	st.param.b32 [__mtlc_call_1_arg_1], %r15;
 	call.uni (__mtlc_call_1_ret), tile_sum, (__mtlc_call_1_arg_0, __mtlc_call_1_arg_1);
@@ -156,9 +157,9 @@ ir_if_end_12:
 	mov.u32 %r17, 2;
 	mov.u32 %r19, 2;
 	shl.b32 %r18, %r16, %r19;
-	cvt.u64.u32 %rd8, %r18;
-	add.u64 %rd9, %rd3, %rd8;
-	st.global.f32 [%rd9], %f3;
+	cvt.u64.u32 %rd9, %r18;
+	add.u64 %rd10, %rd3, %rd9;
+	st.global.f32 [%rd10], %f3;
 ir_errdefer_ok_16:
 	ret;
 	ret;

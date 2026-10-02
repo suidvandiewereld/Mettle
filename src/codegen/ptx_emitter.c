@@ -63,6 +63,8 @@ typedef struct {
   char async_guard[32];
   size_t async_guard_end;
   size_t async_guard_jump;
+  PtxDefCount *generic_names;
+  size_t generic_capacity;
   PtxTensorResidency *tensor_residencies;
   size_t tensor_residency_count, tensor_residency_capacity;
   IRProgram *program;
@@ -488,6 +490,172 @@ static void ptx_block_copy(PtxFn *fn, const char *dst_space,
               dst_base, offset, reg);
     offset += chunk;
   }
+}
+
+static int ptx_space_is_plain(const MtlcType *type, const char *type_name) {
+  if (type) {
+    return type->kind == MTLC_TYPE_POINTER &&
+           type->address_space == MTLC_ADDRESS_SPACE_DEFAULT;
+  }
+  if (!type_name || !strchr(type_name, '*')) {
+    return 0;
+  }
+  return !strstr(type_name, "global") && !strstr(type_name, "shared") &&
+         !strstr(type_name, "constant") && !strstr(type_name, "local") &&
+         !strstr(type_name, "generic");
+}
+
+static int ptx_space_needs_generic(const MtlcType *type) {
+  return type && type->kind == MTLC_TYPE_POINTER &&
+         type->address_space != MTLC_ADDRESS_SPACE_DEFAULT &&
+         type->address_space != MTLC_ADDRESS_SPACE_GLOBAL &&
+         type->address_space != MTLC_ADDRESS_SPACE_CONSTANT;
+}
+
+static PtxDefCount *ptx_generic_slot(PtxFn *fn, const char *name) {
+  if (!fn->generic_capacity || !name) {
+    return NULL;
+  }
+  size_t mask = fn->generic_capacity - 1;
+  size_t i = ptx_name_hash(name) & mask;
+  while (fn->generic_names[i].name &&
+         strcmp(fn->generic_names[i].name, name) != 0) {
+    i = (i + 1) & mask;
+  }
+  return &fn->generic_names[i];
+}
+
+static int ptx_name_may_be_generic(PtxFn *fn, const char *name) {
+  PtxDefCount *slot = ptx_generic_slot(fn, name);
+  return slot && slot->name != NULL;
+}
+
+static int ptx_mark_generic(PtxFn *fn, const char *name) {
+  PtxDefCount *slot = ptx_generic_slot(fn, name);
+  if (!slot || slot->name) {
+    return 0;
+  }
+  slot->name = name;
+  slot->count = 1;
+  return 1;
+}
+
+static int ptx_operand_may_be_generic(PtxFn *fn, const IROperand *op) {
+  return op && op->name &&
+         (op->kind == IR_OPERAND_TEMP || op->kind == IR_OPERAND_SYMBOL) &&
+         ptx_name_may_be_generic(fn, op->name);
+}
+
+static void ptx_collect_generic_names(PtxFn *fn, const IRFunction *func,
+                                      const IRModuleSymbol *symbol) {
+  size_t needed = (func->instruction_count + func->parameter_count + 1) * 2;
+  size_t capacity = 16;
+  while (capacity < needed) {
+    capacity *= 2;
+  }
+  fn->generic_names = calloc(capacity, sizeof(PtxDefCount));
+  if (!fn->generic_names) {
+    return;
+  }
+  fn->generic_capacity = capacity;
+  if (!func->is_kernel) {
+    for (size_t p = 0; p < func->parameter_count; p++) {
+      const MtlcType *pt = symbol && symbol->param_types &&
+                                   p < symbol->param_count
+                               ? symbol->param_types[p]
+                               : NULL;
+      const char *tn =
+          func->parameter_types ? func->parameter_types[p] : NULL;
+      if (func->parameter_names && func->parameter_names[p] &&
+          ptx_space_is_plain(pt, tn)) {
+        ptx_mark_generic(fn, func->parameter_names[p]);
+      }
+    }
+  }
+  for (size_t i = 0; i < func->instruction_count; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    if (!in->dest.name || (in->dest.kind != IR_OPERAND_TEMP &&
+                           in->dest.kind != IR_OPERAND_SYMBOL)) {
+      continue;
+    }
+    if (in->op == IR_OP_ADDRESS_SPACE_ALLOC || in->op == IR_OP_ADDRESS_OF ||
+        ((in->op == IR_OP_DECLARE_LOCAL ||
+          ir_instruction_writes_destination(in)) &&
+         ptx_space_needs_generic(in->value_type))) {
+      ptx_mark_generic(fn, in->dest.name);
+    }
+  }
+  int changed = 1;
+  while (changed) {
+    changed = 0;
+    for (size_t i = 0; i < func->instruction_count; i++) {
+      const IRInstruction *in = &func->instructions[i];
+      if (!in->dest.name || (in->dest.kind != IR_OPERAND_TEMP &&
+                             in->dest.kind != IR_OPERAND_SYMBOL) ||
+          ptx_name_may_be_generic(fn, in->dest.name)) {
+        continue;
+      }
+      int flows = 0;
+      switch (in->op) {
+      case IR_OP_ASSIGN:
+      case IR_OP_CAST:
+        flows = ptx_operand_may_be_generic(fn, &in->lhs);
+        break;
+      case IR_OP_BINARY:
+        flows = ptx_operand_may_be_generic(fn, &in->lhs) ||
+                ptx_operand_may_be_generic(fn, &in->rhs);
+        break;
+      case IR_OP_SELECT:
+        flows = ptx_operand_may_be_generic(fn, &in->lhs) ||
+                ptx_operand_may_be_generic(fn, &in->rhs);
+        for (size_t a = 0; a < in->argument_count && !flows; a++) {
+          flows = ptx_operand_may_be_generic(fn, &in->arguments[a]);
+        }
+        break;
+      default:
+        break;
+      }
+      if (flows && ptx_mark_generic(fn, in->dest.name)) {
+        changed = 1;
+      }
+    }
+  }
+}
+
+static const char *ptx_space_conversion(MtlcAddressSpace from,
+                                        MtlcAddressSpace to) {
+  if (to == MTLC_ADDRESS_SPACE_GENERIC) {
+    if (from == MTLC_ADDRESS_SPACE_WORKGROUP) return "cvta.shared.u64";
+    if (from == MTLC_ADDRESS_SPACE_PRIVATE) return "cvta.local.u64";
+    return NULL;
+  }
+  if (from == MTLC_ADDRESS_SPACE_GENERIC) {
+    if (to == MTLC_ADDRESS_SPACE_WORKGROUP) return "cvta.to.shared.u64";
+    if (to == MTLC_ADDRESS_SPACE_PRIVATE) return "cvta.to.local.u64";
+  }
+  return NULL;
+}
+
+static int ptx_convert_space_into(PtxFn *fn, MtlcAddressSpace from,
+                                  MtlcAddressSpace to, const char *dst,
+                                  const char *src) {
+  const char *op = ptx_space_conversion(from, to);
+  if (!op) {
+    return 0;
+  }
+  sb_printf(&fn->body, "\t%s %s, %s;\n", op, dst, src);
+  return 1;
+}
+
+static void ptx_convert_space(PtxFn *fn, MtlcAddressSpace from,
+                              MtlcAddressSpace to, char *reg) {
+  if (!ptx_space_conversion(from, to)) {
+    return;
+  }
+  char converted[24];
+  reg_name(PC_B64, new_reg(fn, PC_B64), converted);
+  ptx_convert_space_into(fn, from, to, converted, reg);
+  snprintf(reg, 24, "%s", converted);
 }
 
 static void ptx_generic_address(PtxFn *fn, const IROperand *op, char *reg) {
@@ -7936,6 +8104,10 @@ static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
                  in->dest.name, in->text ? in->text : "?");
         break;
       }
+      if (d.is_ptr && ptx_space_is_plain(in->value_type, in->text) &&
+          ptx_name_may_be_generic(fn, in->dest.name)) {
+        d.address_space = MTLC_ADDRESS_SPACE_GENERIC;
+      }
       if (!find_binding(fn, in->dest.name)) {
         d.idx = new_reg(fn, d.cls);
         bind_value(fn, in->dest.name, d);
@@ -8173,7 +8345,11 @@ static void ptx_emit_assign(IRProgram *program, IRFunction *func, PtxFn *fn,
     }
     char dn[24];
     reg_name(dv.cls, dv.idx, dn);
-    if (strcmp(dn, src) != 0) {
+    PtxVal sv = operand_desc(fn, &in->lhs);
+    int converted = dv.is_ptr && sv.is_ptr &&
+                    ptx_convert_space_into(fn, sv.address_space,
+                                           dv.address_space, dn, src);
+    if (!converted && strcmp(dn, src) != 0) {
       const char *mt = (dc == PC_F32)   ? "f32"
                        : (dc == PC_F64) ? "f64"
                        : (dc == PC_B64) ? "u64"
@@ -8437,10 +8613,21 @@ static void ptx_emit_arith(IRProgram *program, IRFunction *func, PtxFn *fn,
     }
     char s[24];
     use_as(fn, &in->lhs, target.cls, s);
+    PtxVal source = operand_desc(fn, &in->lhs);
+    if (target.is_ptr && source.is_ptr &&
+        ptx_space_is_plain(in->value_type, in->text) &&
+        (source.address_space == MTLC_ADDRESS_SPACE_WORKGROUP ||
+         source.address_space == MTLC_ADDRESS_SPACE_PRIVATE ||
+         source.address_space == MTLC_ADDRESS_SPACE_GENERIC)) {
+      target.address_space = MTLC_ADDRESS_SPACE_GENERIC;
+    }
     target = destination_value(fn, &in->dest, target);
     char dn[24];
     reg_name(target.cls, target.idx, dn);
-    if (strcmp(dn, s) != 0) {
+    int converted = target.is_ptr && source.is_ptr &&
+                    ptx_convert_space_into(fn, source.address_space,
+                                           target.address_space, dn, s);
+    if (!converted && strcmp(dn, s) != 0) {
       const char *mt = (target.cls == PC_F32)   ? "f32"
                        : (target.cls == PC_F64) ? "f64"
                        : (target.cls == PC_B64) ? "u64"
@@ -8533,7 +8720,14 @@ static void ptx_emit_general_call(IRProgram *program, IRFunction *func,
         PtxVal argument_desc = descriptor_from_type(argument_type);
         char value[24];
         use_as(fn, &in->arguments[a], argument_desc.cls, value);
-        ptx_generic_address(fn, &in->arguments[a], value);
+        PtxVal passed = operand_desc(fn, &in->arguments[a]);
+        if (passed.is_ptr && argument_desc.is_ptr &&
+            ptx_space_is_plain(argument_type, NULL)) {
+          ptx_convert_space(fn, passed.address_space,
+                            MTLC_ADDRESS_SPACE_GENERIC, value);
+        } else {
+          ptx_generic_address(fn, &in->arguments[a], value);
+        }
         sb_printf(&fn->declarations, "\t.param .%s %s;\n",
                   device_param_storage_type(argument_desc), parameter);
         sb_printf(&fn->body, "\tst.param.%s [%s], %s;\n",
@@ -10546,6 +10740,7 @@ static void ptx_emit_release(PtxEmit *e) {
   free(e->fn.tensor_residencies);
   free(e->fn.asm_out_cls);
   free(e->fn.asm_out_idx);
+  free(e->fn.generic_names);
 }
 
 static void ptx_count_one_definition(PtxFn *fn, const char *name) {
@@ -10602,6 +10797,7 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   e.fn.isa_minor = isa_minor;
   e.fn.tensor_tuple_budget = tensor_tuple_budget;
   ptx_count_definitions(&e.fn, e.func);
+  ptx_collect_generic_names(&e.fn, e.func, e.symbol);
   ptx_emit_return_descriptor(&e);
   sanitize_into(e.func->name ? e.func->name : "kernel", e.ename,
                 sizeof(e.ename));
@@ -10689,6 +10885,8 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
   char a[24], b[24];
   use_as(fn, &in->lhs, dv.cls, a);
   use_as(fn, &in->rhs, dv.cls, b);
+  int computed_ptr = dv.is_ptr;
+  MtlcAddressSpace computed_space = dv.address_space;
   dv = destination_value(fn, &in->dest, dv);
   char dn[24];
   reg_name(dv.cls, dv.idx, dn);
@@ -10802,6 +11000,9 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
               type_suffix_for_class(dv.cls, la.is_unsigned), dn, a, sh);
   } else {
     fn_error(fn, "PTX: unsupported binary op '%s'", t);
+  }
+  if (computed_ptr && dv.is_ptr) {
+    ptx_convert_space_into(fn, computed_space, dv.address_space, dn, dn);
   }
   if (in->dest.name) {
     bind_value(fn, in->dest.name, dv);
