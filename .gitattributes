@@ -1,3 +1,7 @@
+# Text files are stored and checked out with LF; Windows scripts below are
+# the exception.
+* text=auto eol=lf
+
 # Keep Windows scripts CRLF so cmd.exe `for %%f` loops and PowerShell parse
 # correctly when checked out on the CI runner.
 *.bat   text eol=crlf
