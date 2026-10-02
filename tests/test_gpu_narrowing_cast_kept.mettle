@@ -1,0 +1,31 @@
+kernel(block = 32) signed_narrow(p: int64*, o: int32*, n: int32) {
+  var s: int32 = 0;
+  var b: int32 = 0;
+  while (b < n) {
+    var w: int64 = p[b];
+    var hi: int32 = (int32)(w >> 32);
+    var lo: int32 = (int32)(w & (int64)0xFFFFFFFF);
+    var sum: int32 = (int32)(w + (int64)7);
+    var prod: int32 = (int32)(w * (int64)3);
+    s = s + hi + lo * 3 + sum + prod;
+    s = s + (int32)(w >> 16);
+    b = b + 1;
+  }
+  o[thread.x] = s;
+}
+
+kernel(block = 32) unsigned_narrow(p: uint64*, o: uint32*, n: int32) {
+  var s: uint32 = 0;
+  var b: int32 = 0;
+  while (b < n) {
+    var w: uint64 = p[b];
+    var hi: uint32 = (uint32)(w >> 32);
+    var lo: uint32 = (uint32)(w & (uint64)0xFFFFFFFF);
+    var sum: uint32 = (uint32)(w + (uint64)7);
+    var prod: uint32 = (uint32)(w * (uint64)3);
+    s = s + hi + lo * 3 + sum + prod;
+    s = s + (uint32)(w >> 16);
+    b = b + 1;
+  }
+  o[thread.x] = s;
+}

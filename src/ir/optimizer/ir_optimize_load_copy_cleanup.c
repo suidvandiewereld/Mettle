@@ -2766,6 +2766,144 @@ static int ir_narrowing_single_use(const IRNarrowingFacts *facts,
   return ir_name_index_find(&facts->uses, name, &count) && count == 1;
 }
 
+static size_t ir_narrowing_type_bytes(const char *type_name) {
+  size_t len;
+  if (!type_name) {
+    return 0;
+  }
+  if (strcmp(type_name, "bool") == 0) {
+    return 1;
+  }
+  if (strcmp(type_name, "int64") == 0 || strcmp(type_name, "uint64") == 0 ||
+      strcmp(type_name, "cstring") == 0 || strcmp(type_name, "rawptr") == 0) {
+    return 8;
+  }
+  len = strlen(type_name);
+  if (len > 0 && type_name[len - 1] == '*') {
+    return 8;
+  }
+  return ir_narrowing_width(type_name);
+}
+
+static size_t ir_narrowing_symbol_bytes(const IRFunction *function,
+                                        const char *name) {
+  const char *type_name = ir_function_local_declared_type(function, name);
+  if (!type_name && function->parameter_names && function->parameter_types) {
+    for (size_t p = 0; p < function->parameter_count; p++) {
+      if (function->parameter_names[p] &&
+          strcmp(function->parameter_names[p], name) == 0) {
+        type_name = function->parameter_types[p];
+        break;
+      }
+    }
+  }
+  return ir_narrowing_type_bytes(type_name);
+}
+
+static size_t ir_narrowing_constant_bytes(long long value) {
+  if (value >= -128 && value <= 255) {
+    return 1;
+  }
+  if (value >= -32768 && value <= 65535) {
+    return 2;
+  }
+  if (value >= -2147483648LL && value <= 4294967295LL) {
+    return 4;
+  }
+  return 8;
+}
+
+static size_t ir_narrowing_def_bytes(const IRFunction *function,
+                                     const IRNarrowingFacts *facts,
+                                     const char *name, int depth);
+
+static size_t ir_narrowing_operand_bytes(const IRFunction *function,
+                                         const IRNarrowingFacts *facts,
+                                         const IROperand *operand,
+                                         int depth) {
+  if (operand->kind == IR_OPERAND_INT) {
+    return ir_narrowing_constant_bytes(operand->int_value);
+  }
+  if (!operand->name) {
+    return 0;
+  }
+  if (operand->kind == IR_OPERAND_SYMBOL) {
+    return ir_narrowing_symbol_bytes(function, operand->name);
+  }
+  if (operand->kind == IR_OPERAND_TEMP) {
+    return ir_narrowing_def_bytes(function, facts, operand->name, depth + 1);
+  }
+  return 0;
+}
+
+static int ir_narrowing_op_is_predicate(const char *op) {
+  static const char *const PREDICATES[] = {"<",  "<=", ">", ">=",
+                                           "==", "!=", "&&", "||"};
+  for (size_t i = 0; i < sizeof(PREDICATES) / sizeof(PREDICATES[0]); i++) {
+    if (strcmp(op, PREDICATES[i]) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static size_t ir_narrowing_def_bytes(const IRFunction *function,
+                                     const IRNarrowingFacts *facts,
+                                     const char *name, int depth) {
+  size_t at = 0;
+  size_t lhs;
+  size_t rhs;
+  const IRInstruction *def;
+  if (depth > 8 || !ir_narrowing_single_def(facts, name) ||
+      !ir_name_index_find(&facts->def_at, name, &at) ||
+      at >= function->instruction_count) {
+    return 0;
+  }
+  def = &function->instructions[at];
+  switch (def->op) {
+  case IR_OP_CAST:
+    return ir_narrowing_type_bytes(def->text);
+  case IR_OP_LOAD:
+    return def->rhs.kind == IR_OPERAND_INT && def->rhs.int_value > 0
+               ? (size_t)def->rhs.int_value
+               : 0;
+  case IR_OP_CALL:
+  case IR_OP_CALL_INDIRECT:
+    return def->value_type ? mtlc_type_size(def->value_type) : 0;
+  case IR_OP_ASSIGN:
+    return ir_narrowing_operand_bytes(function, facts, &def->lhs, depth);
+  case IR_OP_UNARY:
+    if (def->is_float || !def->text) {
+      return 0;
+    }
+    if (strcmp(def->text, "!") == 0) {
+      return 1;
+    }
+    return ir_narrowing_operand_bytes(function, facts, &def->lhs, depth);
+  case IR_OP_BINARY:
+    if (def->is_float || !def->text) {
+      return 0;
+    }
+    if (ir_narrowing_op_is_predicate(def->text)) {
+      return 1;
+    }
+    lhs = ir_narrowing_operand_bytes(function, facts, &def->lhs, depth);
+    if (strcmp(def->text, "<<") == 0 || strcmp(def->text, ">>") == 0) {
+      return lhs;
+    }
+    rhs = ir_narrowing_operand_bytes(function, facts, &def->rhs, depth);
+    return lhs > rhs ? lhs : rhs;
+  default:
+    return 0;
+  }
+}
+
+static int ir_narrowing_producer_is_wider(const IRFunction *function,
+                                          const IRNarrowingFacts *facts,
+                                          const char *name, size_t width) {
+  return ir_narrowing_def_bytes(function, facts, name, 0) > width;
+}
+
 static int ir_narrowing_sink_is_narrower(const IRFunction *function,
                                          const IRNarrowingFacts *facts,
                                          size_t use_at, int slot,
@@ -2844,7 +2982,9 @@ static void ir_narrowing_choose_retirements(IRFunction *function,
     if (width == 0 || !ir_narrowing_single_use(facts, cast->dest.name) ||
         !ir_narrowing_single_def(facts, cast->dest.name) ||
         !ir_narrowing_single_def(facts, cast->lhs.name) ||
-        !ir_narrowing_from_arithmetic(function, facts, cast->lhs.name)) {
+        !ir_narrowing_from_arithmetic(function, facts, cast->lhs.name) ||
+        ir_narrowing_producer_is_wider(function, facts, cast->lhs.name,
+                                       width)) {
       continue;
     }
     for (size_t u = i + 1; u < function->instruction_count; u++) {
