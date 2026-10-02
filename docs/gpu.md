@@ -875,10 +875,23 @@ chains and exact runtime-K loops.
 | packed FP4 E2M1 | UE4M3 block16 | NVFP4 `m16n8k64`, scale vector 4 |
 | structured 2:4 f16 or bf16 | compressed A + canonical uint8 masks | `mma.sp` `m16n8k16`, f32 accumulator/result |
 | i8/u8 A, i8/u8 or halves-packed i4/u4 B | f32 or f16 block32 on both | `mma.sync` `m16n8k32` s32 per block, scaled into f32 |
+| dense f16 or bf16 A/B, K above 16 or a C row scale | unscaled; optional per-row C scale | `mma.sync` `m16n8k16`, f32 accumulator, unrolled over K |
 
 The block-scaled profiles require PTX 8.8 and an architecture- or family-specific
 `sm_120a`/`sm_121a` target. Raw `sm_121` is deliberately rejected because it
 does not promise architecture-specific instructions.
+
+Dense f16 and bf16 tiles that stable WMMA cannot take in one operation --
+K above 16 -- and any tile with a per-row C scale (`c_scale_mode: per_row`,
+D = diag(s) C + A B) run on the native `m16n8k16` MMA instead, unrolled
+over K with the accumulators in registers; they need PTX 7.0 and sm_80+.
+Operands in workgroup memory whose rows are whole 16-byte groups load
+through `ldmatrix`: a row-major A as one x4 a 16 x 16 fragment, a
+column-major B as one x4 the b0/b1 pairs of two n8 columns, and a
+row-major B transposed in the load. K = 16 tiles without a row scale keep
+stable WMMA. An attention score tile (S = Q K^T over a whole head) is the
+case this serves; it may sit inside the loop of a region-resident
+accumulator of another shape and stays a whole-tile operation there.
 
 Block-scaled integer MMA is the int8-activation counterpart (the arithmetic
 of llama.cpp's MMQ): for each K32 block it forms the exact int32 dot of the

@@ -1,0 +1,100 @@
+// Dense f16 tiles on the native m16n8k16 MMA. Stable WMMA takes K = 16 in
+// one operation; a wider K (an attention score tile, S = Q K^T over a whole
+// head) is unrolled on the native MMA with its accumulators in registers,
+// and operands in workgroup memory with 16-byte rows come in through
+// ldmatrix: a row-major A as one x4 a 16 x 16 fragment, a column-major B as
+// one x4 the b0/b1 pairs of two n8 columns.
+
+extern fn f2h(x: float32) -> int32 = "f2h";
+
+// One 16 x 32 tile over K = 256, both operands staged in workgroup memory.
+kernel(block = 32) f16_wide_k(a: uint16*, b: uint16*, c: float32*, d: float32*) {
+  workgroup var s16: uint16*;
+  var lane: int32 = thread.x;
+  var i: int32 = lane;
+  while (i < 16 * 264 + 32 * 264) {
+    s16[i] = a[i];
+    i = i + 32;
+  }
+  barrier(workgroup, acq_rel);
+  var qa: uint16 shared* = (uint16 shared*)(s16);
+  var kb: uint16 shared* = (uint16 shared*)(s16 + 16 * 264);
+  tensor_mma(qa, kb, c, d, shape: m16n32k256,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: 264, ldb: 264, ldc: 32, ldd: 32);
+}
+
+// The attention shape: an output accumulator resident across a K loop
+// (O = P V + diag(alpha) O, a C row scale), and inside that loop another
+// tile of its own (S = Q K^T into workgroup memory). Only the updates of the
+// accumulator join its region; the score tile stays a whole-tile operation
+// in the middle of it.
+kernel(block = 32) f16_region_with_inner_tile(q: uint16*, k: uint16*, v: uint16*,
+                                              zero: float32*, o: float32*,
+                                              n: int32) {
+  workgroup var s16: uint16*;
+  workgroup var sf: float32*;
+  var lane: int32 = thread.x;
+  var qs: uint16 shared* = (uint16 shared*)(s16);
+  var ks: uint16 shared* = (uint16 shared*)(s16 + 16 * 136);
+  var vs: uint16 shared* = (uint16 shared*)(s16 + 48 * 136);
+  var ps: uint16 shared* = (uint16 shared*)(s16 + 80 * 136);
+  var ss: float32 shared* = (float32 shared*)(sf + 12000);
+  var al: float32 shared* = (float32 shared*)(sf + 12800);
+  var zs: float32 shared* = (float32 shared*)(sf + 12900);
+  var i: int32 = lane;
+  while (i < 16 * 136) {
+    qs[i] = q[i];
+    i = i + 32;
+  }
+  i = lane;
+  while (i < 16 * 40) {
+    ps[i] = (uint16)0;
+    i = i + 32;
+  }
+  i = lane;
+  while (i < 16 * 36) {
+    zs[i] = 0.0;
+    i = i + 32;
+  }
+  if (lane < 16) { al[lane] = 0.0; }
+  barrier(workgroup, acq_rel);
+  tensor_mma(ps, vs, zero, o, shape: m16n128k32,
+             a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+             c_scale_mode: per_row, c_scale: al,
+             a_layout: row, b_layout: row, c_layout: row, d_layout: row,
+             lda: 40, ldb: 136, ldc: 128, ldd: 128);
+  var c: int32 = 0;
+  while (c < n) {
+    barrier(workgroup, acq_rel);
+    i = lane;
+    while (i < 32 * 136) {
+      ks[i] = k[c * 32 * 136 + i];
+      vs[i] = v[c * 32 * 136 + i];
+      i = i + 32;
+    }
+    barrier(workgroup, acq_rel);
+    tensor_mma(qs, ks, zs, ss, shape: m16n32k128,
+               a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+               a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+               lda: 136, ldb: 136, ldc: 36, ldd: 36);
+    barrier(subgroup, workgroup, acq_rel);
+    i = lane;
+    while (i < 16 * 32) {
+      var r: int32 = i >> 5;
+      var col: int32 = i & 31;
+      ps[r * 40 + col] = (uint16)f2h(ss[r * 36 + col]);
+      i = i + 32;
+    }
+    if (lane < 16) { al[lane] = 1.0; }
+    barrier(subgroup, workgroup, acq_rel);
+    tensor_mma(ps, vs, o, o, shape: m16n128k32,
+               a_type: f16, b_type: f16, accumulator_type: f32, result_type: f32,
+               c_scale_mode: per_row, c_scale: al,
+               a_layout: row, b_layout: row, c_layout: row, d_layout: row,
+               lda: 40, ldb: 136, ldc: 128, ldd: 128);
+    c = c + 1;
+  }
+}
+

@@ -16802,6 +16802,84 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  # Dense f16 tiles that stable WMMA cannot take in one operation (K above
+  # 16) run on the native m16n8k16 MMA, unrolled, with operands in
+  # workgroup memory read through ldmatrix (x4 per A fragment, x4 per two
+  # B columns). Inside a region-resident accumulator's loop, a tile of
+  # another shape stays a whole-tile operation: only the accumulator's own
+  # updates join its region (a score tile inside attention's K loop was
+  # tagged as an update and the group refused).
+  $fnPtx = Join-Path $tmpDir "ptx_emit_gb10_tensor_f16_native.ptx"
+  $fnCubin = Join-Path $tmpDir "ptx_emit_gb10_tensor_f16_native.cubin"
+  $fnOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_f16_native.mettle -o $fnPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "f16 native tensor emit failed: $fnOut" }
+  $fnText = Get-Content -Raw $fnPtx
+  $fnExpect = @(
+    @{ Name = 'f16_wide_k'; Mma = 64; Ldsm = 48; Trans = 0; Global = 16;
+       Notes = @('mtlc\.tensor_mma native-mma f16 whole-tile lowering') },
+    @{ Name = 'f16_region_with_inner_tile'; Mma = 96; Ldsm = 28; Trans = 32; Global = 64;
+       Notes = @('mtlc\.tensor_region resident native-mma f16-c-row-scaled group=1 subtiles=16',
+                 'mtlc\.tensor_mma native-mma f16 whole-tile lowering') })
+  foreach ($fnCase in $fnExpect) {
+    $fnEntry = [regex]::Match(
+      $fnText,
+      "(?s)\.visible \.entry $($fnCase.Name)\(.*?(?=\.visible \.entry|\z)"
+    ).Value
+    if (-not $fnEntry -or
+        [regex]::Matches($fnEntry, 'mma\.sync\.aligned\.m16n8k16\.row\.col\.f32\.f16\.f16\.f32').Count -ne $fnCase.Mma -or
+        [regex]::Matches($fnEntry, 'ldmatrix\.sync\.aligned\.m8n8\.x4\.shared\.b16').Count -ne $fnCase.Ldsm -or
+        [regex]::Matches($fnEntry, 'ldmatrix\.sync\.aligned\.m8n8\.x4\.trans\.shared\.b16').Count -ne $fnCase.Trans -or
+        [regex]::Matches($fnEntry, 'ld\.shared\.b32').Count -ne 0 -or
+        [regex]::Matches($fnEntry, 'ld\.global\.f32').Count -ne $fnCase.Global -or
+        [regex]::Matches($fnEntry, 'st\.global\.f32').Count -ne $fnCase.Global -or
+        $fnEntry -match 'wmma\.') {
+      throw "f16 native tensor contract mismatch in $($fnCase.Name)"
+    }
+    foreach ($fnNote in $fnCase.Notes) {
+      if ($fnEntry -notmatch $fnNote) {
+        throw "f16 native tensor lowering note missing in $($fnCase.Name): $fnNote"
+      }
+    }
+  }
+  $fnDumped = Join-Path $tmpDir "ptx_emit_gb10_tensor_f16_native_dumped.ptx"
+  $fnDumpOut = & $CompilerPath -O --dump-ir --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/tensor_f16_native.mettle -o $fnDumped 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path ($fnDumped + ".ir"))) {
+    throw "GPU --dump-ir failed for f16 native: $fnDumpOut"
+  }
+  $fnDump = Get-Content -Raw ($fnDumped + ".ir")
+  if ($fnDump -notmatch 'tensor_mma x1 m16n32k128' -or
+      $fnDump -match 'tensor_mma x1 residency\.region\.[a-z]+#[0-9]+ m16n32k128') {
+    throw "the score tile inside the accumulator's region joined its group"
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $fnAsmOut = & $ptxas.Source -v -arch=sm_121a $fnPtx -o $fnCubin 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) {
+        throw "ptxas rejected f16 native tensor PTX: $fnAsmOut"
+      }
+      if ($fnAsmOut -match '(?m)^\s*[1-9][0-9]* bytes spill (stores|loads)') {
+        throw "f16 native tensor kernels spilled registers: $fnAsmOut"
+      }
+    } else {
+      Write-Host "[SKIP] ptx_emit_gb10_tensor_f16_native ptxas assembly (toolkit lacks sm_121a)"
+    }
+  } else {
+    Write-Host "[SKIP] ptx_emit_gb10_tensor_f16_native ptxas assembly (ptxas not found)"
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_tensor_f16_native" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_tensor_f16_native" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $gb10Fp6Ptx = Join-Path $tmpDir "ptx_emit_gb10_tensor_fp6.ptx"
   $gb10Fp6Cubin = Join-Path $tmpDir "ptx_emit_gb10_tensor_fp6.cubin"
   $fp6EmitOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `

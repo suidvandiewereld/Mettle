@@ -517,12 +517,19 @@ static int tensor_try_form_region_residency(IRFunction *function,
     return -1;
 
   first = &function->instructions[first_index];
+  output = &first->arguments[3];
   first->tensor_residency_id = group_id;
   first->tensor_residency_role = IR_TENSOR_RESIDENCY_START;
   first->tensor_residency_scope = IR_TENSOR_RESIDENCY_SCOPE_REGION;
   for (size_t i = first_index + 1; i < end; i++) {
     IRInstruction *update = &function->instructions[i];
-    if (update->op != IR_OP_TENSOR_MMA) continue;
+    // Only the MMAs that join this accumulator: another tensor op in the
+    // region (its own tile, disjoint from D) stays outside the group.
+    if (update->op != IR_OP_TENSOR_MMA ||
+        update->tensor_residency_role != IR_TENSOR_RESIDENCY_NONE ||
+        !tensor_instruction_can_join(first, update) ||
+        !ir_tensor_region_update_operands_clean(update, output))
+      continue;
     update->tensor_residency_id = group_id;
     update->tensor_residency_role = IR_TENSOR_RESIDENCY_UPDATE;
     update->tensor_residency_scope = IR_TENSOR_RESIDENCY_SCOPE_REGION;

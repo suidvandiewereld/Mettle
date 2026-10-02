@@ -1175,6 +1175,7 @@ typedef struct {
   int b_halves;
   int b_signed4;
   unsigned b_zero_point;
+  int c_row_scaled;
 } PtxMmaProfile;
 
 static int ptx_version_at_least(const PtxFn *fn, int major, int minor) {
@@ -1808,12 +1809,34 @@ static int ptx_tensor_is_float_scaled_int8(const MtlcTensorMmaDesc *desc) {
   return a_int8 && b_int8 && (a_float_scale || b_float_scale);
 }
 
+// A dense, unscaled f16 or bf16 tile with f32 accumulation that stable
+// WMMA cannot take in one operation -- K above 16 -- runs on the native
+// m16n8k16 MMA the C row scale uses, unrolled over K with its accumulators
+// in registers, rather than being refused. K = 16 tiles keep WMMA.
+static int ptx_tensor_is_f16_native(const MtlcTensorMmaDesc *desc) {
+  return desc && desc->c_scale_mode == MTLC_TENSOR_SCALE_NONE &&
+         desc->sparsity == MTLC_TENSOR_SPARSITY_DENSE &&
+         desc->math_mode == MTLC_TENSOR_MATH_MULTIPLY_ADD &&
+         desc->a_scale_mode == MTLC_TENSOR_SCALE_NONE &&
+         desc->b_scale_mode == MTLC_TENSOR_SCALE_NONE &&
+         desc->a_element == desc->b_element &&
+         (desc->a_element == MTLC_TENSOR_ELEMENT_FLOAT16 ||
+          desc->a_element == MTLC_TENSOR_ELEMENT_BFLOAT16) &&
+         desc->accumulator_element == MTLC_TENSOR_ELEMENT_FLOAT32 &&
+         desc->result_element == MTLC_TENSOR_ELEMENT_FLOAT32 &&
+         desc->a_packing == MTLC_TENSOR_PACKING_LOGICAL &&
+         desc->b_packing == MTLC_TENSOR_PACKING_LOGICAL &&
+         desc->k > 16 && desc->k % 16 == 0 && desc->m % 16 == 0 &&
+         desc->n % 8 == 0;
+}
+
 static int ptx_tensor_uses_direct_mma(const MtlcTensorMmaDesc *desc) {
   return desc &&
          (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE ||
           desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE ||
           ptx_tensor_uses_narrow_float(desc) ||
-          ptx_tensor_is_float_scaled_int8(desc));
+          ptx_tensor_is_float_scaled_int8(desc) ||
+          ptx_tensor_is_f16_native(desc));
 }
 
 static const char *ptx_mma_fp8_type(MtlcTensorElement element) {
@@ -1868,8 +1891,10 @@ static int ptx_select_mma_profile(PtxFn *fn,
     PTX_MMA_REJECT("swizzled operands are offered on block-scaled i8 tiles");
   if (desc->scope != MTLC_MEMORY_SCOPE_SUBGROUP)
     PTX_MMA_REJECT("warp-level MMA requires subgroup scope");
-  if (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE) {
-    if (desc->c_scale_mode != MTLC_TENSOR_SCALE_PER_ROW)
+  if (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE ||
+      ptx_tensor_is_f16_native(desc)) {
+    if (desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE &&
+        desc->c_scale_mode != MTLC_TENSOR_SCALE_PER_ROW)
       PTX_MMA_REJECT("the C scale is per row");
     if (desc->math_mode != MTLC_TENSOR_MATH_MULTIPLY_ADD ||
         desc->sparsity != MTLC_TENSOR_SPARSITY_DENSE ||
@@ -1893,6 +1918,7 @@ static int ptx_select_mma_profile(PtxFn *fn,
     if (fn->target_arch < 80 || !ptx_version_at_least(fn, 7, 0))
       PTX_MMA_REJECT("f16/bf16 mma.sync m16n8k16 requires PTX 7.0 and sm_80 or newer");
     profile->kind = PTX_MMA_F16;
+    profile->c_row_scaled = desc->c_scale_mode != MTLC_TENSOR_SCALE_NONE;
     profile->shape = "m16n8k16";
     profile->a_type = profile->b_type =
         desc->a_element == MTLC_TENSOR_ELEMENT_FLOAT16 ? "f16" : "bf16";
@@ -2878,9 +2904,11 @@ static const char *ptx_mma_kind_name(const PtxMmaProfile *profile) {
   if (profile->kind == PTX_MMA_MXFP4) return "mxfp4";
   if (profile->kind == PTX_MMA_NVFP4) return "nvfp4";
   if (profile->kind == PTX_MMA_S8_SCALED) return "s8-block-scaled";
-  if (profile->kind == PTX_MMA_F16)
-    return strcmp(profile->a_type, "bf16") == 0 ? "bf16-c-row-scaled"
-                                                : "f16-c-row-scaled";
+  if (profile->kind == PTX_MMA_F16) {
+    int bf16 = strcmp(profile->a_type, "bf16") == 0;
+    if (!profile->c_row_scaled) return bf16 ? "bf16" : "f16";
+    return bf16 ? "bf16-c-row-scaled" : "f16-c-row-scaled";
+  }
   return "fp8";
 }
 
@@ -4109,13 +4137,70 @@ static void ptx_emit_mma_f16_tile(
     sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", matrix_ptr, narrow,
               offset);
   }
+  // ldmatrix for a row-major A and a column-major B in workgroup memory
+  // whose rows are whole 16-byte groups: one x4 brings a 16 x 16 A fragment
+  // (rows (l / 8 & 1) * 8 + l % 8, K (l / 16) * 8) or the b0/b1 pairs of
+  // two n8 columns (columns (l / 16) * 8 + l % 8, K (l / 8 & 1) * 8), in the
+  // register order the word loads below give -- a quarter of the loads.
+  unsigned lda_static = desc->a_leading_dimension;
+  int ldsm_ok = fn->target_arch >= 75 && ptx_version_at_least(fn, 6, 5);
+  int a_ldsm = ldsm_ok && fast_a && memory->spaces[0] &&
+               strcmp(memory->spaces[0], ".shared") == 0 && lda_static != 0 &&
+               (lda_static * 2u) % 16u == 0;
+  int b_ldsm = ldsm_ok && fast_b && memory->spaces[1] &&
+               strcmp(memory->spaces[1], ".shared") == 0 && ldb_static != 0 &&
+               (ldb_static * 2u) % 16u == 0;
+  char a_lm[24], b_lm[24];
+  if (a_ldsm || b_ldsm) {
+    char lid[24], lo[24], sel[24], hi[24], off[24], narrow[24];
+    reg_name(PC_B32, new_reg(fn, PC_B32), lid);
+    reg_name(PC_B32, new_reg(fn, PC_B32), lo);
+    reg_name(PC_B32, new_reg(fn, PC_B32), sel);
+    reg_name(PC_B32, new_reg(fn, PC_B32), hi);
+    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", lid, group, thread);
+    sb_printf(&fn->body, "\tand.b32 %s, %s, 7;\n", lo, lid);
+    sb_printf(&fn->body, "\tbfe.u32 %s, %s, 3, 1;\n", sel, lid);
+    sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", hi, lid);
+    if (a_ldsm) {
+      reg_name(PC_B32, new_reg(fn, PC_B32), off);
+      reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
+      reg_name(PC_B32, new_reg(fn, PC_B32), a_lm);
+      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", off, sel, lo);
+      sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", off, off,
+                lda_static * 2u);
+      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", off, hi, off);
+      sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
+                memory->bases[0]);
+      sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", a_lm, narrow, off);
+    }
+    if (b_ldsm) {
+      reg_name(PC_B32, new_reg(fn, PC_B32), off);
+      reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
+      reg_name(PC_B32, new_reg(fn, PC_B32), b_lm);
+      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", off, hi, lo);
+      sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", off, off,
+                ldb_static * 2u);
+      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", off, sel, off);
+      sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
+                memory->bases[1]);
+      sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", b_lm, narrow, off);
+    }
+  }
   const char *element = profile->a_type;
   for (int ks = 0; ks < k_steps; ks++) {
     int a_base = fn->count[PC_B32];
     for (int i = 0; i < m_tiles * 4; i++) new_reg(fn, PC_B32);
     int b_base = fn->count[PC_B32];
     for (int i = 0; i < n_tiles * 2; i++) new_reg(fn, PC_B32);
-    for (int mt = 0; mt < m_tiles; mt++) {
+    for (int mt = 0; a_ldsm && mt < m_tiles; mt++) {
+      char r[4][24];
+      for (int i = 0; i < 4; i++) reg_name(PC_B32, a_base + mt * 4 + i, r[i]);
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
+                r[0], r[1], r[2], r[3], a_lm,
+                (unsigned)mt * 16u * lda_static * 2u + (unsigned)ks * 32u);
+    }
+    for (int mt = 0; !a_ldsm && mt < m_tiles; mt++) {
       for (int r = 0; r < 4; r++) {
         unsigned row_off = (unsigned)mt * 16u + ((r & 1) ? 8u : 0u);
         unsigned k_off = (unsigned)ks * 16u + ((r >> 1) ? 8u : 0u);
@@ -4153,6 +4238,24 @@ static void ptx_emit_mma_f16_tile(
           sb_printf(&fn->body,
                     "\tldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%s, %s}, [%s+%u];\n",
                     b0, b1, matrix_ptr, offset);
+        }
+      }
+    } else if (b_ldsm) {
+      for (int nt = 0; nt < n_tiles; nt += 2) {
+        unsigned offset = (unsigned)nt * 8u * ldb_static * 2u + (unsigned)ks * 32u;
+        char b0[24], b1[24], b2[24], b3[24];
+        reg_name(PC_B32, b_base + nt * 2, b0);
+        reg_name(PC_B32, b_base + nt * 2 + 1, b1);
+        if (nt + 1 < n_tiles) {
+          reg_name(PC_B32, b_base + nt * 2 + 2, b2);
+          reg_name(PC_B32, b_base + nt * 2 + 3, b3);
+          sb_printf(&fn->body,
+                    "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
+                    b0, b1, b2, b3, b_lm, offset);
+        } else {
+          sb_printf(&fn->body,
+                    "\tldmatrix.sync.aligned.m8n8.x2.shared.b16 {%s, %s}, [%s+%u];\n",
+                    b0, b1, b_lm, offset);
         }
       }
     } else {
