@@ -35,6 +35,8 @@ static size_t g_runtime_sorted_location_count = 0;
 static volatile LONG g_runtime_debug_handler_installed = 0;
 static volatile LONG g_runtime_debug_in_handler = 0;
 static PVOID g_runtime_debug_vectored_handler = NULL;
+static uintptr_t g_runtime_image_start = 0;
+static uintptr_t g_runtime_image_end = 0;
 #else
 static volatile sig_atomic_t g_runtime_debug_handler_installed = 0;
 static volatile sig_atomic_t g_runtime_debug_in_handler = 0;
@@ -689,6 +691,38 @@ mettle_crash_unhandled_exception_filter(EXCEPTION_POINTERS *exception_info) {
   mettle_crash_terminate_with_code(1);
   return EXCEPTION_EXECUTE_HANDLER;
 }
+
+static void mettle_crash_note_image_range(void) {
+  const unsigned char *base = (const unsigned char *)GetModuleHandleW(NULL);
+  if (!base) {
+    return;
+  }
+  const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+    return;
+  }
+  const IMAGE_NT_HEADERS *nt =
+      (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE) {
+    return;
+  }
+  g_runtime_image_start = (uintptr_t)base;
+  g_runtime_image_end = (uintptr_t)base + nt->OptionalHeader.SizeOfImage;
+}
+
+static LONG WINAPI
+mettle_crash_vectored_exception_filter(EXCEPTION_POINTERS *exception_info) {
+  if (!exception_info || !exception_info->ExceptionRecord) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  uintptr_t address =
+      (uintptr_t)exception_info->ExceptionRecord->ExceptionAddress;
+  if (g_runtime_image_end != 0 &&
+      (address < g_runtime_image_start || address >= g_runtime_image_end)) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  return mettle_crash_unhandled_exception_filter(exception_info);
+}
 #else
 
 static void mettle_crash_terminate_with_code(int exit_code) {
@@ -823,8 +857,9 @@ void mettle_crash_register_debug_image(const MettleCrashDebugImage *image) {
 void mettle_crash_install(void) {
 #if defined(_WIN32) || defined(_WIN64)
   if (InterlockedCompareExchange(&g_runtime_debug_handler_installed, 1, 0) == 0) {
+    mettle_crash_note_image_range();
     g_runtime_debug_vectored_handler =
-        AddVectoredExceptionHandler(1, mettle_crash_unhandled_exception_filter);
+        AddVectoredExceptionHandler(1, mettle_crash_vectored_exception_filter);
     SetUnhandledExceptionFilter(mettle_crash_unhandled_exception_filter);
   }
 #else

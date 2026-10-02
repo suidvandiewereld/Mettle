@@ -1,0 +1,13 @@
+import "std/io";
+
+extern fn VirtualAlloc(address: uint8*, bytes: uint64, kind: uint32, protect: uint32) -> uint8* = "VirtualAlloc";
+extern fn IsBadReadPtr(p: uint8*, bytes: uint64) -> int32 = "IsBadReadPtr";
+
+fn main() -> int32 {
+  var reserved: uint8* = VirtualAlloc((uint8*)0, (uint64)65536, (uint32)0x2000, (uint32)0x01);
+  if (IsBadReadPtr(reserved, (uint64)1) != 0) {
+    println("probe handled by kernel32");
+    return 0;
+  }
+  return 2;
+}

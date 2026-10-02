@@ -1560,6 +1560,66 @@ The strict release gate intentionally excludes experimental TMA. Its separate
 three-way opt-in is documented with the recovery requirements in that
 validation guide; do not enable it on a workstation.
 
+## Profiling Mettle kernels
+
+### Nsight Systems
+
+```bat
+nsys profile --trace=cuda -o run app.exe
+nsys stats --report cuda_gpu_kern_sum,cuda_api_sum run.nsys-rep
+```
+
+The timeline shows every kernel launch, memcpy and driver call, the same as
+for a CUDA program. Nothing in the program needs changing.
+
+Programs built before this fix recorded nothing: no kernels and no API calls,
+and the report said "No CUDA events collected". Nsight's injection library
+raises and handles exceptions of its own while it sets up CUDA tracing. The
+Mettle crash reporter installs a first-chance (vectored) exception handler,
+and it used to treat every exception as a crash of the program and end the
+process, so the process died there with no report, before the first CUDA call
+was traced. The handler now acts only on exceptions raised inside the Mettle
+executable. Anything raised in a DLL goes through normal dispatch, and a fault
+nothing handles still reaches the crash report through the unhandled-exception
+filter. Rebuild an older executable, or link it with `--no-crash-report`, to
+profile it.
+
+### Nsight Compute
+
+```bat
+ncu --metrics gpu__time_duration.sum app.exe
+ncu -k vadd --set full -o report app.exe
+```
+
+`-k` limits profiling to one kernel; `-o` writes a report for the Nsight
+Compute UI.
+
+On Windows with a locale whose decimal separator is a comma (en-ZA, de-DE, and
+others), ncu's command-line printer fails with `==ERROR== Failed to start the
+profiler: bad conversion` whenever it prints metrics in base units or prints a
+section: any `--section`, the default set, `--csv` (which implies
+`--print-units base`), `--print-units base`, and `--import` of a saved report.
+Setting `LC_ALL` or `LANG` does not help. What does work (verified with ncu
+2025.2.1 under en-ZA):
+
+- A metric printed in automatic units: `ncu --metrics gpu__time_duration.sum
+  app.exe` prints `22,34 us`, and `--csv --print-units auto` gives CSV.
+- Collecting sections into a report: `ncu -o report app.exe` succeeds; read it
+  with the Python report interface, which returns numbers rather than text:
+
+  ```python
+  import sys
+  sys.path.append(r"C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.2.1\extras\python")
+  import ncu_report
+  report = ncu_report.load_report("report.ncu-rep")
+  action = report.range_by_idx(0).action_by_idx(0)
+  print(action.name(), action.metric_by_name("gpu__time_duration.sum").as_double())
+  ```
+
+Setting Windows' decimal symbol to `.` (Region, Additional settings) should
+also avoid the failure, but that changes the setting for every program and was
+not tested here.
+
 ## SPIR-V (OpenCL) target
 
 The same kernels compile to SPIR-V with `--emit-spirv`, targeting the

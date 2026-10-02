@@ -16965,6 +16965,26 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  if ($script:OnWindows) {
+    $fepExe = Join-Path $tmpDir "foreign_exception_passthrough.exe"
+    $fepBuild = & $CompilerPath --build tests/test_foreign_exception_passthrough.mettle -o $fepExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "foreign exception probe did not build: $fepBuild" }
+    $fepRun = & $fepExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $fepRun -notmatch "probe handled by kernel32" -or
+        $fepRun -match "Unhandled runtime exception") {
+      throw "the crash handler took a fault kernel32 handles itself: $fepRun"
+    }
+  }
+  Write-CaseResult -Name "crash_handler_passes_foreign_exceptions" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "crash_handler_passes_foreign_exceptions" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   # Block-scaled i8 tensor MMA: exact int32 K32 dots scaled per block into
   # f32, 4-bit halves-packed B widened in registers, and region residency
   # across a K loop staged through workgroup memory.
