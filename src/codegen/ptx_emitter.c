@@ -3527,7 +3527,9 @@ static void ptx_lane_load_scale(PtxFn *fn, const PtxLanePointer *pointer,
 // 16-byte aligned load through ldmatrix instead: one x4 per m16 A fragment
 // (rows 0-7 / 8-15 by K bytes 0-15 / 16-31 are exactly a0..a3), and for a
 // halves-packed B one x4 per n8 column group and four K blocks (the lane's
-// word of each 16-byte group is its nibble word for that block).
+// word of each 16-byte group is its nibble word for that block) -- or, with
+// exactly four column groups, one x4 per K block across them, loaded where
+// that block starts, so only one block's words are ever live.
 //
 // The block dot starts from the bits of a float whose unit in the last
 // place is 1 (1.5 * 2^23), so its bits read as that float plus the dot, and
@@ -3679,9 +3681,32 @@ static void ptx_emit_mma_s8_scaled_tile(
                      1, thread, 4, &b_lane);
   }
 
-  // Raw nibble words, [n_tile][block].
+  // Raw nibble words, [n_tile][block] -- or, with four column tiles on
+  // ldmatrix, one K block's words at a time ([n_tile], reloaded every
+  // block): an x4 load whose four matrices are the four tiles, the lane
+  // addressing column l of the 32. Holding every block's words from the
+  // start cost 3 * n_tiles registers more for the whole tile, and the int8
+  // TMA GEMM ~2.5% (91.3 -> 93.6 TOPS at its widest shape).
   int raw_base = -1;
-  if (profile->b_halves) {
+  int raw_per_kb = profile->b_halves && b_ldsm && n_tiles == 4 && k_blocks > 1;
+  PtxLanePointer nib32_lane;
+  char nib32_key[24] = {0};
+  if (raw_per_kb) {
+    char ld_bytes32[24];
+    if (ldb_static) {
+      snprintf(ld_bytes32, sizeof(ld_bytes32), "%u", ldb_static / 2u);
+    } else {
+      reg_name(PC_B32, new_reg(fn, PC_B32), ld_bytes32);
+      sb_printf(&fn->body, "\tshr.u32 %s, %s, 1;\n", ld_bytes32,
+                memory->strides[1]);
+    }
+    ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ld_bytes32, 1,
+                     lane_id, 1, NULL, 0, &nib32_lane);
+    if (desc->b_swizzle)
+      ptx_mma_swizzle_key(fn, nib32_lane.reg, desc->b_swizzle, nib32_key);
+    raw_base = fn->count[PC_B32];
+    for (int i = 0; i < n_tiles; i++) new_reg(fn, PC_B32);
+  } else if (profile->b_halves) {
     raw_base = fn->count[PC_B32];
     for (int i = 0; i < n_tiles * k_blocks; i++) new_reg(fn, PC_B32);
     char b_swizzled[8][24];  // per K step, shared by every column group
@@ -3771,9 +3796,10 @@ static void ptx_emit_mma_s8_scaled_tile(
   char bias[24];
   reg_name(PC_B32, new_reg(fn, PC_B32), bias);
   sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", bias, start_bits);
-  // A ring of three dot tuples: each block dot's epilogue runs two MMAs
-  // later, so the tensor pipe has the next products queued meanwhile.
-  enum { DOT_RING = 3, DOT_LAG = 2 };
+  // A ring of four dot tuples: each block dot's epilogue runs three MMAs
+  // later, so the tensor pipe has the next products queued meanwhile (two
+  // measured ~0.4% slower on the int8 TMA GEMM, four ~0.5%).
+  enum { DOT_RING = 4, DOT_LAG = 3 };
   int dot_base = fn->count[PC_B32];
   for (int i = 0; i < DOT_RING * 4; i++) new_reg(fn, PC_B32);
 
@@ -3845,13 +3871,29 @@ static void ptx_emit_mma_s8_scaled_tile(
 
     // B fragments: register r holds column group, K k0 + 16*r + 4*thread
     // .. +3.
+    if (raw_per_kb) {
+      char regs[4][24], address[48];
+      for (int i = 0; i < 4; i++) reg_name(PC_B32, raw_base + i, regs[i]);
+      if (desc->b_swizzle) {
+        char sw[24];
+        ptx_mma_swizzled_address(fn, nib32_lane.reg, nib32_key,
+                                 (unsigned)kb * 16u, sw);
+        snprintf(address, sizeof(address), "%s", sw);
+      } else {
+        ptx_lane_address(fn, &nib32_lane, 0, (unsigned)kb * 16u, address);
+      }
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
+                regs[0], regs[1], regs[2], regs[3], address);
+    }
     for (int nt = 0; nt < n_tiles; nt++) {
       char lo[24], hi[24];
       reg_name(PC_B32, b_base + nt * 2, lo);
       reg_name(PC_B32, b_base + nt * 2 + 1, hi);
       if (profile->b_halves) {
         char word[24];
-        reg_name(PC_B32, raw_base + nt * k_blocks + kb, word);
+        reg_name(PC_B32, raw_per_kb ? raw_base + nt : raw_base + nt * k_blocks + kb,
+                 word);
         if (x16) {
           // High nibbles stay put, low ones move up a nibble; ^ 8 per
           // nibble subtracts the zero point (signed nibbles need none).
