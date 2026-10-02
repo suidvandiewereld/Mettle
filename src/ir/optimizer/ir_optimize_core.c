@@ -251,6 +251,7 @@ int ir_instruction_writes_temp(const IRInstruction *instruction) {
   case IR_OP_CAST:
   case IR_OP_SELECT:
   case IR_OP_SIMD_LCG_U32:
+  case IR_OP_ASM_RESULT:
     return 1;
   default:
     return 0;
@@ -303,6 +304,7 @@ static const int IR_WRITES_SYMBOL[IR_OP_KIND_COUNT] = {
     [IR_OP_SIMD_LCG_U32] = 1,
     [IR_OP_ADDRESS_SPACE_ALLOC] = 1,
     [IR_OP_PHI] = 1,
+    [IR_OP_ASM_RESULT] = 1,
 };
 
 int ir_instruction_writes_symbol(const IRInstruction *instruction) {
@@ -2018,9 +2020,11 @@ int ir_common_subexpression_elimination_pass(IRFunction *function,
       ir_expression_map_invalidate_after_store(&map, &addr_taken);
     }
 
-    if (instruction->op == IR_OP_CALL ||
-        instruction->op == IR_OP_CALL_INDIRECT ||
-        instruction->op == IR_OP_INLINE_ASM) {
+    if (instruction->op == IR_OP_INLINE_ASM && instruction->asm_operands) {
+      ir_expression_map_invalidate_after_store(&map, &addr_taken);
+    } else if (instruction->op == IR_OP_CALL ||
+               instruction->op == IR_OP_CALL_INDIRECT ||
+               instruction->op == IR_OP_INLINE_ASM) {
       ir_expression_map_clear(&map);
     }
 

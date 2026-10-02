@@ -71,10 +71,28 @@ the same for every frontend and GPU backend.
 
 An `asm { ... }` block in device code is emitted into the PTX as written,
 for the instructions Mettle has no construct for -- `mma.sync` fragments held
-in registers, `ldmatrix`, `cvt.rn.f16x2.f32`. Each `{name}` becomes the
-register that holds the scalar local or parameter `name`, which the block
-reads and writes in place: a function with asm keeps every local in one named
-register for its whole body, and the optimizer treats the block as opaque.
+in registers, `ldmatrix`, `cvt.rn.f16x2.f32`. Each `{name}` binds the scalar
+local or parameter `name`.
+
+The block is an ordinary instruction to the optimizer. Its bindings are
+explicit operands: a binding the PTX reads is an input, and one it writes gets
+a new definition right after the block. A binding is written when it sits in
+an instruction's first operand (the destination), unless that operand is an
+address (`[...]`) or the opcode has no destination (`st`, `red`, `bar`, `bra`,
+`cp`, `stmatrix`, `fence`, ...). A predicated (`@p`) write, a `wgmma`
+accumulator, and any write in a block with a label or a branch also count as a
+read, since the old value can survive. Everything else in the function is
+optimized as if the block were any other instruction: values are shared and
+propagated across it, and a device function containing asm can be inlined
+unless the asm defines a label.
+
+In the PTX, a binding that is only read is the register already holding its
+value, and one that is only written is a fresh register copied to the local
+afterwards. A binding that is read and written, such as an `mma.sync`
+accumulator, is copied into a register of its own before the block and back
+after it, because the PTX names one register for both. ptxas coalesces these
+copies: a loop whose body is asm uses the registers of the same loop written
+in Mettle.
 
 ```mettle
 // s0..s3, a0..a3 and b0..b1 declared as scalars: the accumulator, the

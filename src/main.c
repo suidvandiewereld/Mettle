@@ -5323,6 +5323,12 @@ static int compile_emit_ptx(IRProgram *ir_program, ASTNode *program,
                                 options->report_gpu_types};
   int ok;
 
+  if (!ir_program_bind_device_asm(ir_program, &ptx_err)) {
+    fprintf(stderr, "Error: PTX emission failed: %s\n",
+            ptx_err ? ptx_err : "unknown");
+    free(ptx_err);
+    return 1;
+  }
   if (!compile_optimize_device_ir(ir_program, program, options, profile)) {
     return 1;
   }

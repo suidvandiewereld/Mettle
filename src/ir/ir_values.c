@@ -347,6 +347,7 @@ static const int IR_WRITES_DESTINATION[IR_OP_KIND_COUNT] = {
     [IR_OP_SIMD_LCG_U32] = 1,
     [IR_OP_ADDRESS_SPACE_ALLOC] = 1,
     [IR_OP_PHI] = 1,
+    [IR_OP_ASM_RESULT] = 1,
 };
 
 int ir_instruction_writes_destination(const IRInstruction *instruction) {

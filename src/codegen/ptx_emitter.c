@@ -57,6 +57,9 @@ typedef struct {
   size_t nbinds, capbinds;
   PtxDefCount *def_counts;
   size_t def_capacity;
+  PtxClass *asm_out_cls;
+  int *asm_out_idx;
+  size_t asm_out_count, asm_out_capacity;
   PtxTensorResidency *tensor_residencies;
   size_t tensor_residency_count, tensor_residency_capacity;
   IRProgram *program;
@@ -7696,6 +7699,12 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
     }
     return 0;
   }
+  char *asm_error = NULL;
+  if (!ir_program_bind_device_asm(program, &asm_error)) {
+    if (error) *error = asm_error;
+    else free(asm_error);
+    return 0;
+  }
   IRGpuCallGraph graph = {0};
   char *graph_error = NULL;
   if (!ir_program_build_gpu_call_graph(program, &graph, &graph_error)) {
@@ -9616,6 +9625,224 @@ static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
   }
 }
 
+static PtxClass ptx_asm_binding_class(PtxFn *fn, const IRFunction *func,
+                                      size_t at, const IRInstruction *in,
+                                      size_t k, const char *name) {
+  if (in->argument_types && in->argument_types[k]) {
+    PtxVal v = descriptor_from_type(in->argument_types[k]);
+    if (v.cls != PC_NONE) {
+      return v.cls;
+    }
+  }
+  for (size_t j = at + 1; j < func->instruction_count; j++) {
+    const IRInstruction *next = &func->instructions[j];
+    if (next->op == IR_OP_NOP) {
+      continue;
+    }
+    if (next->op != IR_OP_ASM_RESULT) {
+      break;
+    }
+    if (next->rhs.kind == IR_OPERAND_INT &&
+        next->rhs.int_value == (long long)k) {
+      PtxVal v = next->value_type ? descriptor_from_type(next->value_type)
+                                  : descriptor_from_typename(next->text);
+      if (v.cls != PC_NONE) {
+        return v.cls;
+      }
+    }
+  }
+  const IROperand *argument =
+      k < in->argument_count ? &in->arguments[k] : NULL;
+  if (argument && (argument->kind == IR_OPERAND_TEMP ||
+                   argument->kind == IR_OPERAND_SYMBOL)) {
+    PtxClass cls = operand_desc(fn, argument).cls;
+    if (cls != PC_NONE) {
+      return cls;
+    }
+  }
+  PtxBinding *b = find_binding(fn, name);
+  if (b && !b->val.mem_local && !b->val.mem_aggregate &&
+      b->val.cls != PC_NONE) {
+    return b->val.cls;
+  }
+  if (argument && argument->kind != IR_OPERAND_NONE) {
+    return operand_desc(fn, argument).cls;
+  }
+  return PC_NONE;
+}
+
+static int ptx_asm_reserve(PtxFn *fn, size_t count) {
+  if (count <= fn->asm_out_capacity) {
+    return 1;
+  }
+  PtxClass *cls = realloc(fn->asm_out_cls, count * sizeof(*cls));
+  if (!cls) {
+    return 0;
+  }
+  fn->asm_out_cls = cls;
+  int *idx = realloc(fn->asm_out_idx, count * sizeof(*idx));
+  if (!idx) {
+    return 0;
+  }
+  fn->asm_out_idx = idx;
+  fn->asm_out_capacity = count;
+  return 1;
+}
+
+static void ptx_emit_asm_text(PtxFn *fn, const char *text,
+                              const IRAsmBinding *bindings, size_t count,
+                              char (*regs)[24]) {
+  Sb line = {0};
+  int line_has_text = 0;
+  for (const char *c = text;; c++) {
+    if (*c == '\n' || *c == '\0') {
+      if (line_has_text) {
+        sb_puts(&fn->body, "\t");
+        sb_puts(&fn->body, line.data ? line.data : "");
+        sb_puts(&fn->body, "\n");
+      }
+      free(line.data);
+      memset(&line, 0, sizeof(line));
+      line_has_text = 0;
+      if (*c == '\0') {
+        break;
+      }
+      continue;
+    }
+    if (!line_has_text && (*c == ' ' || *c == '\t' || *c == '\r')) {
+      continue;
+    }
+    line_has_text = 1;
+    if (*c == '{') {
+      const char *q = c + 1;
+      while (*q == ' ' || *q == '\t') {
+        q++;
+      }
+      const char *name0 = q;
+      if ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') || *q == '_') {
+        while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+               (*q >= '0' && *q <= '9') || *q == '_') {
+          q++;
+        }
+        const char *name1 = q;
+        while (*q == ' ' || *q == '\t') {
+          q++;
+        }
+        if (*q == '}') {
+          char name[128];
+          size_t n = (size_t)(name1 - name0);
+          if (n >= sizeof(name)) {
+            n = sizeof(name) - 1;
+          }
+          memcpy(name, name0, n);
+          name[n] = '\0';
+          size_t k = 0;
+          while (k < count && strcmp(bindings[k].name, name) != 0) {
+            k++;
+          }
+          if (k < count) {
+            sb_puts(&line, regs[k]);
+          } else {
+            fn_error(fn, "PTX asm: `{%s}` was not bound to an operand", name);
+          }
+          c = q;
+          continue;
+        }
+      }
+    }
+    char one[2] = {*c, '\0'};
+    sb_puts(&line, one);
+  }
+  free(line.data);
+}
+
+static void ptx_emit_inline_asm(PtxFn *fn, const IRFunction *func,
+                                const IRInstruction *in, size_t at) {
+  IRAsmBinding *bindings = NULL;
+  size_t count = 0;
+  fn->asm_out_count = 0;
+  if (!in->asm_operands) {
+    fn_error(fn, "PTX asm: a block in '%s' was not bound to its operands",
+             func->name ? func->name : "?");
+    return;
+  }
+  if (!ir_inline_asm_bindings(in->text, &bindings, &count) ||
+      count != in->argument_count || !ptx_asm_reserve(fn, count)) {
+    fn_error(fn, "PTX asm: a block in '%s' lost its operand bindings",
+             func->name ? func->name : "?");
+    free(bindings);
+    return;
+  }
+  char(*regs)[24] = count ? calloc(count, sizeof(*regs)) : NULL;
+  if (count && !regs) {
+    fn_error(fn, "PTX asm: out of memory");
+    free(bindings);
+    return;
+  }
+  for (size_t k = 0; k < count; k++) {
+    PtxClass cls =
+        ptx_asm_binding_class(fn, func, at, in, k, bindings[k].name);
+    if (cls == PC_NONE) {
+      fn_error(fn, "PTX asm: `{%s}` is not a scalar held in a register "
+                   "(an aggregate, or a local whose address is taken)",
+               bindings[k].name);
+      break;
+    }
+    fn->asm_out_cls[k] = cls;
+    fn->asm_out_idx[k] = -1;
+    if (bindings[k].writes) {
+      int idx = new_reg(fn, cls);
+      reg_name(cls, idx, regs[k]);
+      fn->asm_out_idx[k] = idx;
+      if (bindings[k].reads) {
+        char src[24];
+        use_as(fn, &in->arguments[k], cls, src);
+        sb_printf(&fn->body, "\tmov%s %s, %s;\n", cls_regtype(cls), regs[k],
+                  src);
+      }
+    } else {
+      use_as(fn, &in->arguments[k], cls, regs[k]);
+    }
+  }
+  fn->asm_out_count = count;
+  if (!fn->error) {
+    ptx_emit_asm_text(fn, in->text ? in->text : "", bindings, count, regs);
+  }
+  free(regs);
+  free(bindings);
+}
+
+static void ptx_emit_asm_result(PtxFn *fn, const IRInstruction *in) {
+  long long k = in->rhs.kind == IR_OPERAND_INT ? in->rhs.int_value : -1;
+  if (k < 0 || (size_t)k >= fn->asm_out_count || fn->asm_out_idx[k] < 0 ||
+      !in->dest.name) {
+    fn_error(fn, "PTX asm: a result does not follow the block that writes it");
+    return;
+  }
+  PtxClass cls = fn->asm_out_cls[k];
+  char out[24];
+  reg_name(cls, fn->asm_out_idx[k], out);
+  PtxBinding *db = find_binding(fn, in->dest.name);
+  PtxClass dc = (db && db->val.cls != PC_NONE) ? db->val.cls : cls;
+  char src[24];
+  coerce(fn, cls, in->is_unsigned, out, dc, src);
+  PtxVal dv;
+  if (db && !db->val.mem_local) {
+    dv = db->val;
+  } else {
+    dv = (PtxVal){0};
+    dv.cls = dc;
+    dv.is_unsigned = db ? db->val.is_unsigned : in->is_unsigned;
+    dv.idx = new_reg(fn, dc);
+  }
+  char dn[24];
+  reg_name(dv.cls, dv.idx, dn);
+  if (strcmp(dn, src) != 0) {
+    sb_printf(&fn->body, "\tmov%s %s, %s;\n", cls_regtype(dv.cls), dn, src);
+  }
+  bind_value(fn, in->dest.name, dv);
+}
+
 static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
@@ -9677,74 +9904,12 @@ static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
     }
     break;
   }
-  case IR_OP_INLINE_ASM: {
-    // PTX inline assembly: the block's lines as written, each `{name}`
-    // replaced by the register holding the local or parameter `name` -- a
-    // scalar kept in a register, not an aggregate or a local whose address
-    // is taken. A function with asm keeps every local as one named register
-    // (no SSA promotion), so a binding is read and written in place, and
-    // the optimizer treats the block as opaque. A brace that does not
-    // enclose a bare name is PTX's own: `{{d0}, {d1}}` is a vector operand
-    // of two bound registers, `{ .reg .pred p; ... }` a scope.
-    const char *t = in->text ? in->text : "";
-    Sb line = {0};
-    int line_has_text = 0;
-    for (const char *c = t;; c++) {
-      if (*c == '\n' || *c == '\0') {
-        if (line_has_text) {
-          sb_puts(&fn->body, "\t");
-          sb_puts(&fn->body, line.data ? line.data : "");
-          sb_puts(&fn->body, "\n");
-        }
-        free(line.data);
-        memset(&line, 0, sizeof(line));
-        line_has_text = 0;
-        if (*c == '\0') break;
-        continue;
-      }
-      if (!line_has_text && (*c == ' ' || *c == '\t' || *c == '\r')) continue;
-      line_has_text = 1;
-      if (*c == '{') {
-        const char *q = c + 1;
-        while (*q == ' ' || *q == '\t') q++;
-        const char *name0 = q;
-        if ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') || *q == '_') {
-          while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
-                 (*q >= '0' && *q <= '9') || *q == '_')
-            q++;
-          const char *name1 = q;
-          while (*q == ' ' || *q == '\t') q++;
-          if (*q == '}') {
-            char name[128];
-            size_t n = (size_t)(name1 - name0);
-            if (n >= sizeof(name)) n = sizeof(name) - 1;
-            memcpy(name, name0, n);
-            name[n] = '\0';
-            PtxBinding *b = find_binding(fn, name);
-            if (!b) {
-              fn_error(fn, "PTX asm: `{%s}` names no local or parameter of '%s'",
-                       name, func->name ? func->name : "?");
-            } else if (b->val.mem_local || b->val.mem_aggregate ||
-                       b->val.cls == PC_NONE) {
-              fn_error(fn, "PTX asm: `{%s}` is not a scalar held in a register "
-                           "(an aggregate, or a local whose address is taken)",
-                       name);
-            } else {
-              char r[24];
-              reg_name(b->val.cls, b->val.idx, r);
-              sb_puts(&line, r);
-            }
-            c = q;
-            continue;
-          }
-        }
-      }
-      char one[2] = {*c, '\0'};
-      sb_puts(&line, one);
-    }
-    free(line.data);
+  case IR_OP_INLINE_ASM:
+    ptx_emit_inline_asm(fn, func, in, *ii);
     break;
-  }
+  case IR_OP_ASM_RESULT:
+    ptx_emit_asm_result(fn, in);
+    break;
   default:
     fn_error(fn, "PTX: unsupported IR opcode %d in device function '%s'", in->op,
              func->name ? func->name : "?");
@@ -10240,6 +10405,8 @@ static void ptx_emit_release(PtxEmit *e) {
   free(e->fn.binds);
   free(e->fn.def_counts);
   free(e->fn.tensor_residencies);
+  free(e->fn.asm_out_cls);
+  free(e->fn.asm_out_idx);
 }
 
 static void ptx_count_one_definition(PtxFn *fn, const char *name) {

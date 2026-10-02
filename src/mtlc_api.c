@@ -307,6 +307,15 @@ static int mtlc_optimize_policy(MtlcContext *ctx, MtlcModule *module,
     mtlc_diag(ctx, MTLC_DIAG_ERROR, "GPU launch host lowering failed");
     return 0;
   }
+  if (gpu_device_only) {
+    char *asm_error = NULL;
+    if (!ir_program_bind_device_asm(module->ir, &asm_error)) {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "PTX emission failed: %s",
+                asm_error ? asm_error : "unknown error");
+      free(asm_error);
+      return 0;
+    }
+  }
   if (!ir_optimize_program(module->ir, &options)) {
     mtlc_diag(ctx, MTLC_DIAG_ERROR, "the optimizer rejected the module");
     return 0;

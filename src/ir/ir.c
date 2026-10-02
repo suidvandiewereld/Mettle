@@ -1451,6 +1451,7 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
   slot->float_bits = instruction->float_bits;
   slot->is_volatile = instruction->is_volatile;
   slot->allocates = instruction->allocates;
+  slot->asm_operands = instruction->asm_operands;
   slot->alias_class = instruction->alias_class;
   slot->expansion_note = instruction->expansion_note;
   slot->effect_signature = instruction->effect_signature;
@@ -2414,6 +2415,7 @@ static const char *const IR_OPCODE_NAMES[IR_OP_KIND_COUNT] = {
     [IR_OP_SELECT] = "select",
     [IR_OP_SAFETY_CHECK] = "safety_check",
     [IR_OP_PHI] = "phi",
+    [IR_OP_ASM_RESULT] = "asm_result",
     [IR_OP_BINARY] = "binary",
     [IR_OP_ROTATE_ADD] = "rotate_add",
     [IR_OP_UNARY] = "unary",
@@ -2591,6 +2593,9 @@ static int ir_format_value_line(const IRInstruction *instruction,
   case IR_OP_INLINE_ASM:
     written = snprintf(buffer, buffer_size, "inline_asm \"%s\"",
                        instruction->text ? instruction->text : "");
+    break;
+  case IR_OP_ASM_RESULT:
+    written = snprintf(buffer, buffer_size, "%s = asm_result %s", dest, rhs);
     break;
   case IR_OP_CAST:
     written = snprintf(buffer, buffer_size, "%s = (%s)%s%s", dest,

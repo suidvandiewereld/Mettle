@@ -118,6 +118,7 @@ typedef enum {
   IR_OP_SELECT,
   IR_OP_SAFETY_CHECK,
   IR_OP_PHI,
+  IR_OP_ASM_RESULT,
   IR_OP_KIND_COUNT
 } IROpcode;
 
@@ -207,6 +208,7 @@ typedef struct {
   int is_unsigned;
   int is_volatile;
   int allocates;
+  unsigned char asm_operands;
   void *ast_ref;
   MtlcType *value_type;
   unsigned char alias_class;
@@ -383,6 +385,16 @@ typedef struct {
 } IRModuleSymbol;
 
 int ir_inline_asm_binds_symbol(const char *assembly_text, const char *name);
+
+typedef struct {
+  char name[128];
+  unsigned char reads;
+  unsigned char writes;
+} IRAsmBinding;
+
+int ir_inline_asm_bindings(const char *text, IRAsmBinding **out,
+                           size_t *count);
+int ir_inline_asm_defines_label(const char *text);
 
 typedef struct {
   IRFunction **functions;
@@ -588,6 +600,7 @@ int ir_program_lower_gpu_launches(IRProgram *program);
 int ir_program_build_gpu_call_graph(const IRProgram *program,
                                     IRGpuCallGraph *graph, char **error);
 void ir_gpu_call_graph_destroy(IRGpuCallGraph *graph);
+int ir_program_bind_device_asm(IRProgram *program, char **error);
 
 size_t ir_function_drop_dead_nops(IRFunction *function);
 const IRInstruction *ir_function_find_declaration(const IRFunction *function,

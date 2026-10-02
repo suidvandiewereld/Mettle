@@ -205,7 +205,9 @@ static int ir_inline_scan_body(const IRFunction *function, int forced,
              "with --pgo so a measured-hot callee overrides it";
       return 0;
     }
-    if (instruction->op == IR_OP_INLINE_ASM) {
+    if (instruction->op == IR_OP_INLINE_ASM &&
+        (!instruction->asm_operands ||
+         ir_inline_asm_defines_label(instruction->text))) {
       IR_INLINE_WHY(why_not, "callee-inline-asm",
                     "the callee contains inline assembly");
       return 0;
@@ -402,6 +404,7 @@ int ir_clone_instruction_plain(const IRInstruction *source,
   out->float_bits = source->float_bits;
   out->is_unsigned = source->is_unsigned;
   out->allocates = source->allocates;
+  out->asm_operands = source->asm_operands;
   out->ast_ref = source->ast_ref;
   out->value_type = source->value_type;
 
@@ -488,6 +491,7 @@ static int ir_clone_instruction_for_inline(const IRInstruction *source,
   out->float_bits = source->float_bits;
   out->is_unsigned = source->is_unsigned;
   out->allocates = source->allocates;
+  out->asm_operands = source->asm_operands;
   out->ast_ref = NULL;
   out->value_type = source->value_type;
 

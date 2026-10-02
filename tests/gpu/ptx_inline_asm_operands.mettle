@@ -1,0 +1,65 @@
+kernel(block = 32) asm_loop(out: float32*, x: float32*, n: int32) {
+  var acc: float32 = 0.0;
+  var i: int32 = 0;
+  while (i < n) {
+    var v: float32 = x[i * 32 + thread.x];
+    asm {
+      fma.rn.f32 {acc}, {v}, {v}, {acc};
+    }
+    i = i + 1;
+  }
+  out[thread.x] = acc;
+}
+
+kernel(block = 32) plain_loop(out: float32*, x: float32*, n: int32) {
+  var acc: float32 = 0.0;
+  var i: int32 = 0;
+  while (i < n) {
+    var v: float32 = x[i * 32 + thread.x];
+    acc = acc + v * v;
+    i = i + 1;
+  }
+  out[thread.x] = acc;
+}
+
+kernel(block = 32) asm_cse(out: float32*, a: int32, b: int32) {
+  var s: int32 = a * b + 7;
+  var t: float32 = 0.0;
+  asm {
+    mov.f32 {t}, 0f3F800000;
+  }
+  var u: int32 = a * b + 7;
+  out[thread.x] = t + (float32)(s + u);
+}
+
+fn square_into(acc: float32, v: float32) -> float32 {
+  var r: float32 = acc;
+  asm {
+    fma.rn.f32 {r}, {v}, {v}, {r};
+  }
+  return r;
+}
+
+kernel(block = 32) asm_inlined(out: float32*, x: float32*, n: int32) {
+  var acc: float32 = 0.0;
+  var i: int32 = 0;
+  while (i < n) {
+    acc = square_into(acc, x[i * 32 + thread.x]);
+    i = i + 1;
+  }
+  out[thread.x] = acc;
+}
+
+kernel(block = 32) asm_roles(out: float32*, x: float32*, n: int32) {
+  var keep: float32 = x[thread.x];
+  var hit: float32 = 2.0;
+  var flag: uint32 = 0;
+  asm {
+    { .reg .pred q;
+      setp.gt.s32 q, {n}, 3;
+      @q mov.f32 {hit}, {keep};
+      selp.u32 {flag}, 1, 0, q;
+    }
+  }
+  out[thread.x] = hit + keep + (float32)flag;
+}

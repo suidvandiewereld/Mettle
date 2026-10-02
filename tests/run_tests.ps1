@@ -16740,6 +16740,85 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $pioPtx = Join-Path $tmpDir "ptx_inline_asm_operands.ptx"
+  $pioOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/ptx_inline_asm_operands.mettle -o $pioPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "asm operand PTX emission failed: $pioOut" }
+  $pioText = Get-Content -Raw $pioPtx
+  $pioEntry = @{}
+  foreach ($m in [regex]::Matches($pioText, '\.entry (\w+)\((?s:.*?)\r?\n\}')) {
+    $pioEntry[$m.Groups[1].Value] = $m.Value
+  }
+  foreach ($name in @("asm_loop", "plain_loop", "asm_cse", "asm_inlined", "asm_roles")) {
+    if (-not $pioEntry.ContainsKey($name)) { throw "entry $name missing: $pioText" }
+  }
+  if ($pioEntry["asm_loop"] -notmatch 'mov\.f32 (%f\d+), (%f\d+);\s*fma\.rn\.f32 \1, %f\d+, %f\d+, \1;\s*mov\.f32 \2, \1;') {
+    throw "the loop accumulator did not move through a fixed register: $($pioEntry['asm_loop'])"
+  }
+  if ([regex]::Matches($pioEntry["asm_cse"], 'mul\.lo\.s32').Count -ne 1) {
+    throw "a * b was not shared across the asm block: $($pioEntry['asm_cse'])"
+  }
+  if ($pioText -match '\.func' -or $pioEntry["asm_inlined"] -match '\bcall') {
+    throw "a device helper with asm was not inlined: $pioText"
+  }
+  $pioRoles = $pioEntry["asm_roles"]
+  if ($pioRoles -notmatch 'ld\.global\.f32 (%f\d+), \[%rd\d+\];') { throw "asm_roles load missing: $pioRoles" }
+  $pioKeep = [regex]::Escape($Matches[1])
+  if ($pioRoles -notmatch "@q mov\.f32 (%f\d+), $pioKeep;") {
+    throw "a read-only binding was not substituted directly: $pioRoles"
+  }
+  $pioHit = [regex]::Escape($Matches[1])
+  if ($pioRoles -notmatch "mov\.f32 $pioHit, %f\d+;\s*\{ \.reg \.pred q;") {
+    throw "a predicated write was not seeded with the old value: $pioRoles"
+  }
+  if ($pioRoles -notmatch 'selp\.u32 (%r\d+), 1, 0, q;') { throw "asm_roles selp missing: $pioRoles" }
+  $pioFlag = [regex]::Escape($Matches[1])
+  $pioBefore = $pioRoles.Substring(0, $pioRoles.IndexOf("{ .reg .pred q;"))
+  if ($pioBefore -match "$pioFlag\b") {
+    throw "a write-only binding was copied in: $pioRoles"
+  }
+  $pioCases = @(
+    @{ Name = "aggregate"; Body = @("  var arr: float32[4];", "  asm {", "    mov.f32 {arr}, 0f00000000;", "  }", "  out[0] = arr[0];"); Want = 'arr.*not a scalar' },
+    @{ Name = "address"; Body = @("  var x: float32 = 1.0;", "  var p: float32* = &x;", "  asm {", "    mov.f32 {x}, 0f00000000;", "  }", "  out[0] = *p;"); Want = 'x.*not a scalar' }
+  )
+  foreach ($case in $pioCases) {
+    $pioBad = Join-Path $tmpDir "ptx_inline_asm_$($case.Name).mettle"
+    Set-Content -Path $pioBad -Encoding ascii -Value (@("kernel(block = 32) bad(out: float32*) {") + $case.Body + @("}"))
+    foreach ($opt in @("-O", "")) {
+      $pioArgs = @("--emit-ptx", "--gpu-arch=gb10", $pioBad, "-o", (Join-Path $tmpDir "ptx_inline_asm_bad.ptx"))
+      if ($opt) { $pioArgs = @($opt) + $pioArgs }
+      $pioBadOut = & $CompilerPath @pioArgs 2>&1 | Out-String
+      if ($LASTEXITCODE -eq 0 -or $pioBadOut -notmatch $case.Want) {
+        throw "the $($case.Name) binding was not rejected by name ($opt): $pioBadOut"
+      }
+    }
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $pioInfo = & $ptxas.Source -arch=sm_121a -v $pioPtx `
+        -o (Join-Path $tmpDir "ptx_inline_asm_operands.cubin") 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected asm operand PTX: $pioInfo" }
+      $pioRegs = @{}
+      foreach ($m in [regex]::Matches($pioInfo, "entry function '(\w+)'(?s:.*?)Used (\d+) registers")) {
+        $pioRegs[$m.Groups[1].Value] = [int]$m.Groups[2].Value
+      }
+      if (-not $pioRegs.ContainsKey("asm_loop") -or $pioRegs["asm_loop"] -ne $pioRegs["plain_loop"]) {
+        throw "the asm loop does not use the registers of the asm-free loop: $pioInfo"
+      }
+    }
+  }
+  Write-CaseResult -Name "ptx_emit_gb10_inline_asm_operands" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_gb10_inline_asm_operands" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   # Block-scaled i8 tensor MMA: exact int32 K32 dots scaled per block into
   # f32, 4-bit halves-packed B widened in registers, and region residency
   # across a K loop staged through workgroup memory.

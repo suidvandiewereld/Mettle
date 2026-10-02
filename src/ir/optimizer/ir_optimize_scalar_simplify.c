@@ -949,7 +949,11 @@ static void ir_cp_invalidate_for(IRCopyPropState *state,
                                           instruction->rhs.name);
     }
   }
-  if (instruction->op == IR_OP_STORE) {
+  if (instruction->op == IR_OP_INLINE_ASM && instruction->asm_operands) {
+    ir_temp_value_map_invalidate_after_store(&state->map, &state->addr_taken);
+    ir_temp_value_map_invalidate_after_store(&state->symbol_map,
+                                             &state->addr_taken);
+  } else if (instruction->op == IR_OP_STORE) {
     ir_temp_value_map_invalidate_after_store(&state->map, &state->addr_taken);
     ir_temp_value_map_invalidate_after_store(&state->symbol_map,
                                              &state->addr_taken);
@@ -3107,6 +3111,7 @@ static const int IR_HAS_SIDE_EFFECT[IR_OP_KIND_COUNT] = {
     [IR_OP_SIMD_OUTER_LANE_F64] = 1,
     [IR_OP_RETURN] = 1,
     [IR_OP_INLINE_ASM] = 1,
+    [IR_OP_ASM_RESULT] = 1,
 };
 
 int ir_instruction_has_side_effect(const IRInstruction *instruction) {
