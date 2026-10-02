@@ -29,8 +29,11 @@ kernel vadd(a: float32*, b: float32*, c: float32*, n: int32) {
 
 `kernel(block = N)` fixes the block size (PTX `.reqntid`). N is any integer the
 compiler knows, so a family of kernels generated from a table takes it from the
-row, and `tensor_mma`'s `m:`, `n:` and `k:` take compile-time integers the same
-way:
+row. `tensor_mma`'s `m:`, `n:` and `k:`, `async_copy_workgroup`'s element count
+and `transaction:`, and `async_copy_wait`'s group count take compile-time
+integers the same way. Inside a kernel an integer `const` and arithmetic on
+literals fold while compiling, so a layout computed from a row's columns costs
+nothing at run time:
 
 ```mettle
 comptime for t in TILES.rows {

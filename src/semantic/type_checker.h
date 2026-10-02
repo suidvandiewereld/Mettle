@@ -430,6 +430,9 @@ int type_checker_process_declaration(TypeChecker *checker,
 
 int type_checker_check_statement(TypeChecker *checker, ASTNode *statement);
 int type_checker_check_expression(TypeChecker *checker, ASTNode *expression);
+int type_checker_comptime_integer(TypeChecker *checker, ASTNode *node,
+                                  long long *out_value);
+int type_checker_fold_kernel_literals(ASTNode *node);
 Type *type_checker_check_binary_expression(TypeChecker *checker,
                                            BinaryExpression *binop,
                                            SourceLocation location);

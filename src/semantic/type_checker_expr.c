@@ -1,4 +1,5 @@
 #include "type_checker_internal.h"
+#include <limits.h>
 #include "codegen/target.h"
 #include "monomorphize.h"
 #include "string_intern.h"
@@ -1103,20 +1104,18 @@ static Type *type_checker_async_copy_builtin(TypeChecker *checker,
     return checker->builtin_void;
   }
   if (is_wait) {
-    NumberLiteral *literal =
-        call->argument_count == 1 && call->arguments[0] &&
-                call->arguments[0]->type == AST_NUMBER_LITERAL
-            ? (NumberLiteral *)call->arguments[0]->data
-            : NULL;
-    if (!literal || literal->is_float || literal->int_value < 0 ||
-        literal->int_value > 7 ||
+    long long pending = -1;
+    if (call->argument_count != 1 ||
+        !type_checker_comptime_integer(checker, call->arguments[0],
+                                       &pending) ||
+        pending < 0 || pending > 7 ||
         (call->argument_names && call->argument_names[0])) {
       type_checker_set_error_at_location(
           checker, expression->location,
           "async_copy_wait expects one compile-time pending-group count in [0, 7]");
       return NULL;
     }
-    call->async_copy_pending_groups = (uint32_t)literal->int_value;
+    call->async_copy_pending_groups = (uint32_t)pending;
     return checker->builtin_void;
   }
 
@@ -1170,20 +1169,16 @@ static Type *type_checker_async_copy_builtin(TypeChecker *checker,
         "async_copy_workgroup requires matching scalar source and destination element types");
     return NULL;
   }
-  NumberLiteral *count =
-      call->arguments[2] && call->arguments[2]->type == AST_NUMBER_LITERAL
-          ? (NumberLiteral *)call->arguments[2]->data
-          : NULL;
-  if (!count || count->is_float || count->int_value <= 0 ||
-      count->int_value > 4096 ||
-      (unsigned long long)count->int_value >
-          65536ull / destination_element->size) {
+  long long count = 0;
+  if (!type_checker_comptime_integer(checker, call->arguments[2], &count) ||
+      count <= 0 || count > 4096 ||
+      (unsigned long long)count > 65536ull / destination_element->size) {
     type_checker_set_error_at_location(
         checker, call->arguments[2]->location,
         "async_copy_workgroup element count must be a compile-time value producing 1..65536 bytes");
     return NULL;
   }
-  uint32_t element_count = (uint32_t)count->int_value;
+  uint32_t element_count = (uint32_t)count;
   size_t copy_bytes = destination_element->size * (size_t)element_count;
   if ((copy_bytes & 3u) != 0) {
     type_checker_set_error_at_location(
@@ -1218,21 +1213,16 @@ static Type *type_checker_async_copy_builtin(TypeChecker *checker,
                !strcmp(value, "global")) {
       call->async_copy_cache = MTLC_ASYNC_CACHE_GLOBAL;
     } else if (!strcmp(option, "transaction")) {
-      NumberLiteral *transaction =
-          call->arguments[i] &&
-                  call->arguments[i]->type == AST_NUMBER_LITERAL
-              ? (NumberLiteral *)call->arguments[i]->data
-              : NULL;
-      if (!transaction || transaction->is_float ||
-          (transaction->int_value != 4 && transaction->int_value != 8 &&
-           transaction->int_value != 16)) {
+      long long transaction = 0;
+      if (!type_checker_comptime_integer(checker, call->arguments[i],
+                                         &transaction) ||
+          (transaction != 4 && transaction != 8 && transaction != 16)) {
         type_checker_set_error_at_location(
             checker, call->arguments[i]->location,
             "async copy transaction must be 4, 8, or 16 bytes");
         return NULL;
       }
-      call->async_copy_transaction_bytes =
-          (uint32_t)transaction->int_value;
+      call->async_copy_transaction_bytes = (uint32_t)transaction;
     } else {
       type_checker_set_error_at_location(
           checker, call->arguments[i]->location,
@@ -1255,6 +1245,17 @@ static Type *type_checker_async_copy_builtin(TypeChecker *checker,
   }
   call->async_copy_element_count = element_count;
   return checker->builtin_void;
+}
+
+int type_checker_comptime_integer(TypeChecker *checker, ASTNode *node,
+                                  long long *out_value) {
+  ComptimeValue value = comptime_none();
+  if (!node || !type_checker_eval_comptime(checker, node, &value) ||
+      value.kind != COMPTIME_INT) {
+    return 0;
+  }
+  *out_value = value.as.int_value;
+  return 1;
 }
 
 int type_checker_tensor_option_u32(TypeChecker *checker, ASTNode *node,
@@ -2446,6 +2447,20 @@ static Type *type_checker_infer_identifier(TypeChecker *checker,
       return fn_pointer;
     }
     if (type_is_comptime_only(symbol->type)) {
+      return symbol->type;
+    }
+    if (checker->current_function && checker->current_function->is_kernel &&
+        symbol->kind == SYMBOL_VARIABLE && symbol->is_immutable &&
+        symbol->has_constant_value && !symbol->constant_is_float &&
+        !symbol->is_address_space_binding && symbol->type &&
+        type_checker_is_integer_type(symbol->type) && symbol->scope &&
+        symbol->scope->type != SCOPE_GLOBAL) {
+      if (!ast_fold_member_access_to_int(expression,
+                                         symbol->constant_integer_value)) {
+        type_checker_set_error_at_location(checker, expression->location,
+                                           "Out of memory folding a constant");
+        return NULL;
+      }
       return symbol->type;
     }
     if (checker->current_function &&
@@ -3902,7 +3917,18 @@ static Type *type_checker_infer_member(TypeChecker *checker,
             member->member);
         return NULL;
       }
-      return type_checker_comptime_result(checker, answered, expression);
+      Type *row_type =
+          type_checker_type_from_index(checker, row.as.row.type_index);
+      Type *column_type =
+          row_type && strcmp(member->member, "index") != 0
+              ? type_get_field_type(row_type, member->member)
+              : NULL;
+      Type *folded = type_checker_comptime_result(checker, answered, expression);
+      if (folded && answered.kind == COMPTIME_INT && column_type &&
+          type_checker_is_integer_type(column_type)) {
+        return column_type;
+      }
+      return folded;
     }
     if (object_type && object_type->kind == TYPE_FIELD) {
       if (!type_checker_field_member_exists(member->member)) {
@@ -4620,4 +4646,135 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
   snprintf(error_msg, sizeof(error_msg), "Unknown binary operator '%s'", op);
   type_checker_set_error_at_location(checker, location, error_msg);
   return NULL;
+}
+
+static int fold_integer_literal(const ASTNode *node, long long *out) {
+  const NumberLiteral *literal =
+      node && node->type == AST_NUMBER_LITERAL
+          ? (const NumberLiteral *)node->data
+          : NULL;
+  if (!literal || literal->is_float || literal->is_char) {
+    return 0;
+  }
+  *out = literal->int_value;
+  return 1;
+}
+
+static int fold_integer_width(const Type *type, unsigned *bits,
+                              int *is_unsigned) {
+  if (!type) {
+    return 0;
+  }
+  switch (type->kind) {
+  case TYPE_INT8: *bits = 8; *is_unsigned = 0; return 1;
+  case TYPE_INT16: *bits = 16; *is_unsigned = 0; return 1;
+  case TYPE_INT32: *bits = 32; *is_unsigned = 0; return 1;
+  case TYPE_INT64: *bits = 64; *is_unsigned = 0; return 1;
+  case TYPE_UINT8: *bits = 8; *is_unsigned = 1; return 1;
+  case TYPE_UINT16: *bits = 16; *is_unsigned = 1; return 1;
+  case TYPE_UINT32: *bits = 32; *is_unsigned = 1; return 1;
+  case TYPE_UINT64: *bits = 64; *is_unsigned = 1; return 1;
+  default: return 0;
+  }
+}
+
+static long long fold_wrap(unsigned long long raw, unsigned bits,
+                           int is_unsigned) {
+  unsigned long long mask;
+  if (bits >= 64) {
+    return (long long)raw;
+  }
+  mask = (1ULL << bits) - 1;
+  raw &= mask;
+  if (!is_unsigned && (raw >> (bits - 1)) & 1ULL) {
+    raw |= ~mask;
+  }
+  return (long long)raw;
+}
+
+static int fold_binary(const char *op, long long a, long long b,
+                       unsigned bits, int is_unsigned, long long *out) {
+  unsigned long long ua = (unsigned long long)fold_wrap(
+      (unsigned long long)a, bits, is_unsigned);
+  unsigned long long ub = (unsigned long long)fold_wrap(
+      (unsigned long long)b, bits, is_unsigned);
+  unsigned long long mask = bits >= 64 ? ~0ULL : (1ULL << bits) - 1;
+  long long sa = fold_wrap((unsigned long long)a, bits, 0);
+  long long sb = fold_wrap((unsigned long long)b, bits, 0);
+  unsigned long long raw;
+  if (!strcmp(op, "+")) {
+    raw = ua + ub;
+  } else if (!strcmp(op, "-")) {
+    raw = ua - ub;
+  } else if (!strcmp(op, "*")) {
+    raw = ua * ub;
+  } else if (!strcmp(op, "&")) {
+    raw = ua & ub;
+  } else if (!strcmp(op, "|")) {
+    raw = ua | ub;
+  } else if (!strcmp(op, "^")) {
+    raw = ua ^ ub;
+  } else if (!strcmp(op, "/") || !strcmp(op, "%")) {
+    if ((is_unsigned ? (ub & mask) : (unsigned long long)sb) == 0 ||
+        (!is_unsigned && sb == -1 && sa == LLONG_MIN)) {
+      return 0;
+    }
+    if (is_unsigned) {
+      raw = !strcmp(op, "/") ? (ua & mask) / (ub & mask)
+                             : (ua & mask) % (ub & mask);
+    } else {
+      raw = (unsigned long long)(!strcmp(op, "/") ? sa / sb : sa % sb);
+    }
+  } else if (!strcmp(op, "<<") || !strcmp(op, ">>")) {
+    if (b < 0 || b >= (long long)bits) {
+      return 0;
+    }
+    if (!strcmp(op, "<<")) {
+      raw = ua << b;
+    } else if (is_unsigned) {
+      raw = (ua & mask) >> b;
+    } else {
+      raw = (unsigned long long)(sa >> b);
+    }
+  } else {
+    return 0;
+  }
+  *out = fold_wrap(raw, bits, is_unsigned);
+  return 1;
+}
+
+int type_checker_fold_kernel_literals(ASTNode *node) {
+  unsigned bits = 0;
+  int is_unsigned = 0;
+  if (!node || node->type == AST_LAMBDA_EXPRESSION) {
+    return 1;
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (!type_checker_fold_kernel_literals(node->children[i])) {
+      return 0;
+    }
+  }
+  if (!fold_integer_width(node->resolved_type, &bits, &is_unsigned)) {
+    return 1;
+  }
+  if (node->type == AST_CAST_EXPRESSION) {
+    const CastExpression *cast = (const CastExpression *)node->data;
+    long long value = 0;
+    if (cast && fold_integer_literal(cast->operand, &value)) {
+      return ast_fold_expression_to_int(
+          node, fold_wrap((unsigned long long)value, bits, is_unsigned));
+    }
+    return 1;
+  }
+  if (node->type == AST_BINARY_EXPRESSION) {
+    const BinaryExpression *binary = (const BinaryExpression *)node->data;
+    long long a = 0, b = 0, value = 0;
+    if (binary && binary->operator &&
+        fold_integer_literal(binary->left, &a) &&
+        fold_integer_literal(binary->right, &b) &&
+        fold_binary(binary->operator, a, b, bits, is_unsigned, &value)) {
+      return ast_fold_expression_to_int(node, value);
+    }
+  }
+  return 1;
 }

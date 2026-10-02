@@ -1,0 +1,5 @@
+import "tune/answer.tune";
+
+fn main() -> int32 {
+  return ANSWER - 42;
+}

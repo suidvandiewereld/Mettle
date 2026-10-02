@@ -1,0 +1,1 @@
+export const ANSWER: int32 = 42;

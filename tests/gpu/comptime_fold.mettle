@@ -1,0 +1,56 @@
+import "std/mem";
+
+struct Fold {
+  name: string;
+  div: int32;
+  stages: int32;
+}
+
+const FOLDS: Fold[2] = [
+  { name: "four", div: 4, stages: 2 },
+  { name: "eight", div: 8, stages: 4 }
+];
+
+fn expected(lane: int32, div: int32, stages: int32, slot: int32) -> int32 {
+  var half: int32 = div / 2;
+  if (slot == 0) { return (int32)((uint32)lane / (uint32)div); }
+  if (slot == 1) { return (lane * div) >> 1; }
+  if (slot == 2) { return half * 3 - 7 / 2 + (-9) / 4 + (-9) % 4 + lane; }
+  if (slot == 3) { return (int32)((uint32)0 - (uint32)1) + lane; }
+  if (slot == 4) { return ((int32)(-16) >> 2) + (int32)((uint32)2147483648 >> 31) + lane; }
+  if (slot == 5) { return (int32)(((uint32)lane / (uint32)stages) & (uint32)1); }
+  if (slot == 6) { return (int32)(int8)(200 + div) + lane; }
+  return (stages - 1) * 15360 / 2 + (int32)((uint32)lane % (uint32)div);
+}
+
+comptime for f in FOLDS.rows {
+  kernel(block = 32) ident("fold_", f.name)(out: int32*) {
+    const HALF: int32 = f.div / 2;
+    var lane: int32 = thread.x;
+    out[lane * 8 + 0] = (int32)((uint32)lane / (uint32)f.div);
+    out[lane * 8 + 1] = (lane * f.div) >> 1;
+    out[lane * 8 + 2] = HALF * 3 - 7 / 2 + (-9) / 4 + (-9) % 4 + lane;
+    out[lane * 8 + 3] = (int32)((uint32)0 - (uint32)1) + lane;
+    out[lane * 8 + 4] = ((int32)(-16) >> 2) + (int32)((uint32)2147483648 >> 31) + lane;
+    out[lane * 8 + 5] = (int32)(((uint32)lane / (uint32)f.stages) & (uint32)1);
+    out[lane * 8 + 6] = (int32)(int8)(200 + f.div) + lane;
+    out[lane * 8 + 7] = (f.stages - 1) * 15360 / 2 + (int32)((uint32)lane % (uint32)f.div);
+  }
+}
+
+@test fn folds_match_the_host() {
+  var out: int32* = (int32*)calloc(256, 4);
+  defer free((uint8*)out);
+  dispatch fold_four[grid: (1, 1, 1), block: (32, 1, 1)](out);
+  for lane in 0..32 {
+    for slot in 0..8 {
+      assert_eq(out[lane * 8 + slot], expected(lane, 4, 2, slot));
+    }
+  }
+  dispatch fold_eight[grid: (1, 1, 1), block: (32, 1, 1)](out);
+  for lane in 0..32 {
+    for slot in 0..8 {
+      assert_eq(out[lane * 8 + slot], expected(lane, 8, 4, slot));
+    }
+  }
+}

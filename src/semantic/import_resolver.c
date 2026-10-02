@@ -137,8 +137,11 @@ static char *resolve_candidate_path(const char *candidate_base) {
     return canonicalize_path(candidate_base);
   }
 
-  if (!path_has_extension(candidate_base)) {
-    size_t len = strlen(candidate_base);
+  size_t base_length = strlen(candidate_base);
+  if (!path_has_extension(candidate_base) ||
+      base_length < 7 ||
+      strcmp(candidate_base + base_length - 7, ".mettle") != 0) {
+    size_t len = base_length;
     char *with_ext = malloc(len + 8);
     if (!with_ext) {
       return NULL;
@@ -3712,9 +3715,17 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
         if (ctx->reporter) {
           char *chain = format_import_chain(ctx);
           char error_msg[1024];
+          size_t name_length = strlen(import_decl->module_name);
+          int tuning = name_length > 5 &&
+                       strcmp(import_decl->module_name + name_length - 5,
+                              ".tune") == 0;
           snprintf(error_msg, sizeof(error_msg),
-                   "Could not resolve imported file '%s' (import chain: %s)",
-                   import_decl->module_name, chain);
+                   "Could not resolve imported file '%s' (import chain: %s)%s",
+                   import_decl->module_name, chain,
+                   tuning ? "; a tuning file is written by 'mettle tune "
+                            "<module> --space <TABLE> --key <column>' and "
+                            "checked in"
+                          : "");
           error_reporter_add_error(ctx->reporter, ERROR_IO, decl->location,
                                    error_msg);
           free(chain);

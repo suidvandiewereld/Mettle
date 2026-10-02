@@ -630,6 +630,7 @@ int ast_fold_member_access_to_int(ASTNode *node, long long value);
 int ast_fold_member_access_to_string(ASTNode *node, const char *value);
 int ast_fold_member_access_to_float(ASTNode *node, double value);
 int ast_fold_call_to_identifier(ASTNode *node, const char *name);
+int ast_fold_expression_to_int(ASTNode *node, long long value);
 ASTNode *ast_create_case_clause(ASTNode *value, ASTNode *body, int is_default,
                                 SourceLocation location);
 ASTNode *ast_create_switch_statement(ASTNode *expression, ASTNode **cases,

@@ -2125,6 +2125,14 @@ static int type_checker_check_function_body(
     symbol_table_exit_scope(checker->symbol_table);
     return 0;
   }
+  if (func_decl->body && func_decl->is_kernel &&
+      !type_checker_fold_kernel_literals(func_decl->body)) {
+    type_checker_set_error_at_location(checker, declaration->location,
+                                       "Out of memory folding constants");
+    type_checker_init_tracker_reset(checker);
+    symbol_table_exit_scope(checker->symbol_table);
+    return 0;
+  }
 
   if (func_decl->body &&
       !type_checker_check_function_memory(checker, declaration)) {

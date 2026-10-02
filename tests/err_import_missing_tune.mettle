@@ -1,0 +1,5 @@
+import "nowhere.tune";
+
+fn main() -> int32 {
+  return 0;
+}

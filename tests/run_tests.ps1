@@ -1584,6 +1584,15 @@ $cases = @(
   @{ Name = "err_comptime_range_runtime"; Path = "tests/err_comptime_range_runtime.mettle"; ShouldSucceed = $false
      Pattern = "a .comptime for. range ends at a compile-time integer"
      OutputMustNotMatch = @("internal compiler error") },
+  @{ Name = "gpu_comptime_fold"; Path = "tests/gpu/comptime_fold.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("1 passed")
+     OutputMustNotMatch = @("failed", "LEAKED") },
+  @{ Name = "import_dotted_name"; Path = "tests/test_import_dotted_name.mettle"; ShouldSucceed = $true },
+  @{ Name = "err_import_missing_tune"; Path = "tests/err_import_missing_tune.mettle"; ShouldSucceed = $false
+     Pattern = "a tuning file is written by .mettle tune"
+     OutputMustNotMatch = @("internal compiler error") },
   @{ Name = "err_kernel_block_runtime"; Path = "tests/err_kernel_block_runtime.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "kernel .fill. needs a block size the compiler knows" },
   @{ Name = "err_comptime_ident_duplicate"; Path = "tests/err_comptime_ident_duplicate.mettle"; ShouldSucceed = $false
      Pattern = "generated two declarations named 'probe'"
@@ -17257,6 +17266,15 @@ try {
         [regex]::Matches($ckEntry, '\bbra\b').Count -ne 1) {
       throw "comptime kernel mismatch in $($ckCase.Name)"
     }
+  }
+  $cfPtx = Join-Path $tmpDir "ptx_emit_gb10_comptime_fold.ptx"
+  $cfOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/comptime_fold.mettle -o $cfPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "comptime fold emit failed: $cfOut" }
+  $cfText = Get-Content -Raw $cfPtx
+  if ($cfText -notmatch '\.visible \.entry fold_four\(' -or
+      [regex]::Matches($cfText, '\b(div|rem)\.').Count -ne 0) {
+    throw "folded kernel constants left a div or rem in the PTX"
   }
   Write-CaseResult -Name "ptx_emit_gb10_comptime_kernels" -Passed $true
 }

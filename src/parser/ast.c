@@ -2954,6 +2954,44 @@ int ast_fold_member_access_to_float(ASTNode *node, double value) {
   return 1;
 }
 
+int ast_fold_expression_to_int(ASTNode *node, long long value) {
+  NumberLiteral *literal = NULL;
+  if (!node || (node->type != AST_BINARY_EXPRESSION &&
+                node->type != AST_CAST_EXPRESSION)) {
+    return 0;
+  }
+  literal = malloc(sizeof(NumberLiteral));
+  if (!literal) {
+    return 0;
+  }
+  literal->int_value = value;
+  literal->is_float = 0;
+  literal->is_char = 0;
+  literal->int_radix = 10;
+  for (size_t i = 0; i < node->child_count; i++) {
+    ast_destroy_node(node->children[i]);
+  }
+  free(node->children);
+  node->children = NULL;
+  node->child_count = 0;
+  if (node->type == AST_BINARY_EXPRESSION) {
+    BinaryExpression *binary = (BinaryExpression *)node->data;
+    if (binary) {
+      ast_free_string(binary->operator);
+      free(binary);
+    }
+  } else {
+    CastExpression *cast = (CastExpression *)node->data;
+    if (cast) {
+      ast_free_string(cast->type_name);
+      free(cast);
+    }
+  }
+  node->type = AST_NUMBER_LITERAL;
+  node->data = literal;
+  return 1;
+}
+
 int ast_fold_call_to_identifier(ASTNode *node, const char *name) {
   if (!node || !name || node->type != AST_FUNCTION_CALL) {
     return 0;
