@@ -406,6 +406,11 @@ int type_checker_check_if_statement(TypeChecker *checker,
     } else {
       if_stmt->uniform_mode = 3;
     }
+  } else if (type_checker_module_has_kernel(checker) ||
+             checker->device_module) {
+    const char *why = NULL;
+    if_stmt->condition_uniform =
+        type_checker_expression_is_uniform(checker, if_stmt->condition, &why);
   }
 
   size_t init_snapshot_count = 0;

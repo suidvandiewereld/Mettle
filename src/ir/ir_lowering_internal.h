@@ -501,6 +501,7 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
                                      ASTNode *declaration);
 
 void ir_mark_branches_uniform(IRFunction *function, size_t from);
+void ir_mark_branch_conditions_uniform(IRFunction *function, size_t from);
 void ir_mark_calls_divergent(IRFunction *function, size_t from);
 
 int ir_lower_static_view_offset(IRLoweringContext *context,

@@ -1226,6 +1226,19 @@ void ir_mark_branches_uniform(IRFunction *function, size_t from) {
   }
 }
 
+void ir_mark_branch_conditions_uniform(IRFunction *function, size_t from) {
+  if (!function) {
+    return;
+  }
+  for (size_t i = from; i < function->instruction_count; i++) {
+    IRInstruction *instruction = &function->instructions[i];
+    if (instruction->op == IR_OP_BRANCH_ZERO ||
+        instruction->op == IR_OP_BRANCH_EQ) {
+      instruction->uniform_condition = 1;
+    }
+  }
+}
+
 void ir_mark_calls_divergent(IRFunction *function, size_t from) {
   if (!function) {
     return;

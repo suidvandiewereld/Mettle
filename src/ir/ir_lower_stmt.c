@@ -1258,6 +1258,8 @@ static int ir_lower_if_statement(IRLoweringContext *context, IRFunction *functio
     }
     if (if_data->uniform_mode == 3) {
       ir_mark_branches_uniform(function, branches_before);
+    } else if (i == 0 && if_data->condition_uniform) {
+      ir_mark_branch_conditions_uniform(function, branches_before);
     }
 
     {

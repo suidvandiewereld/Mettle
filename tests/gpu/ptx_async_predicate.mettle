@@ -1,0 +1,32 @@
+kernel(block = 256) predicated_copies(src: uint32*, out: uint32*, map: uint8*, n: int32) {
+  workgroup var s8: uint8 align(1024)*;
+  var s32: uint32 shared* = (uint32 shared*)(s8 + 4096);
+  var bar: uint64 shared* = (uint64 shared*)s8;
+  var tid: int32 = thread.x;
+  if (tid == 0) {
+    mbarrier_init(bar, 1);
+    fence_mbarrier_init();
+    tensormap_acquire(map);
+    mbarrier_arrive_expect_tx(bar, 1024);
+    tma_load_2d((uint8 shared*)(s8 + 1024), map, 0, block.x * 8, bar);
+  }
+  barrier(workgroup, acq_rel);
+  var k: int32 = 0;
+  var acc: uint32 = 0;
+  while (k < n) {
+    if (tid < 128) {
+      async_copy_workgroup(&s32[tid * 4], src + (int64)(k * 512 + tid * 4), 4, transaction: 16, cache: global);
+    }
+    if (n > 3) {
+      async_copy_workgroup(&s32[512 + tid], src + (int64)(k * 256 + tid), 1, transaction: 4, cache: all);
+    }
+    async_copy_commit();
+    async_copy_wait(0);
+    barrier(workgroup, acq_rel);
+    acc = acc + s32[(tid * 7) & 767];
+    barrier(workgroup, acq_rel);
+    k = k + 1;
+  }
+  mbarrier_wait_parity(bar, 0);
+  out[block.x * 256 + tid] = acc + (uint32)s8[1024 + tid];
+}

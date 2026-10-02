@@ -1452,6 +1452,7 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
   slot->is_volatile = instruction->is_volatile;
   slot->allocates = instruction->allocates;
   slot->asm_operands = instruction->asm_operands;
+  slot->uniform_condition = instruction->uniform_condition;
   slot->alias_class = instruction->alias_class;
   slot->expansion_note = instruction->expansion_note;
   slot->effect_signature = instruction->effect_signature;

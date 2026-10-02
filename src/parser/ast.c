@@ -821,6 +821,7 @@ static ASTNode *ast_clone_if_statement(ASTNode *clone, const ASTNode *node) {
       src->else_branch ? ast_clone_node(src->else_branch) : NULL;
   dst->else_if_count = src->else_if_count;
   dst->uniform_mode = src->uniform_mode;
+  dst->condition_uniform = src->condition_uniform;
   if (src->else_if_count > 0 && src->else_ifs) {
     dst->else_ifs = malloc(src->else_if_count * sizeof(ElseIfClause));
     for (size_t i = 0; i < src->else_if_count; i++) {

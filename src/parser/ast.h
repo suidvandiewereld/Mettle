@@ -437,6 +437,7 @@ typedef struct {
   size_t else_if_count;
   ASTNode *else_branch;
   int uniform_mode;
+  int condition_uniform;
 } IfStatement;
 
 typedef struct {

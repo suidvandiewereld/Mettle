@@ -405,6 +405,7 @@ int ir_clone_instruction_plain(const IRInstruction *source,
   out->is_unsigned = source->is_unsigned;
   out->allocates = source->allocates;
   out->asm_operands = source->asm_operands;
+  out->uniform_condition = source->uniform_condition;
   out->ast_ref = source->ast_ref;
   out->value_type = source->value_type;
 
@@ -492,6 +493,7 @@ static int ir_clone_instruction_for_inline(const IRInstruction *source,
   out->is_unsigned = source->is_unsigned;
   out->allocates = source->allocates;
   out->asm_operands = source->asm_operands;
+  out->uniform_condition = source->uniform_condition;
   out->ast_ref = NULL;
   out->value_type = source->value_type;
 

@@ -60,6 +60,9 @@ typedef struct {
   PtxClass *asm_out_cls;
   int *asm_out_idx;
   size_t asm_out_count, asm_out_capacity;
+  char async_guard[32];
+  size_t async_guard_end;
+  size_t async_guard_jump;
   PtxTensorResidency *tensor_residencies;
   size_t tensor_residency_count, tensor_residency_capacity;
   IRProgram *program;
@@ -164,6 +167,9 @@ static const char *mem_type_suffix(MtlcTypeKind elem);
 static int ptx_type_is_aggregate(const MtlcType *type);
 static PtxVal operand_desc(PtxFn *fn, const IROperand *op);
 static void use_as(PtxFn *fn, const IROperand *op, PtxClass want, char *out);
+static int ptx_branch_skips_only_async_copies(const IRFunction *func,
+                                              size_t at, size_t *end,
+                                              size_t *jump);
 static void coerce(PtxFn *fn, PtxClass scls, int s_unsigned, const char *srcreg,
                    PtxClass want, char *out);
 static void reg_name(PtxClass c, int idx, char *out) {
@@ -1262,6 +1268,10 @@ static void ptx_emit_async_copy(PtxFn *fn, const IRInstruction *in) {
   reg_name(PC_B32, new_reg(fn, PC_B32), destination_base);
   sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", destination_base,
             destination_wide);
+  char guard[40] = "";
+  if (fn->async_guard[0]) {
+    snprintf(guard, sizeof(guard), "@%s ", fn->async_guard);
+  }
   if (ptx_async_copy_native(fn)) {
     const char *cache =
         in->async_copy_cache == MTLC_ASYNC_CACHE_GLOBAL ? "cg" : "ca";
@@ -1276,8 +1286,8 @@ static void ptx_emit_async_copy(PtxFn *fn, const IRInstruction *in) {
       ptx_async_address(source_address, sizeof(source_address), source_base,
                         offset);
       sb_printf(&fn->body,
-                "\tcp.async.%s.shared.global [%s], [%s], %llu;\n", cache,
-                destination_address, source_address,
+                "\t%scp.async.%s.shared.global [%s], [%s], %llu;\n", guard,
+                cache, destination_address, source_address,
                 (unsigned long long)transaction);
     }
     return;
@@ -1294,9 +1304,9 @@ static void ptx_emit_async_copy(PtxFn *fn, const IRInstruction *in) {
     ptx_async_address(source_address, sizeof(source_address), source_base,
                       offset);
     reg_name(PC_B32, new_reg(fn, PC_B32), value);
-    sb_printf(&fn->body, "\tld.global.b32 %s, [%s];\n", value,
+    sb_printf(&fn->body, "\t%sld.global.b32 %s, [%s];\n", guard, value,
               source_address);
-    sb_printf(&fn->body, "\tst.shared.b32 [%s], %s;\n",
+    sb_printf(&fn->body, "\t%sst.shared.b32 [%s], %s;\n", guard,
               destination_address, value);
   }
 }
@@ -1689,7 +1699,7 @@ static void ptx_emit_tensor_transfer(PtxFn *fn, const IRInstruction *in) {
                 "\t@%s mbarrier.init.shared::cta.b64 [%s], 1;\n"
                 "\t@%s fence.proxy.async.shared::cta;\n"
                 "\tbar.sync 0;\n"
-                "\t@%s cp.async.bulk.tensor.%ud.shared::cta.global.tile.mbarrier::complete_tx::bytes [%s], [%s, {%s}], [%s];\n"
+                "\t@%s cp.async.bulk.tensor.%ud.%s.global.tile.mbarrier::complete_tx::bytes [%s], [%s, {%s}], [%s];\n"
                 "\t@%s mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 %s, [%s], %llu;\n"
                 "mtlc_tensor_transfer_%llu_wait:\n"
                 "\tmbarrier.try_wait.parity.acquire.cta.shared::cta.b64 %s, [%s], 0;\n"
@@ -1697,7 +1707,10 @@ static void ptx_emit_tensor_transfer(PtxFn *fn, const IRInstruction *in) {
                 "\tbar.sync 0;\n"
                 "\t@%s mbarrier.inval.shared::cta.b64 [%s];\n",
                 barrier, barrier_name, elected, barrier, elected, elected,
-                (unsigned)desc->rank, destination, map, coordinate_text,
+                (unsigned)desc->rank,
+                ptx_version_at_least(fn, 8, 6) ? "shared::cta"
+                                               : "shared::cluster",
+                destination, map, coordinate_text,
                 barrier, elected, state, barrier,
                 (unsigned long long)(ir_tensor_transfer_tile_elements(desc) *
                                      ir_tensor_transfer_element_bytes(
@@ -8031,6 +8044,10 @@ static void ptx_emit_control(IRProgram *program, IRFunction *func, PtxFn *fn,
     break;
   }
   case IR_OP_BRANCH_ZERO: {
+    size_t guard_end = 0, guard_jump = 0;
+    int guarded = !in->uniform_branch && !in->uniform_condition &&
+                  ptx_branch_skips_only_async_copies(func, *ii, &guard_end,
+                                                     &guard_jump);
     char lbl[256], r[24];
     sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
     PtxVal cv = operand_desc(fn, &in->lhs);
@@ -8049,6 +8066,12 @@ static void ptx_emit_control(IRProgram *program, IRFunction *func, PtxFn *fn,
       use_as(fn, &in->lhs, c, r);
       sb_printf(&fn->body, "\tsetp.eq.%s %s, %s, 0;\n",
                 c == PC_B64 ? "s64" : "s32", pn, r);
+    }
+    if (guarded) {
+      snprintf(fn->async_guard, sizeof(fn->async_guard), "!%s", pn);
+      fn->async_guard_end = guard_end;
+      fn->async_guard_jump = guard_jump;
+      break;
     }
     sb_printf(&fn->body, "\t@%s bra%s %s;\n", pn,
               (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
@@ -9843,6 +9866,116 @@ static void ptx_emit_asm_result(PtxFn *fn, const IRInstruction *in) {
   bind_value(fn, in->dest.name, dv);
 }
 
+static int ptx_guard_name_used_outside(const IRFunction *func,
+                                       const IROperand *dest, size_t first,
+                                       size_t last) {
+  for (size_t i = 0; i < func->instruction_count; i++) {
+    if (i >= first && i < last) {
+      continue;
+    }
+    const IRInstruction *in = &func->instructions[i];
+    const IROperand *operands[3] = {&in->dest, &in->lhs, &in->rhs};
+    for (int k = 0; k < 3; k++) {
+      if (operands[k]->kind == dest->kind && operands[k]->name &&
+          strcmp(operands[k]->name, dest->name) == 0) {
+        return 1;
+      }
+    }
+    for (size_t a = 0; a < in->argument_count; a++) {
+      if (in->arguments[a].kind == dest->kind && in->arguments[a].name &&
+          strcmp(in->arguments[a].name, dest->name) == 0) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static int ptx_label_run_contains(const IRFunction *func, size_t at,
+                                  const char *label) {
+  for (size_t i = at; i < func->instruction_count; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    if (in->op == IR_OP_NOP) {
+      continue;
+    }
+    if (in->op != IR_OP_LABEL) {
+      return 0;
+    }
+    if (in->text && strcmp(in->text, label) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ptx_branch_skips_only_async_copies(const IRFunction *func,
+                                              size_t at, size_t *end,
+                                              size_t *jump) {
+  const IRInstruction *branch = &func->instructions[at];
+  const char *target = branch->text;
+  size_t copies = 0;
+  if (!target) {
+    return 0;
+  }
+  *jump = (size_t)-1;
+  for (size_t i = at + 1; i < func->instruction_count; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    switch (in->op) {
+    case IR_OP_NOP:
+    case IR_OP_DECLARE_LOCAL:
+      continue;
+    case IR_OP_ASYNC_COPY:
+      copies++;
+      continue;
+    case IR_OP_BINARY:
+    case IR_OP_UNARY:
+    case IR_OP_CAST:
+    case IR_OP_ASSIGN:
+      if (in->is_volatile || !in->dest.name ||
+          (in->dest.kind != IR_OPERAND_TEMP &&
+           in->dest.kind != IR_OPERAND_SYMBOL)) {
+        return 0;
+      }
+      continue;
+    case IR_OP_JUMP: {
+      size_t next = i + 1;
+      while (next < func->instruction_count &&
+             func->instructions[next].op == IR_OP_NOP) {
+        next++;
+      }
+      if (!in->text || !ptx_label_run_contains(func, next, target) ||
+          !ptx_label_run_contains(func, next, in->text)) {
+        return 0;
+      }
+      *jump = i;
+      *end = next;
+      break;
+    }
+    case IR_OP_LABEL:
+      if (!ptx_label_run_contains(func, i, target)) {
+        return 0;
+      }
+      *end = i;
+      break;
+    default:
+      return 0;
+    }
+    break;
+  }
+  if (copies == 0 || *end <= at) {
+    return 0;
+  }
+  for (size_t i = at + 1; i < *end; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    if ((in->op == IR_OP_BINARY || in->op == IR_OP_UNARY ||
+         in->op == IR_OP_CAST || in->op == IR_OP_ASSIGN) &&
+        ptx_guard_name_used_outside(func, &in->dest, at + 1, *end)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
@@ -10370,6 +10503,12 @@ static void ptx_emit_body(PtxEmit *e, char **error, int target_arch) {
     }
     if (plan && in->op == IR_OP_LOAD && plan[ii].width) {
       ptx_emit_vector_load(e, ii, plan);
+      continue;
+    }
+    if (e->fn.async_guard[0] && ii >= e->fn.async_guard_end) {
+      e->fn.async_guard[0] = '\0';
+    }
+    if (e->fn.async_guard[0] && ii == e->fn.async_guard_jump) {
       continue;
     }
     ptx_emit_instruction(e, &ii, error, target_arch);

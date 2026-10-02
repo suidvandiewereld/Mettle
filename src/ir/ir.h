@@ -209,6 +209,7 @@ typedef struct {
   int is_volatile;
   int allocates;
   unsigned char asm_operands;
+  unsigned char uniform_condition;
   void *ast_ref;
   MtlcType *value_type;
   unsigned char alias_class;

@@ -16847,6 +16847,63 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $papPtx = Join-Path $tmpDir "ptx_async_predicate.ptx"
+  $papOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 `
+    tests/gpu/ptx_async_predicate.mettle -o $papPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "async predicate PTX emission failed: $papOut" }
+  $papText = Get-Content -Raw $papPtx
+  if ($papText -notmatch '@!%p\d+ cp\.async\.cg\.shared\.global') {
+    throw "copies under a divergent branch were not predicated: $papText"
+  }
+  if ($papText -notmatch '\n\tcp\.async\.ca\.shared\.global [^\n]*\r?\n\tbra ir_if_end') {
+    throw "copies under a uniform branch should keep the branch: $papText"
+  }
+  if ($papText -notmatch 'cp\.async\.bulk\.tensor\.2d\.shared::cta\.global' -or
+      $papText -match 'shared::cluster') {
+    throw "PTX 8.8 should address shared memory as shared::cta only: $papText"
+  }
+  $papOld = Join-Path $tmpDir "ptx_async_predicate_85.ptx"
+  $papOldOut = & $CompilerPath -O --emit-ptx --gpu-arch=sm_90a --ptx-version=8.5 `
+    tests/gpu/ptx_async_predicate.mettle -o $papOld 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "PTX 8.5 emission failed: $papOldOut" }
+  if ((Get-Content -Raw $papOld) -notmatch 'cp\.async\.bulk\.tensor\.2d\.shared::cluster\.global') {
+    throw "before PTX 8.6 a tensor-map load must use the shared::cluster destination"
+  }
+  $papTt = Join-Path $tmpDir "tensor_transfer_84.ptx"
+  $papTtOut = & $CompilerPath -O --emit-ptx --gpu-arch=sm_90a --ptx-version=8.4 `
+    tests/gpu/tensor_transfer.mettle -o $papTt 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "tensor_transfer PTX 8.4 emission failed: $papTtOut" }
+  $papTtText = Get-Content -Raw $papTt
+  if ($papTtText -notmatch 'cp\.async\.bulk\.tensor\.2d\.shared::cluster\.global' -or
+      $papTtText -match 'cp\.async\.bulk\.tensor\.\dd\.shared::cta\.global') {
+    throw "tensor_transfer at PTX 8.4 used the PTX 8.6 destination form"
+  }
+  $ptxas = Get-Command ptxas -ErrorAction SilentlyContinue
+  if ($ptxas) {
+    $ptxasHelp = & $ptxas.Source --help 2>&1 | Out-String
+    if ($ptxasHelp -match "sm_121a") {
+      $papAsm = & $ptxas.Source -arch=sm_121a $papPtx `
+        -o (Join-Path $tmpDir "ptx_async_predicate.cubin") 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected predicated async copies: $papAsm" }
+    }
+    if ($ptxasHelp -match "sm_90a") {
+      foreach ($papFile in @($papOld, $papTt)) {
+        $papAsm = & $ptxas.Source -arch=sm_90a $papFile `
+          -o (Join-Path $tmpDir "ptx_async_predicate_90.cubin") 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "ptxas rejected $papFile at sm_90a: $papAsm" }
+      }
+    }
+  }
+  Write-CaseResult -Name "ptx_emit_async_copy_predicated_and_shared_cta" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "ptx_emit_async_copy_predicated_and_shared_cta" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   # Block-scaled i8 tensor MMA: exact int32 K32 dots scaled per block into
   # f32, 4-bit halves-packed B widened in registers, and region residency
   # across a K loop staged through workgroup memory.
