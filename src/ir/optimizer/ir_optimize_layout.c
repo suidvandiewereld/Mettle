@@ -1145,12 +1145,10 @@ int ir_layout_factor_pass(IRProgram *program, int *changed) {
       long long n = cand->alloc_size / cand->stride;
 
       size_t load_classes = 0;
-      long long packed_width = 0;
       for (size_t c = 0; c < cand->class_count; c++) {
         if (cand->classes[c].seen_in_load) {
           load_classes++;
         }
-        packed_width += cand->classes[c].width;
       }
       int mode = 0;
       long long new_stride = 0;

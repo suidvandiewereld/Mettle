@@ -1226,15 +1226,13 @@ static int rewrite_declaration_names(ASTNode *node,
                                      size_t rewrite_count,
                                      const NamespaceBinding *bindings,
                                      size_t binding_count,
-                                     RewriteScope *scope,
-                                     int program_creates_scope);
+                                     RewriteScope *scope);
 static int rewrite_function_declaration_names(ASTNode *node,
                                               const NameRewrite *rewrites,
                                               size_t rewrite_count,
                                               const NamespaceBinding *bindings,
                                               size_t binding_count,
-                                              RewriteScope *scope,
-                                              int program_creates_scope);
+                                              RewriteScope *scope);
 static void collect_declaration_dependency_names(ASTNode *node, char ***names,
                                                  size_t *count,
                                                  size_t *capacity);
@@ -1242,8 +1240,7 @@ static void collect_declaration_dependency_names(ASTNode *node, char ***names,
 static int rewrite_branch_names(ASTNode *node, const NameRewrite *rewrites,
                               size_t rewrite_count,
                               const NamespaceBinding *bindings,
-                              size_t binding_count, RewriteScope *scope,
-                              int program_creates_scope) {
+                              size_t binding_count, RewriteScope *scope) {
   if (!node) {
     return 1;
   }
@@ -1374,8 +1371,7 @@ static int rewrite_branch_names(ASTNode *node, const NameRewrite *rewrites,
 static int rewrite_statement_names(ASTNode *node, const NameRewrite *rewrites,
                               size_t rewrite_count,
                               const NamespaceBinding *bindings,
-                              size_t binding_count, RewriteScope *scope,
-                              int program_creates_scope) {
+                              size_t binding_count, RewriteScope *scope) {
   if (!node) {
     return 1;
   }
@@ -1478,16 +1474,15 @@ static int rewrite_statement_names(ASTNode *node, const NameRewrite *rewrites,
   default:
     break;
   }
-  return rewrite_branch_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
-                            program_creates_scope);
+  return rewrite_branch_names(node, rewrites, rewrite_count, bindings,
+                              binding_count, scope);
 }
 
 
 static int rewrite_operator_names(ASTNode *node, const NameRewrite *rewrites,
                               size_t rewrite_count,
                               const NamespaceBinding *bindings,
-                              size_t binding_count, RewriteScope *scope,
-                              int program_creates_scope) {
+                              size_t binding_count, RewriteScope *scope) {
   if (!node) {
     return 1;
   }
@@ -1558,15 +1553,14 @@ static int rewrite_operator_names(ASTNode *node, const NameRewrite *rewrites,
   default:
     break;
   }
-  return rewrite_statement_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
-                            program_creates_scope);
+  return rewrite_statement_names(node, rewrites, rewrite_count, bindings,
+                                 binding_count, scope);
 }
 
 static int rewrite_member_names(ASTNode *node, const NameRewrite *rewrites,
                               size_t rewrite_count,
                               const NamespaceBinding *bindings,
-                              size_t binding_count, RewriteScope *scope,
-                              int program_creates_scope) {
+                              size_t binding_count, RewriteScope *scope) {
   if (!node) {
     return 1;
   }
@@ -1633,15 +1627,14 @@ static int rewrite_member_names(ASTNode *node, const NameRewrite *rewrites,
   default:
     break;
   }
-  return rewrite_operator_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
-                            program_creates_scope);
+  return rewrite_operator_names(node, rewrites, rewrite_count, bindings,
+                                binding_count, scope);
 }
 
 static int rewrite_call_names(ASTNode *node, const NameRewrite *rewrites,
                               size_t rewrite_count,
                               const NamespaceBinding *bindings,
-                              size_t binding_count, RewriteScope *scope,
-                              int program_creates_scope) {
+                              size_t binding_count, RewriteScope *scope) {
   if (!node) {
     return 1;
   }
@@ -1750,8 +1743,8 @@ static int rewrite_call_names(ASTNode *node, const NameRewrite *rewrites,
   default:
     break;
   }
-  return rewrite_member_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
-                            program_creates_scope);
+  return rewrite_member_names(node, rewrites, rewrite_count, bindings,
+                              binding_count, scope);
 }
 
 
@@ -1802,8 +1795,7 @@ static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
   case AST_TRAIT_DECLARATION:
   case AST_IMPL_DECLARATION:
     return rewrite_declaration_names(node, rewrites, rewrite_count, bindings,
-                                     binding_count, scope,
-                                     program_creates_scope);
+                                     binding_count, scope);
 
   case AST_ASSIGNMENT: {
     Assignment *assignment = (Assignment *)node->data;
@@ -1836,8 +1828,8 @@ static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
   default:
     break;
   }
-  return rewrite_call_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
-                            program_creates_scope);
+  return rewrite_call_names(node, rewrites, rewrite_count, bindings,
+                            binding_count, scope);
 }
 
 
@@ -1848,13 +1840,12 @@ static int rewrite_declaration_names(ASTNode *node,
                                      size_t rewrite_count,
                                      const NamespaceBinding *bindings,
                                      size_t binding_count,
-                                     RewriteScope *scope,
-                                     int program_creates_scope) {
+                                     RewriteScope *scope) {
   switch (node->type) {
   case AST_FUNCTION_DECLARATION:
   case AST_METHOD_DECLARATION:
     return rewrite_function_declaration_names(
-        node, rewrites, rewrite_count, bindings, binding_count, scope, program_creates_scope);
+        node, rewrites, rewrite_count, bindings, binding_count, scope);
   case AST_STRUCT_DECLARATION: {
     StructDeclaration *struct_decl = (StructDeclaration *)node->data;
     if (!struct_decl) {
@@ -2016,8 +2007,7 @@ static int rewrite_function_declaration_names(ASTNode *node,
                                               size_t rewrite_count,
                                               const NamespaceBinding *bindings,
                                               size_t binding_count,
-                                              RewriteScope *scope,
-                                              int program_creates_scope) {
+                                              RewriteScope *scope) {
   switch (node->type) {
   case AST_FUNCTION_DECLARATION:
   case AST_METHOD_DECLARATION: {

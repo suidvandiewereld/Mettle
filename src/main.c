@@ -1980,8 +1980,10 @@ static int mettle_link_internal(const char **object_paths,
   int want_shared =
       options && options->shared_output ? 1 : 0;
   LinkResolutionOptions resolution_options = {
-      want_shared ? NULL : "mettle_start", 16u, 1,
-      object_is_runtime_default};
+      .entry_symbol_name = want_shared ? NULL : "mettle_start",
+      .section_alignment = 16u,
+      .allow_unresolved_externals = 1,
+      .object_is_runtime_default = object_is_runtime_default};
   LinkResolution *resolution = NULL;
   PeEmissionOptions emission_options = {0};
   StringList import_library_paths = {0};

@@ -1349,8 +1349,7 @@ static int binary_emit_trap_message_address(CodeGenerator *generator,
                                                  target);
 }
 
-static int binary_emit_trap_puts(CodeGenerator *generator,
-                                 BinaryFunctionContext *context, int shadow) {
+static int binary_emit_trap_puts(BinaryFunctionContext *context, int shadow) {
   size_t displacement_offset = 0;
 
   return binary_emit_sub_rsp_imm32(&context->code, shadow) &&
@@ -1375,11 +1374,11 @@ static int binary_emit_trap_abort(CodeGenerator *generator,
   if (!binary_emit_trap_message_address(generator, context, message, arg0)) {
     return 0;
   }
-  if (!binary_emit_trap_puts(generator, context, shadow) ||
+  if (!binary_emit_trap_puts(context, shadow) ||
       !code_generator_binary_emit_cstring_literal_address(
           generator, context,
           "  rebuild with -s for the file, line and stack trace", arg0) ||
-      !binary_emit_trap_puts(generator, context, shadow) ||
+      !binary_emit_trap_puts(context, shadow) ||
       !binary_emit_mov_reg_imm64(&context->code, arg0, 1) ||
       !binary_emit_sub_rsp_imm32(&context->code, shadow) ||
       !binary_emit_call_placeholder(&context->code, &displacement_offset) ||

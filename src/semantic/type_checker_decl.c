@@ -2026,8 +2026,7 @@ static Symbol *type_checker_build_function_symbol(
 
 static int type_checker_check_function_body(
     TypeChecker *checker, ASTNode *declaration,
-    FunctionDeclaration *func_decl, Symbol *func_symbol,
-    Type *return_type) {
+    FunctionDeclaration *func_decl, Type *return_type) {
   Type **active_param_types =
       checker->current_function->data.function.parameter_types;
   if (func_decl->parameter_count > 0) {
@@ -2370,7 +2369,7 @@ static int type_checker_process_function(TypeChecker *checker,
     }
 
     if (!type_checker_check_function_body(checker, declaration, func_decl,
-                                         func_symbol, return_type)) {
+                                         return_type)) {
       return 0;
     }
     if (func_symbol && func_symbol->post_state == 1) {
@@ -2398,6 +2397,7 @@ static int type_checker_process_function(TypeChecker *checker,
 static int type_checker_process_member(TypeChecker *checker,
                                    ASTNode *declaration,
                                    int *handled) {
+  (void)checker;
   *handled = 1;
   switch (declaration->type) {
   case AST_METHOD_DECLARATION:
@@ -2546,8 +2546,7 @@ static int type_checker_check_member_assignment(
 }
 
 static int type_checker_check_target_assignment(
-    TypeChecker *checker, ASTNode *declaration,
-    Assignment *assignment, int *handled) {
+    TypeChecker *checker, Assignment *assignment, int *handled) {
   *handled = 1;
   if (assignment->target) {
     if (assignment->target->type == AST_MEMBER_ACCESS) {
@@ -2703,7 +2702,7 @@ static int type_checker_process_assignment(TypeChecker *checker,
     {
       int target_handled = 0;
       int checked = type_checker_check_target_assignment(
-          checker, declaration, assignment, &target_handled);
+          checker, assignment, &target_handled);
       if (target_handled) {
         return checked;
       }

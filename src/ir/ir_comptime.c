@@ -75,7 +75,7 @@ static void ict_report_assert_failure(ErrorReporter *reporter,
                                       IRInterpMachine *machine,
                                       const char *test_name) {
   size_t line = 0, column = 0;
-  IRInterpValue left = {0, 0, 0}, right = {0, 0, 0};
+  IRInterpValue left = {0}, right = {0};
   int is_eq = 0;
   ir_interp_assert_info(machine, &line, &column, &left, &right, &is_eq);
 
@@ -196,7 +196,7 @@ int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
     if (ir_trace_collecting()) {
       ir_trace_begin(ict_display_name(fn->name));
     }
-    IRInterpValue result = {0, 0, 0};
+    IRInterpValue result = {0};
     IRInterpStatus status =
         ir_interp_run(machine, fn, NULL, 0, &result, ICT_TEST_FUEL);
     if (ir_trace_collecting() && g_trace_rules_hook &&
@@ -531,7 +531,7 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
   memset(&log, 0, sizeof(log));
   ir_interp_set_value_hook(machine, ict_trace_hook, &log, fn);
 
-  IRInterpValue result = {0, 0, 0};
+  IRInterpValue result = {0};
   IRInterpStatus status =
       ir_interp_run(machine, fn, call_args, fn->parameter_count, &result,
                     ICT_TRACE_FUEL);

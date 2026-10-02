@@ -368,7 +368,7 @@ int ir_pgo_profile_program(IRProgram *program) {
     return 0;
   }
   ir_interp_enable_counting(machine);
-  IRInterpValue result = {0, 0, 0};
+  IRInterpValue result = {0};
   IRInterpStatus status =
       ir_interp_run(machine, main_fn, NULL, 0, &result, IR_PGO_FUEL);
   switch (status) {

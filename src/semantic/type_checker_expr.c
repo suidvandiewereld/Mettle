@@ -85,8 +85,7 @@ size_t type_checker_expression_multiple_of(TypeChecker *checker,
 }
 
 static size_t type_checker_unary_alignment(TypeChecker *checker,
-                                           ASTNode *expression,
-                                           int depth) {
+                                           ASTNode *expression) {
   UnaryExpression *unary = (UnaryExpression *)expression->data;
   if (unary && unary->operator && strcmp(unary->operator, "&") == 0 &&
       unary->operand && unary->operand->type == AST_INDEX_EXPRESSION) {
@@ -142,7 +141,7 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
     return expression->resolved_type->declared_align;
   }
   if (expression->type == AST_UNARY_EXPRESSION) {
-    return type_checker_unary_alignment(checker, expression, depth);
+    return type_checker_unary_alignment(checker, expression);
   }
   if (expression->type == AST_IDENTIFIER) {
     Identifier *identifier = (Identifier *)expression->data;
@@ -1637,11 +1636,8 @@ typedef struct {
 
 static int type_checker_tensor_scope_option(TypeChecker *checker,
                                       CallExpression *call, size_t i,
-                                      const char *operation,
-                                      size_t positional_count,
-                                      int is_matmul,
                                       MtlcTensorMmaDesc *desc,
-                                      TensorHave *have, const char *option,
+                                      const char *option,
                                       const char *identifier, ASTNode *value) {
   if (!strcmp(option, "scope")) {
     if (identifier && !strcmp(identifier, "subgroup"))
@@ -1671,11 +1667,8 @@ static int type_checker_tensor_scope_option(TypeChecker *checker,
 
 static int type_checker_tensor_scale_option(TypeChecker *checker,
                                       CallExpression *call, size_t i,
-                                      const char *operation,
-                                      size_t positional_count,
-                                      int is_matmul,
                                       MtlcTensorMmaDesc *desc,
-                                      TensorHave *have, const char *option,
+                                      const char *option,
                                       const char *identifier, ASTNode *value) {
   if (!strcmp(option, "a_scale_mode") ||
              !strcmp(option, "b_scale_mode")) {
@@ -1793,7 +1786,8 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
     if (option[10] == 'a') desc->transpose_a = transpose;
     else desc->transpose_b = transpose;
   } else {
-    return type_checker_tensor_scope_option(checker, call, i, operation, positional_count, is_matmul, desc, have, option, identifier, value);
+    return type_checker_tensor_scope_option(checker, call, i, desc, option,
+                                            identifier, value);
   }
   return 1;
 }
@@ -1801,11 +1795,8 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
 
 static int type_checker_tensor_mode_option(TypeChecker *checker,
                                       CallExpression *call, size_t i,
-                                      const char *operation,
-                                      size_t positional_count,
-                                      int is_matmul,
                                       MtlcTensorMmaDesc *desc,
-                                      TensorHave *have, const char *option,
+                                      const char *option,
                                       const char *identifier, ASTNode *value) {
   if (!strcmp(option, "math")) {
     if (identifier && !strcmp(identifier, "multiply_add"))
@@ -1860,7 +1851,8 @@ static int type_checker_tensor_mode_option(TypeChecker *checker,
       return 0;
     }
   } else {
-    return type_checker_tensor_scale_option(checker, call, i, operation, positional_count, is_matmul, desc, have, option, identifier, value);
+    return type_checker_tensor_scale_option(checker, call, i, desc, option,
+                                            identifier, value);
   }
   return 1;
 }
@@ -1868,9 +1860,6 @@ static int type_checker_tensor_mode_option(TypeChecker *checker,
 
 static int type_checker_tensor_type_option(TypeChecker *checker,
                                       CallExpression *call, size_t i,
-                                      const char *operation,
-                                      size_t positional_count,
-                                      int is_matmul,
                                       MtlcTensorMmaDesc *desc,
                                       TensorHave *have, const char *option,
                                       const char *identifier, ASTNode *value) {
@@ -1957,16 +1946,15 @@ static int type_checker_tensor_type_option(TypeChecker *checker,
       *runtime_argument = i;
     }
   } else {
-    return type_checker_tensor_mode_option(checker, call, i, operation, positional_count, is_matmul, desc, have, option, identifier, value);
+    return type_checker_tensor_mode_option(checker, call, i, desc, option,
+                                           identifier, value);
   }
   return 1;
 }
 
 static int type_checker_tensor_option(TypeChecker *checker,
                                       CallExpression *call, size_t i,
-                                      const char *operation,
                                       size_t positional_count,
-                                      int is_matmul,
                                       MtlcTensorMmaDesc *desc,
                                       TensorHave *have) {
   const char *option = call->argument_names ? call->argument_names[i] : NULL;
@@ -2019,9 +2007,8 @@ static int type_checker_tensor_option(TypeChecker *checker,
     if (!strcmp(option, "n")) desc->n = (uint16_t)dimension, have->n = 1;
     if (!strcmp(option, "k")) desc->k = (uint16_t)dimension, have->k = 1;
   } else {
-    return type_checker_tensor_type_option(
-        checker, call, i, operation, positional_count, is_matmul, desc,
-        have, option, identifier, value);
+    return type_checker_tensor_type_option(checker, call, i, desc, have,
+                                           option, identifier, value);
   }
   return 1;
 }
@@ -2114,8 +2101,7 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
   call->tensor_d_stride_argument = SIZE_MAX;
 
   for (size_t i = positional_count; i < call->argument_count; i++) {
-    if (!type_checker_tensor_option(checker, call, i, operation,
-                                    positional_count, is_matmul, &desc,
+    if (!type_checker_tensor_option(checker, call, i, positional_count, &desc,
                                     &have)) {
       return NULL;
     }
@@ -2919,7 +2905,7 @@ static Type *type_checker_check_syscall(TypeChecker *checker,
 
 static Type *type_checker_interp_builtin(TypeChecker *checker,
                                          CallExpression *call,
-                                         ASTNode *expression, int *handled) {
+                                         ASTNode *expression) {
   if (call->argument_count != 1 || !call->arguments ||
       !call->arguments[0]) {
     type_checker_set_error_at_location(
@@ -3045,7 +3031,7 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
   }
 
   if (strcmp(call->function_name, "__mtl_interp") == 0) {
-    return type_checker_interp_builtin(checker, call, expression, handled);
+    return type_checker_interp_builtin(checker, call, expression);
   }
 
   *handled = 0;

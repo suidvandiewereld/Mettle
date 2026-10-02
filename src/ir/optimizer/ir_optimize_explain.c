@@ -1060,8 +1060,8 @@ void ir_explain_function_after(const IRFunction *function) {
 
 static void ir_machine_from_remark(const char *function_name,
                                    const char *entity, size_t line,
-                                   size_t column, int positive,
-                                   const char *headline, const char *file) {
+                                   size_t column, const char *headline,
+                                   const char *file) {
   if (!ir_machine_collecting() || !function_name || !entity) {
     return;
   }
@@ -1089,8 +1089,7 @@ void ir_explain_remark(const char *function_name, const char *entity,
   g_last_remark_recorded = 0;
   if (!g_explain_hypothesis && headline) {
     ir_machine_from_remark(function_name, entity, location.line,
-                           location.column, positive, headline,
-                           location.filename);
+                           location.column, headline, location.filename);
   }
   if (!g_explain || g_explain_hypothesis || !headline ||
       !ir_explain_location_enabled(&location)) {

@@ -449,9 +449,10 @@ int mtlc_emit(MtlcContext *ctx, MtlcModule *module, MtlcArch arch,
     }
     char *err = NULL;
     PtxEmitOptions ptx_options = {
-        mtlc_context_ptx_target(ctx), mtlc_context_ptx_isa_major(ctx),
-        mtlc_context_ptx_isa_minor(ctx),
-        mtlc_context_ptx_tensor_tuple_budget(ctx)};
+        .target = mtlc_context_ptx_target(ctx),
+        .isa_major = mtlc_context_ptx_isa_major(ctx),
+        .isa_minor = mtlc_context_ptx_isa_minor(ctx),
+        .tensor_tuple_budget = mtlc_context_ptx_tensor_tuple_budget(ctx)};
     int ok = ptx_emit_program(module->ir, NULL, out, &ptx_options, &err);
     fclose(out);
     if (!ok) {
@@ -490,8 +491,11 @@ static int link_pe_internal(MtlcContext *ctx, const char **object_paths,
   static const char *const import_dlls[] = {
       "kernel32.dll", "ws2_32.dll", "user32.dll", "gdi32.dll",
       "advapi32.dll", "winmm.dll"};
-  LinkResolutionOptions resolution_options = {"mettle_start", 16u, 1,
-                                              object_is_runtime_default};
+  LinkResolutionOptions resolution_options = {
+      .entry_symbol_name = "mettle_start",
+      .section_alignment = 16u,
+      .allow_unresolved_externals = 1,
+      .object_is_runtime_default = object_is_runtime_default};
   LinkResolution *resolution = NULL;
   PeEmissionOptions emission = {0};
   char *error_message = NULL;

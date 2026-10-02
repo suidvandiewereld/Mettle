@@ -558,10 +558,8 @@ static int ir_lower_var_initializer(IRLoweringContext *context,
 }
 
 static int ir_lower_address_space_local(IRLoweringContext *context,
-                                        IRFunction *function,
                                         VarDeclaration *declaration,
-                                        Type *decl_type, IRInstruction *local,
-                                        const char *local_name) {
+                                        Type *decl_type, IRInstruction *local) {
   int is_static_storage =
       decl_type && decl_type->kind == TYPE_ARRAY && decl_type->base_type &&
       decl_type->array_size > 0 && decl_type->array_size <= UINT32_MAX;
@@ -634,7 +632,7 @@ static int ir_lower_zeroed_aggregate_local(IRLoweringContext *context,
 }
 
 static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *function,
-                                   ASTNode *statement, IRDeferScope *defers) {
+                                   ASTNode *statement) {
   VarDeclaration *declaration = (VarDeclaration *)statement->data;
   if (!declaration || !declaration->name) {
     ir_set_error(context, "Malformed variable declaration");
@@ -685,8 +683,7 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
   }
   local.value_type = mtlc_type_from_frontend(decl_type);
   if (declaration->address_space != AST_ADDRESS_SPACE_DEFAULT &&
-      !ir_lower_address_space_local(context, function, declaration, decl_type,
-                                    &local, local_name)) {
+      !ir_lower_address_space_local(context, declaration, decl_type, &local)) {
     return 0;
   }
   if (!local.text && declaration->initializer &&
@@ -732,8 +729,7 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
 
 static int ir_lower_named_assignment(IRLoweringContext *context,
                                      IRFunction *function, ASTNode *statement,
-                                     Assignment *assignment,
-                                     IRDeferScope *defers, IROperand *value) {
+                                     Assignment *assignment, IROperand *value) {
   const IRLocalBinding *binding =
       ir_local_binding_find(context, assignment->variable_name);
   const char *target_name =
@@ -822,7 +818,7 @@ static int ir_lower_named_assignment(IRLoweringContext *context,
 }
 
 static int ir_lower_assignment(IRLoweringContext *context, IRFunction *function,
-                                   ASTNode *statement, IRDeferScope *defers) {
+                                   ASTNode *statement) {
   Assignment *assignment = (Assignment *)statement->data;
   if (!assignment || !assignment->value) {
     ir_set_error(context, "Malformed assignment statement");
@@ -870,7 +866,7 @@ static int ir_lower_assignment(IRLoweringContext *context, IRFunction *function,
 
   if (assignment->variable_name) {
     int handled = ir_lower_named_assignment(context, function, statement,
-                                            assignment, defers, &value);
+                                            assignment, &value);
     if (handled >= 0) {
       return handled;
     }
@@ -1533,10 +1529,10 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   }
 
   case AST_VAR_DECLARATION:
-    return ir_lower_var_declaration(context, function, statement, defers);
+    return ir_lower_var_declaration(context, function, statement);
 
   case AST_ASSIGNMENT:
-    return ir_lower_assignment(context, function, statement, defers);
+    return ir_lower_assignment(context, function, statement);
 
   case AST_FUNCTION_CALL: {
     IROperand ignored = ir_operand_none();

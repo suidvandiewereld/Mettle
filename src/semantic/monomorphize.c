@@ -3299,7 +3299,7 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
   }
 
   int id = g_cc_counter++;
-  char env_name[32], lam_name[32], make_name[32], idx[24];
+  char env_name[32], lam_name[32], make_name[32];
   snprintf(env_name, sizeof(env_name), "__ClosEnv_%d", id);
   snprintf(lam_name, sizeof(lam_name), "__lam_%d", id);
   snprintf(make_name, sizeof(make_name), "__make_lam_%d", id);

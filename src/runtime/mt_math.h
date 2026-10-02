@@ -1,7 +1,7 @@
 #ifndef MTLC_RUNTIME_MT_MATH_H
 #define MTLC_RUNTIME_MT_MATH_H
 
-static double mt_exp(double value) {
+static inline double mt_exp(double value) {
   if (value > 709.0) {
     return 1.0 / 0.0;
   }
@@ -35,7 +35,7 @@ static double mt_exp(double value) {
   return result;
 }
 
-static double mt_log(double value) {
+static inline double mt_log(double value) {
   if (value < 0.0) {
     return 0.0 / 0.0;
   }
@@ -65,7 +65,7 @@ static double mt_log(double value) {
   return 2.0 * sum + (double)power * 0.69314718055994530942;
 }
 
-static double mt_pow(double base, double exponent) {
+static inline double mt_pow(double base, double exponent) {
   if (exponent == 0.0) {
     return 1.0;
   }
@@ -86,7 +86,7 @@ static double mt_pow(double base, double exponent) {
   return mt_exp(exponent * mt_log(base));
 }
 
-static double mt_sin(double value) {
+static inline double mt_sin(double value) {
   const double two_pi = 6.2831853071795864769;
   const double pi = 3.1415926535897932385;
   const double half_pi = 1.5707963267948966192;
@@ -118,11 +118,11 @@ static double mt_sin(double value) {
   return sum;
 }
 
-static double mt_cos(double value) {
+static inline double mt_cos(double value) {
   return mt_sin(value + 1.5707963267948966192);
 }
 
-static double mt_tanh(double value) {
+static inline double mt_tanh(double value) {
   if (value > 20.0) {
     return 1.0;
   }
@@ -133,7 +133,7 @@ static double mt_tanh(double value) {
   return (twice - 1.0) / (twice + 1.0);
 }
 
-static float mt_sqrtf(float value) {
+static inline float mt_sqrtf(float value) {
   if (value <= 0.0f) {
     return value == 0.0f ? value : 0.0f / 0.0f;
   }

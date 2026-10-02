@@ -83,7 +83,7 @@ static int dbg_emit_u64_table(BinaryEmitter *emitter, size_t rdata_section,
 }
 
 static int code_generator_binary_emit_profile_cstring_table(
-    CodeGenerator *generator, BinaryEmitter *emitter, size_t rdata_section,
+    BinaryEmitter *emitter, size_t rdata_section,
     const char *table_symbol, const char *const *values, size_t count,
     char **out_name_symbols) {
   size_t table_offset = 0;
@@ -199,10 +199,10 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
   }
 
   if (!code_generator_binary_emit_profile_cstring_table(
-          generator, emitter, rdata_section, "mettle_profile_names",
+          emitter, rdata_section, "mettle_profile_names",
           profile_names, emit_count, name_symbols) ||
       !code_generator_binary_emit_profile_cstring_table(
-          generator, emitter, rdata_section, "mettle_profile_files",
+          emitter, rdata_section, "mettle_profile_files",
           profile_files, emit_count, file_symbols)) {
     if (!generator->has_error) {
       code_generator_binary_emitter_error(
@@ -285,10 +285,10 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
             structs, &struct_count, DBG_MAX_STRUCTS);
       }
       ok = code_generator_binary_emit_profile_cstring_table(
-               generator, emitter, rdata_section, "mettle_dbg_local_names",
+               emitter, rdata_section, "mettle_dbg_local_names",
                local_names, emit_locals, scratch_a) &&
            code_generator_binary_emit_profile_cstring_table(
-               generator, emitter, rdata_section, "mettle_dbg_local_types",
+               emitter, rdata_section, "mettle_dbg_local_types",
                local_types, emit_locals, scratch_b);
       for (size_t i = 0; i < emit_locals; i++) {
         free(scratch_a[i]);
@@ -353,13 +353,13 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
       }
       if (ok) {
         ok = code_generator_binary_emit_profile_cstring_table(
-                 generator, emitter, rdata_section, "mettle_dbg_struct_names",
+                 emitter, rdata_section, "mettle_dbg_struct_names",
                  struct_names, emit_structs, scratch_c) &&
              code_generator_binary_emit_profile_cstring_table(
-                 generator, emitter, rdata_section, "mettle_dbg_field_names",
+                 emitter, rdata_section, "mettle_dbg_field_names",
                  field_names, emit_fields, scratch_d) &&
              code_generator_binary_emit_profile_cstring_table(
-                 generator, emitter, rdata_section, "mettle_dbg_field_types",
+                 emitter, rdata_section, "mettle_dbg_field_types",
                  (const char *const *)field_type_names, emit_fields,
                  scratch_e) &&
              dbg_emit_u64_table(emitter, rdata_section,

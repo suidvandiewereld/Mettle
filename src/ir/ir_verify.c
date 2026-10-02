@@ -1020,7 +1020,7 @@ static int irv_compare_observations(IRInterpMachine *before,
       continue;
     }
     IRInterpValue va = ir_interp_global_value(before, i);
-    IRInterpValue vb = {0, 0, 0};
+    IRInterpValue vb = {0};
     size_t cap_b = ir_interp_global_count(after);
     for (size_t j = 0; j < cap_b; j++) {
       const char *nb = ir_interp_global_name(after, j);
@@ -1423,7 +1423,7 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
     }
     size_t input_buffer_count = ir_interp_buffer_count(machine_before);
 
-    IRInterpValue ret_before = {0, 0, 0}, ret_after = {0, 0, 0};
+    IRInterpValue ret_before = {0}, ret_after = {0};
     char detail_before[128] = "", detail_after[128] = "";
     double t1 = stats ? irv_now_ms() : 0.0;
     IRVRunOutcome outcome_before =

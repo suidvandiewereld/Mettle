@@ -470,9 +470,6 @@ if exist tools\mlopt\gnn_genius.bin copy /Y tools\mlopt\gnn_genius.bin bin\mlopt
 if exist tools\mlopt\bw_lib.txt copy /Y tools\mlopt\bw_lib.txt bin\mlopt\bw_lib.txt >nul
 if exist tools\mlopt\gf2_lib1.txt copy /Y tools\mlopt\gf2_lib1.txt bin\mlopt\gf2_lib1.txt >nul
 
-echo Rendering README.html for the installer docs shortcut...
-where python >nul 2>&1 && python installer\render_readme.py
-
 REM Every post-link stage got through: the next run may skip all of this when
 REM no object changed.
 echo ok> obj\link.ok

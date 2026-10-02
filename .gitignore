@@ -63,3 +63,8 @@ tests/test-failures.txt
 tests/*-failures.txt
 DS/
 .perf*/
+/.tmp_ni/
+/output.*
+/nul.obj
+/_mlopt.*
+*.explain*

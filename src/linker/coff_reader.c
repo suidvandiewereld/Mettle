@@ -199,7 +199,8 @@ static int coff_reader_parse_string_table(CoffObject *object,
     return 0;
   }
 
-  if (object->symbol_count > SIZE_MAX / COFF_SYMBOL_SIZE) {
+  if (object->symbol_count >
+      (SIZE_MAX - (size_t)object->pointer_to_symbol_table) / COFF_SYMBOL_SIZE) {
     mettle_set_error(error_message_out,
                      "COFF symbol count overflows string table offset");
     return 0;
@@ -417,9 +418,9 @@ static int coff_reader_parse_symbols(CoffObject *object,
     return 1;
   }
 
-  if (object->symbol_count > SIZE_MAX / COFF_SYMBOL_SIZE) {
+  if (object->symbol_count > file_size / COFF_SYMBOL_SIZE) {
     mettle_set_error(error_message_out,
-                     "COFF symbol count overflows symbol table size");
+                     "COFF symbol table is larger than the file");
     return 0;
   }
 

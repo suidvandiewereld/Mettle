@@ -69,41 +69,6 @@ static const char *link_section_name_from_kind(LinkSectionKind kind) {
   }
 }
 
-static size_t link_alignment_from_characteristics(uint32_t characteristics) {
-  switch (characteristics & IMAGE_SCN_ALIGN_MASK) {
-  case IMAGE_SCN_ALIGN_1BYTES:
-    return 1u;
-  case IMAGE_SCN_ALIGN_2BYTES:
-    return 2u;
-  case IMAGE_SCN_ALIGN_4BYTES:
-    return 4u;
-  case IMAGE_SCN_ALIGN_8BYTES:
-    return 8u;
-  case IMAGE_SCN_ALIGN_16BYTES:
-    return 16u;
-  case IMAGE_SCN_ALIGN_32BYTES:
-    return 32u;
-  case IMAGE_SCN_ALIGN_64BYTES:
-    return 64u;
-  case IMAGE_SCN_ALIGN_128BYTES:
-    return 128u;
-  case IMAGE_SCN_ALIGN_256BYTES:
-    return 256u;
-  case IMAGE_SCN_ALIGN_512BYTES:
-    return 512u;
-  case IMAGE_SCN_ALIGN_1024BYTES:
-    return 1024u;
-  case IMAGE_SCN_ALIGN_2048BYTES:
-    return 2048u;
-  case IMAGE_SCN_ALIGN_4096BYTES:
-    return 4096u;
-  case IMAGE_SCN_ALIGN_8192BYTES:
-    return 8192u;
-  default:
-    return 0u;
-  }
-}
-
 static size_t link_default_section_alignment(LinkSectionKind kind,
                                              size_t fallback_alignment) {
   if (fallback_alignment > 1u) {

@@ -514,29 +514,6 @@ static void mir_live_note_uses(const MirFunction *fn, const MirOperand *op,
   }
 }
 
-static void mir_live_add_operand(const MirFunction *fn, const MirOperand *op,
-                                 unsigned long long *live,
-                                 int skip_plain_vreg) {
-  MirVregId ids[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
-  if (op->kind == MIR_OPK_VREG) {
-    if (skip_plain_vreg) {
-      return;
-    }
-    ids[0] = op->vreg;
-  } else if (op->kind == MIR_OPK_MEM) {
-    ids[0] = op->mem.base;
-    ids[1] = op->mem.index;
-  } else {
-    return;
-  }
-  for (int k = 0; k < 2; k++) {
-    MirVregId v = ids[k];
-    if (v >= 0 && (size_t)v < fn->vreg_count) {
-      mir_live_bit_set(live, (size_t)v);
-    }
-  }
-}
-
 static int mir_live_cfg_build(const MirFunction *fn, MirLiveCfg *cfg,
                               int precise_defs) {
   MirLabelMap map;

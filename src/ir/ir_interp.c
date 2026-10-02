@@ -2500,6 +2500,7 @@ static int ii_extern_swap(IRInterpMachine *machine, const char *name,
 static int ii_extern_socket(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
+  (void)args;
   if (strcmp(name, "socket") == 0 || strcmp(name, "WSASocketA") == 0) {
     machine->next_thread_handle++;
     *result = ii_int_value((long long)(machine->next_thread_handle + 2));
@@ -2663,6 +2664,9 @@ static int ii_extern_process(IRInterpMachine *machine, const char *name,
 static int ii_extern_handle(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
+  (void)machine;
+  (void)args;
+  (void)arg_count;
   if (strcmp(name, "GetCurrentThreadId") == 0 ||
       strcmp(name, "mettle_thread_current_id") == 0 ||
       strcmp(name, "pthread_self") == 0) {
@@ -6559,7 +6563,7 @@ const char *ir_interp_global_name(const IRInterpMachine *machine,
 
 IRInterpValue ir_interp_global_value(const IRInterpMachine *machine,
                                      size_t index) {
-  IRInterpValue zero = {0, 0, 0};
+  IRInterpValue zero = {0};
   if (!machine || index >= machine->globals.capacity ||
       !machine->globals.vars[index].key) {
     return zero;

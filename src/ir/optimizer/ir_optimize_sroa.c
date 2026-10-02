@@ -2,8 +2,7 @@
 
 static const char *ir_builtin_scalar_type_for_slot(int size, int is_float,
                                                     int float_bits,
-                                                    int is_unsigned,
-                                                    int alias_class) {
+                                                    int is_unsigned) {
   if (is_float) {
     return float_bits == 32 ? "float32" : "float64";
   }
@@ -344,7 +343,7 @@ static int ir_sroa_transform_all(IRFunction *function,
             } else {
               decl.text = mettle_strdup(ir_builtin_scalar_type_for_slot(
                   slots[s].size, slots[s].is_float, slots[s].float_bits,
-                  slots[s].is_unsigned, slots[s].alias_class));
+                  slots[s].is_unsigned));
             }
           }
           free(nm);
@@ -570,7 +569,6 @@ static void ir_sroa_rec_add_addr(IRSroaRec *recs, size_t owner,
 }
 
 static int ir_sroa_scan_uses(IRFunction *function, size_t i, IRSroaRec *recs,
-                             size_t rec_count, IRSroaHash *rec_hash,
                              IRSroaHash *addr_hash) {
   const IRInstruction *insn = &function->instructions[i];
   if ((insn->op == IR_OP_ADDRESS_OF || insn->op == IR_OP_BINARY) &&
@@ -686,8 +684,7 @@ static int ir_sroa_scan_uses(IRFunction *function, size_t i, IRSroaRec *recs,
 }
 
 static int ir_sroa_collect_records(IRFunction *function, size_t i,
-                                   IRSroaRec **recs, size_t *rec_count,
-                                   size_t *rec_cap, IRSroaHash *rec_hash,
+                                   IRSroaRec *recs, IRSroaHash *rec_hash,
                                    IRSroaHash *addr_hash) {
   const IRInstruction *insn = &function->instructions[i];
   if (insn->op == IR_OP_ADDRESS_OF &&
@@ -695,7 +692,7 @@ static int ir_sroa_collect_records(IRFunction *function, size_t i,
       ir_operand_is_temp(&insn->dest)) {
     const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->lhs.name);
     if (m) {
-      ir_sroa_rec_add_addr(*recs, m->member, addr_hash, insn->dest.name,
+      ir_sroa_rec_add_addr(recs, m->member, addr_hash, insn->dest.name,
                            0);
       return 1;
     }
@@ -703,7 +700,7 @@ static int ir_sroa_collect_records(IRFunction *function, size_t i,
   if (insn->op == IR_OP_DECLARE_LOCAL &&
       ir_operand_is_symbol(&insn->dest)) {
     const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->dest.name);
-    if (m && (*recs)[m->member].decl_index == i) {
+    if (m && recs[m->member].decl_index == i) {
       return 1;
     }
   }
@@ -714,14 +711,14 @@ static int ir_sroa_collect_records(IRFunction *function, size_t i,
     const IRSroaHashEnt *se = ir_sroa_hash_get(rec_hash, insn->lhs.name);
     if (de || se) {
       if (ir_operand_names_match(&insn->dest, &insn->lhs)) {
-        (*recs)[(de ? de : se)->member].eligible = 0;
+        recs[(de ? de : se)->member].eligible = 0;
         return 1;
       }
       if (de && se) {
-        ir_sroa_rec_add_partner(*recs, de->member, se->member);
-        ir_sroa_rec_add_partner(*recs, se->member, de->member);
+        ir_sroa_rec_add_partner(recs, de->member, se->member);
+        ir_sroa_rec_add_partner(recs, se->member, de->member);
       } else {
-        (*recs)[(de ? de : se)->member].comp_fail = 1;
+        recs[(de ? de : se)->member].comp_fail = 1;
       }
       return 1;
     }
@@ -729,19 +726,19 @@ static int ir_sroa_collect_records(IRFunction *function, size_t i,
   if (ir_operand_is_symbol(&insn->dest)) {
     const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->dest.name);
     if (m) {
-      (*recs)[m->member].eligible = 0;
+      recs[m->member].eligible = 0;
     }
   }
   if (ir_operand_is_symbol(&insn->lhs)) {
     const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->lhs.name);
     if (m) {
-      (*recs)[m->member].eligible = 0;
+      recs[m->member].eligible = 0;
     }
   }
   if (ir_operand_is_symbol(&insn->rhs)) {
     const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->rhs.name);
     if (m) {
-      (*recs)[m->member].eligible = 0;
+      recs[m->member].eligible = 0;
     }
   }
   for (size_t a = 0; a < insn->argument_count; a++) {
@@ -749,7 +746,7 @@ static int ir_sroa_collect_records(IRFunction *function, size_t i,
     if (arg->kind == IR_OPERAND_SYMBOL && arg->name) {
       const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, arg->name);
       if (m) {
-        (*recs)[m->member].eligible = 0;
+        recs[m->member].eligible = 0;
       }
     }
   }
@@ -809,8 +806,7 @@ static int ir_sroa_round(IRFunction *function, int *changed,
   }
 
   for (size_t i = 0; i < function->instruction_count; i++) {
-    if (!ir_sroa_collect_records(function, i, &recs, &rec_count, &rec_cap,
-                                 &rec_hash, &addr_hash)) {
+    if (!ir_sroa_collect_records(function, i, recs, &rec_hash, &addr_hash)) {
       return 1;
     }
   }
@@ -833,8 +829,7 @@ static int ir_sroa_round(IRFunction *function, int *changed,
   }
 
   for (size_t i = 0; i < function->instruction_count; i++) {
-    if (!ir_sroa_scan_uses(function, i, recs, rec_count, &rec_hash,
-                           &addr_hash)) {
+    if (!ir_sroa_scan_uses(function, i, recs, &addr_hash)) {
       return 1;
     }
   }
