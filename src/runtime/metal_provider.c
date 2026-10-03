@@ -51,7 +51,21 @@ struct MettleMetal {
   MetalPipeline *pipelines;
   size_t pipeline_count;
   size_t pipeline_capacity;
+  id command;
+  id encoder;
+  size_t batched;
+  char first_kernel[128];
+  char last_kernel[128];
+  id *spills;
+  size_t spill_count;
+  size_t spill_capacity;
+  id *resident;
+  size_t resident_capacity;
+  int synchronous;
+  char deferred_error[512];
 };
+
+#define METAL_BATCH_LIMIT 512
 
 static void put_error(char *error, size_t error_size, const char *text) {
   if (error && error_size) {
@@ -113,8 +127,66 @@ MettleMetal *mettle_metal_open(char *error, size_t error_size) {
   metal->queue = SEND0(id, metal->device, "newCommandQueue");
   snprintf(metal->device_name, sizeof(metal->device_name), "%s",
            ns_text(SEND0(id, metal->device, "name")));
+  metal->synchronous = getenv("METTLE_METAL_SYNC") &&
+                       getenv("METTLE_METAL_SYNC")[0] == '1';
   objc_autoreleasePoolPop(pool);
   return metal;
+}
+
+static void release_spills(MettleMetal *metal) {
+  for (size_t i = 0; i < metal->spill_count; i++) {
+    release(metal->spills[i]);
+  }
+  metal->spill_count = 0;
+}
+
+int mettle_metal_sync(MettleMetal *metal, char *error, size_t error_size) {
+  long status;
+  int ok = 1;
+  void *pool;
+  if (!metal) {
+    return 1;
+  }
+  if (metal->deferred_error[0]) {
+    put_error(error, error_size, metal->deferred_error);
+    metal->deferred_error[0] = '\0';
+    ok = 0;
+  }
+  if (!metal->command) {
+    return ok;
+  }
+  pool = objc_autoreleasePoolPush();
+  SEND0(void, metal->encoder, "endEncoding");
+  SEND0(void, metal->command, "commit");
+  SEND0(void, metal->command, "waitUntilCompleted");
+  status = SEND0(long, metal->command, "status");
+  if (status != 4 && ok) {
+    if (error && error_size) {
+      snprintf(error, error_size,
+               "a Metal command buffer of %lu launches (%s through %s) ended "
+               "with status %ld: %s",
+               (unsigned long)metal->batched, metal->first_kernel,
+               metal->last_kernel, status,
+               ns_error_text(SEND0(id, metal->command, "error")));
+    }
+    ok = 0;
+  }
+  release(metal->encoder);
+  release(metal->command);
+  metal->encoder = NULL;
+  metal->command = NULL;
+  metal->batched = 0;
+  release_spills(metal);
+  objc_autoreleasePoolPop(pool);
+  return ok;
+}
+
+static void sync_deferred(MettleMetal *metal) {
+  char text[512];
+  if (metal->command && !mettle_metal_sync(metal, text, sizeof(text)) &&
+      !metal->deferred_error[0]) {
+    snprintf(metal->deferred_error, sizeof(metal->deferred_error), "%s", text);
+  }
 }
 
 const char *mettle_metal_device_name(const MettleMetal *metal) {
@@ -132,6 +204,7 @@ int mettle_metal_load(MettleMetal *metal, const char *source, size_t length,
     put_error(error, error_size, "no Metal device or source");
     return 0;
   }
+  sync_deferred(metal);
   text = (char *)malloc(length + 1);
   if (!text) {
     put_error(error, error_size, "out of memory loading Metal source");
@@ -259,6 +332,7 @@ void mettle_metal_free(MettleMetal *metal, uint64_t address) {
   if (!metal) {
     return;
   }
+  sync_deferred(metal);
   for (size_t i = 0; i < metal->buffer_count; i++) {
     if (metal->buffers[i].address == address) {
       release(metal->buffers[i].buffer);
@@ -387,12 +461,9 @@ int mettle_metal_launch(MettleMetal *metal, const char *kernel,
                         size_t threadgroup_bytes, char *error,
                         size_t error_size) {
   MetalPipeline *pipeline;
-  id command;
-  id encoder;
   id spill = NULL;
   MTLSize groups;
   MTLSize threads;
-  long status;
   void *pool;
   int ok = 1;
   unsigned long long block_threads;
@@ -417,32 +488,67 @@ int mettle_metal_launch(MettleMetal *metal, const char *kernel,
     objc_autoreleasePoolPop(pool);
     return 0;
   }
-  command = SEND0(id, metal->queue, "commandBuffer");
-  encoder = SEND0(id, command, "computeCommandEncoder");
+  if (metal->spill_count == metal->spill_capacity) {
+    size_t next = metal->spill_capacity ? metal->spill_capacity * 2 : 16;
+    id *grown = (id *)realloc(metal->spills, next * sizeof(id));
+    if (!grown) {
+      put_error(error, error_size, "out of memory batching Metal launches");
+      objc_autoreleasePoolPop(pool);
+      return 0;
+    }
+    metal->spills = grown;
+    metal->spill_capacity = next;
+  }
+  if (metal->buffer_count > metal->resident_capacity) {
+    size_t next = metal->buffer_count * 2;
+    id *grown = (id *)realloc(metal->resident, next * sizeof(id));
+    if (!grown) {
+      put_error(error, error_size, "out of memory batching Metal launches");
+      objc_autoreleasePoolPop(pool);
+      return 0;
+    }
+    metal->resident = grown;
+    metal->resident_capacity = next;
+  }
+  if (!metal->command) {
+    metal->command = SEND0(id, metal->queue, "commandBuffer");
+    SEND0(id, metal->command, "retain");
+    metal->encoder = SEND0(id, metal->command, "computeCommandEncoder");
+    SEND0(id, metal->encoder, "retain");
+    snprintf(metal->first_kernel, sizeof(metal->first_kernel), "%s", kernel);
+  } else {
+    ((void (*)(id, SEL, NSUInteger))msg_send())(
+        metal->encoder, SEL_OF("memoryBarrierWithScope:"), (NSUInteger)1);
+  }
+  snprintf(metal->last_kernel, sizeof(metal->last_kernel), "%s", kernel);
   ((void (*)(id, SEL, id))msg_send())(
-      encoder, SEL_OF("setComputePipelineState:"), pipeline->pipeline);
+      metal->encoder, SEL_OF("setComputePipelineState:"), pipeline->pipeline);
   if (args && args_size) {
     if (args_size <= 4096) {
       ((void (*)(id, SEL, const void *, NSUInteger, NSUInteger))msg_send())(
-          encoder, SEL_OF("setBytes:length:atIndex:"), args,
+          metal->encoder, SEL_OF("setBytes:length:atIndex:"), args,
           (NSUInteger)args_size, (NSUInteger)0);
     } else {
       spill = ((id(*)(id, SEL, const void *, NSUInteger, NSUInteger))msg_send())(
           metal->device, SEL_OF("newBufferWithBytes:length:options:"), args,
           (NSUInteger)args_size, (NSUInteger)0);
+      metal->spills[metal->spill_count++] = spill;
       ((void (*)(id, SEL, id, NSUInteger, NSUInteger))msg_send())(
-          encoder, SEL_OF("setBuffer:offset:atIndex:"), spill, (NSUInteger)0,
-          (NSUInteger)0);
+          metal->encoder, SEL_OF("setBuffer:offset:atIndex:"), spill,
+          (NSUInteger)0, (NSUInteger)0);
     }
   }
-  for (size_t i = 0; i < metal->buffer_count; i++) {
-    ((void (*)(id, SEL, id, NSUInteger))msg_send())(
-        encoder, SEL_OF("useResource:usage:"), metal->buffers[i].buffer,
-        (NSUInteger)3);
+  if (metal->buffer_count) {
+    for (size_t i = 0; i < metal->buffer_count; i++) {
+      metal->resident[i] = metal->buffers[i].buffer;
+    }
+    ((void (*)(id, SEL, const id *, NSUInteger, NSUInteger))msg_send())(
+        metal->encoder, SEL_OF("useResources:count:usage:"), metal->resident,
+        (NSUInteger)metal->buffer_count, (NSUInteger)3);
   }
   if (threadgroup_bytes) {
     ((void (*)(id, SEL, NSUInteger, NSUInteger))msg_send())(
-        encoder, SEL_OF("setThreadgroupMemoryLength:atIndex:"),
+        metal->encoder, SEL_OF("setThreadgroupMemoryLength:atIndex:"),
         (NSUInteger)((threadgroup_bytes + 15) / 16 * 16), (NSUInteger)0);
   }
   groups.width = grid[0];
@@ -452,21 +558,13 @@ int mettle_metal_launch(MettleMetal *metal, const char *kernel,
   threads.height = block[1];
   threads.depth = block[2];
   ((void (*)(id, SEL, MTLSize, MTLSize))msg_send())(
-      encoder, SEL_OF("dispatchThreadgroups:threadsPerThreadgroup:"), groups,
-      threads);
-  SEND0(void, encoder, "endEncoding");
-  SEND0(void, command, "commit");
-  SEND0(void, command, "waitUntilCompleted");
-  status = SEND0(long, command, "status");
-  if (status != 4) {
-    if (error && error_size) {
-      snprintf(error, error_size, "'%s' ended with Metal status %ld: %s",
-               kernel, status, ns_error_text(SEND0(id, command, "error")));
-    }
-    ok = 0;
-  }
-  release(spill);
+      metal->encoder, SEL_OF("dispatchThreadgroups:threadsPerThreadgroup:"),
+      groups, threads);
+  metal->batched++;
   objc_autoreleasePoolPop(pool);
+  if (metal->synchronous || metal->batched >= METAL_BATCH_LIMIT) {
+    ok = mettle_metal_sync(metal, error, error_size);
+  }
   return ok;
 }
 
@@ -474,6 +572,9 @@ void mettle_metal_close(MettleMetal *metal) {
   if (!metal) {
     return;
   }
+  sync_deferred(metal);
+  free(metal->spills);
+  free(metal->resident);
   for (size_t i = 0; i < metal->buffer_count; i++) {
     release(metal->buffers[i].buffer);
   }

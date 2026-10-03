@@ -23,6 +23,7 @@ extern fn __mtlc_metal_launch_checked(f: int64, gx: int32, gy: int32, gz: int32,
 extern fn __mtlc_metal_note(text: cstring) = "mettle_metal_rt_note";
 extern fn __mtlc_metal_fail(first: cstring, second: cstring, third: cstring) = "mettle_metal_rt_fail";
 extern fn __mtlc_metal_now_ms() -> float64 = "mettle_metal_rt_now_ms";
+extern fn __mtlc_metal_sync() -> int32 = "mettle_metal_rt_sync";
 
 @inline fn __mtlc_metal_cstr(s: string) -> cstring { return s.chars; }
 
@@ -175,11 +176,13 @@ export fn gpu_host_mapped_malloc(bytes: int64, dev_ptr_out: int64*) -> uint8* {
 @inline export fn gpu_to_host(dst: uint8*, src: int64, bytes: int64) -> int32 {
   return __mtlc_metal_to_host(dst, src, bytes);
 }
-@inline export fn gpu_sync() -> int32 { return 0; }
+@inline export fn gpu_sync() -> int32 { return __mtlc_metal_sync(); }
 
 export fn gpu_stream_create() -> int64 { return 1; }
 @inline export fn gpu_stream_destroy(stream: int64) -> int32 { return 0; }
-@inline export fn gpu_stream_sync(stream: int64) -> int32 { return 0; }
+@inline export fn gpu_stream_sync(stream: int64) -> int32 {
+  return __mtlc_metal_sync();
+}
 @inline export fn gpu_to_device_async(dst: int64, src: uint8*, bytes: int64,
                               stream: int64) -> int32 {
   return __mtlc_metal_to_device(dst, src, bytes);
@@ -201,10 +204,13 @@ export fn gpu_event_create() -> int64 {
 @inline export fn gpu_event_destroy(event: int64) -> int32 { return 0; }
 export fn gpu_event_record(event: int64, stream: int64) -> int32 {
   if (event < 1 || event > (int64)g_metal_event_count) { return 1; }
+  var status: int32 = __mtlc_metal_sync();
   g_metal_event_ms[event - 1] = __mtlc_metal_now_ms();
-  return 0;
+  return status;
 }
-@inline export fn gpu_event_sync(event: int64) -> int32 { return 0; }
+@inline export fn gpu_event_sync(event: int64) -> int32 {
+  return __mtlc_metal_sync();
+}
 @inline export fn gpu_stream_wait_event(stream: int64, event: int64) -> int32 {
   return 0;
 }
@@ -285,5 +291,7 @@ export fn mtlc_gpu_kernel_handle(name: cstring) -> int64 {
 
 export fn gpu_launch_sync(f: int64, grid: int32, block: int32,
                                 params: int64*, nargs: int32) -> int32 {
-  return gpu_launch(f, grid, block, params, nargs);
+  var rc: int32 = gpu_launch(f, grid, block, params, nargs);
+  if (rc != 0) { return rc; }
+  return __mtlc_metal_sync();
 }

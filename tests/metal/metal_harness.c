@@ -143,7 +143,8 @@ static int native_dispatch(Backend *backend, const char *kernel,
                            size_t error_size) {
   return mettle_metal_launch((MettleMetal *)backend->state, kernel, grid, block,
                              args, args_size, threadgroup_bytes, error,
-                             error_size);
+                             error_size) &&
+         mettle_metal_sync((MettleMetal *)backend->state, error, error_size);
 }
 
 static void native_destroy(Backend *backend) {

@@ -37,6 +37,8 @@ int64_t mettle_metal_property(MettleMetal *metal, int which);
 size_t mettle_metal_span(MettleMetal *metal, uint64_t address);
 uint64_t mettle_metal_address_of(MettleMetal *metal, const void *host);
 
+int mettle_metal_sync(MettleMetal *metal, char *error, size_t error_size);
+
 int mettle_metal_launch(MettleMetal *metal, const char *kernel,
                         const uint32_t grid[3], const uint32_t block[3],
                         const void *args, size_t args_size,

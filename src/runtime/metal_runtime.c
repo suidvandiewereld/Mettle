@@ -53,12 +53,33 @@ void mettle_metal_rt_set_version(int32_t major, int32_t minor) {
   g_version_minor = minor;
 }
 
+int32_t mettle_metal_rt_sync(void) {
+  if (!g_metal) {
+    return 0;
+  }
+  if (!mettle_metal_sync(g_metal, g_error, sizeof(g_error))) {
+    fprintf(stderr, "mettle: Metal: %s\n", g_error);
+    fflush(stderr);
+    return 1;
+  }
+  return 0;
+}
+
+static void rt_finish(void) {
+  if (g_metal) {
+    mettle_metal_rt_sync();
+  }
+}
+
 int32_t mettle_metal_rt_init(void) {
   if (g_metal) {
     return 1;
   }
   rt_read_version();
   g_metal = mettle_metal_open(g_error, sizeof(g_error));
+  if (g_metal) {
+    atexit(rt_finish);
+  }
   return g_metal ? 1 : 0;
 }
 
@@ -206,6 +227,9 @@ static int rt_span_ok(int64_t address, int64_t bytes, const char *what) {
 
 int32_t mettle_metal_rt_to_device(int64_t dst, const uint8_t *src,
                                   int64_t bytes) {
+  if (mettle_metal_rt_sync() != 0) {
+    return 1;
+  }
   if (!rt_span_ok(dst, bytes, "a copy to the GPU")) {
     return 1;
   }
@@ -216,6 +240,9 @@ int32_t mettle_metal_rt_to_device(int64_t dst, const uint8_t *src,
 }
 
 int32_t mettle_metal_rt_to_host(uint8_t *dst, int64_t src, int64_t bytes) {
+  if (mettle_metal_rt_sync() != 0) {
+    return 1;
+  }
   if (!rt_span_ok(src, bytes, "a copy from the GPU")) {
     return 1;
   }
