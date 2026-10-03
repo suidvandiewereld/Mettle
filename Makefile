@@ -73,6 +73,8 @@ CODEGEN_SOURCES = \
 	$(SRCDIR)/codegen/gpu_detect.c \
 	$(SRCDIR)/codegen/ptx_emitter.c \
 	$(SRCDIR)/codegen/spirv_emitter.c \
+	$(SRCDIR)/codegen/msl_emitter.c \
+	$(SRCDIR)/codegen/gpu_structure.c \
 	$(SRCDIR)/codegen/target.c \
 	$(SRCDIR)/codegen/flat_emitter.c \
 	$(wildcard $(SRCDIR)/codegen/asm/*.c) \

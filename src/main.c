@@ -12,6 +12,7 @@
 #include "codegen/gpu_detect.h"
 #include "codegen/ptx_emitter.h"
 #include "codegen/spirv_emitter.h"
+#include "codegen/msl_emitter.h"
 #include "codegen/target.h"
 #include "codegen/flat_emitter.h"
 #include "linker/elf_image.h"
@@ -3667,6 +3668,22 @@ static DriverFlagResult parse_flag_checks(CompilerOptions *options,
     options->report_sms = sms;
   } else if (strcmp(argv[i], "--emit-spirv") == 0) {
     options->emit_spirv = 1;
+  } else if (strcmp(argv[i], "--emit-metal") == 0) {
+    options->emit_metal = 1;
+  } else if (strncmp(argv[i], "--metal-version=", 16) == 0) {
+    MslEmitOptions metal_options;
+    msl_emit_default_options(&metal_options);
+    if (!msl_parse_version(argv[i] + 16, &metal_options)) {
+      fprintf(stderr,
+              "Error: --metal-version expects 3.1, 3.2, 4.0 or 4.1 (got "
+              "'%s')\n",
+              argv[i] + 16);
+      return DRIVER_FLAG_FAILED;
+    }
+    options->metal_version_major = metal_options.version_major;
+    options->metal_version_minor = metal_options.version_minor;
+  } else if (strcmp(argv[i], "--metal-fast-math") == 0) {
+    options->metal_fast_math = 1;
   } else {
     return DRIVER_FLAG_UNMATCHED;
   }
@@ -5101,13 +5118,13 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
   IROptimizeOptions ir_optimize_options = {0};
   compile_publish_optimizer_costs();
   int target_neutral = options->emit_arm64 || options->emit_ptx ||
-                       options->emit_spirv ||
+                       options->emit_spirv || options->emit_metal ||
                        compile_targets_arm64_object(options);
   if (options->ml_opt && target_neutral) {
     fprintf(stderr,
             "Error: --ml-opt is not target-neutral and cannot be combined "
-            "with --emit-arm64, --emit-arm64-obj, --emit-ptx, or "
-            "--emit-spirv%s\n",
+            "with --emit-arm64, --emit-arm64-obj, --emit-ptx, "
+            "--emit-spirv, or --emit-metal%s\n",
             compile_targets_arm64_object(options) && !options->emit_arm64_obj
                 ? " (this host emits AArch64 objects)"
                 : "");
@@ -5152,14 +5169,14 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
   ir_optimize_options.whole_program = options->building_executable;
   ir_optimize_options.target_neutral_only = target_neutral;
   ir_optimize_options.gpu_device_only =
-      options->emit_ptx || options->emit_spirv;
+      options->emit_ptx || options->emit_spirv || options->emit_metal;
   int opt_ok = ir_optimize_program(ir_program, &ir_optimize_options);
   free(global_consts);
   if (opt_ok) {
     ir_program_drop_rewrite_rules(ir_program);
   }
   if (opt_ok && options->safe && !options->emit_ptx && !options->emit_spirv &&
-      !ir_safety_retire_dangling_notes(ir_program)) {
+      !options->emit_metal && !ir_safety_retire_dangling_notes(ir_program)) {
     mettle_compiler_ice_report("Failed to retire --safe stack notes", NULL);
     return 0;
   }
@@ -5554,6 +5571,56 @@ static int compile_emit_spirv(IRProgram *ir_program, ASTNode *program,
   return 0;
 }
 
+static int compile_emit_metal(IRProgram *ir_program, ASTNode *program,
+                              const CompilerOptions *options,
+                              const char *input_filename,
+                              const char *output_filename,
+                              CompilerProfile *profile) {
+  FILE *metal_out;
+  char *metal_err = NULL;
+  MslEmitOptions metal_options;
+  int ok;
+
+  msl_emit_default_options(&metal_options);
+  if (options->metal_version_major) {
+    metal_options.version_major = options->metal_version_major;
+    metal_options.version_minor = options->metal_version_minor;
+  }
+  metal_options.fast_math = options->metal_fast_math;
+  metal_options.gpu_checks = options->gpu_checks;
+  if (!compile_optimize_device_ir(ir_program, program, options, profile)) {
+    return 1;
+  }
+  if (options->dump_ir) {
+    compile_dump_device_ir(ir_program, output_filename);
+  }
+  metal_out = fopen(output_filename, "w");
+  if (!metal_out) {
+    fprintf(stderr, "Error: could not open Metal output '%s'\n",
+            output_filename);
+    return 1;
+  }
+  ok = msl_emit_program(ir_program, metal_out, &metal_options, &metal_err);
+  fclose(metal_out);
+  if (!ok) {
+    fprintf(stderr, "Error: Metal emission failed: %s\n  --> %s\n",
+            metal_err ? metal_err : "unknown",
+            input_filename ? input_filename : "?");
+    free(metal_err);
+    remove(output_filename);
+    return 1;
+  }
+  if (options->explain && options->optimize) {
+    ir_explain_target_flush("Metal");
+  }
+  printf("Generated Metal: %s\n", output_filename);
+  if (!compile_write_kernel_declarations(program, options, input_filename,
+                                         output_filename)) {
+    return 1;
+  }
+  return 0;
+}
+
 static int compile_emit_arm64(IRProgram *ir_program, ASTNode *program,
                               const CompilerOptions *options,
                               const char *output_filename) {
@@ -5874,8 +5941,9 @@ static const char *compile_session_open(CompileContext *ctx) {
   ctx->parser =
       parser_create_with_error_reporter(ctx->lexer, ctx->error_reporter);
   if (ctx->parser) {
-    ctx->parser->gpu_mode =
-        ctx->options->emit_ptx || ctx->options->emit_spirv;
+    ctx->parser->gpu_mode = ctx->options->emit_ptx ||
+                            ctx->options->emit_spirv ||
+                            ctx->options->emit_metal;
   }
   ctx->type_checker = type_checker_create_with_error_reporter(
       ctx->symbol_table, ctx->error_reporter);
@@ -5886,8 +5954,9 @@ static const char *compile_session_open(CompileContext *ctx) {
   if (!ctx->parser || !ctx->type_checker) {
     return "Failed to initialize parser or type checker";
   }
-  ctx->type_checker->device_module =
-      ctx->options->emit_ptx || ctx->options->emit_spirv;
+  ctx->type_checker->device_module = ctx->options->emit_ptx ||
+                                     ctx->options->emit_spirv ||
+                                     ctx->options->emit_metal;
 
   if (compile_wants_debug_info(ctx->options)) {
     ctx->debug_info =
@@ -6161,7 +6230,8 @@ static int compile_stage_lowering_modes(CompileContext *ctx) {
     }
   }
   ir_lowering_set_explain(options->explain && options->optimize &&
-                          !options->emit_ptx && !options->emit_spirv);
+                          !options->emit_ptx && !options->emit_spirv &&
+                          !options->emit_metal);
   ir_lowering_set_refinement_checks(
       options->check_proofs || options->test_mode ||
       options->trace_function != NULL || ir_verify_enabled());
@@ -6177,12 +6247,12 @@ static int compile_stage_lower_ir(CompileContext *ctx) {
   CompilerOptions *options = ctx->options;
   int emit_runtime_checks =
       (options->release || options->emit_ptx || options->emit_spirv ||
-       mtlc_target()->freestanding)
+       options->emit_metal || mtlc_target()->freestanding)
           ? 0
           : 1;
   int ir_ok = 0;
-  ctx->emit_safety_checks =
-      options->safe && !options->emit_ptx && !options->emit_spirv;
+  ctx->emit_safety_checks = options->safe && !options->emit_ptx &&
+                            !options->emit_spirv && !options->emit_metal;
   compiler_set_phase(PROFILE_PHASE_IR_LOWERING);
   ctx->phase_start = compiler_profile_begin(&ctx->profile);
   ir_ok = compile_lower_to_ir(ctx->program, ctx->type_checker,
@@ -6449,6 +6519,16 @@ static int backend_spirv_run(CompileContext *ctx) {
                             ctx->options, ctx->output_filename, &ctx->profile);
 }
 
+static int backend_metal_selected(const CompilerOptions *options) {
+  return options->emit_metal;
+}
+
+static int backend_metal_run(CompileContext *ctx) {
+  return compile_emit_metal(ctx->ir_program, ctx->program, ctx->options,
+                            ctx->input_filename, ctx->output_filename,
+                            &ctx->profile);
+}
+
 static int backend_arm64_selected(const CompilerOptions *options) {
   return options->emit_arm64;
 }
@@ -6461,6 +6541,7 @@ static int backend_arm64_run(CompileContext *ctx) {
 static const MtlcBackend MTLC_BACKENDS[] = {
     {"PTX", MTLC_BACKEND_DEVICE, backend_ptx_selected, backend_ptx_run},
     {"SPIR-V", MTLC_BACKEND_DEVICE, backend_spirv_selected, backend_spirv_run},
+    {"Metal", MTLC_BACKEND_DEVICE, backend_metal_selected, backend_metal_run},
     {"AArch64", MTLC_BACKEND_HOST, backend_arm64_selected, backend_arm64_run},
 };
 
@@ -7072,6 +7153,9 @@ void print_usage(const char *program_name) {
          "                      default); enables measured resident/replay variants\n"
          "                      without changing source or shared IR\n");
   printf("  --emit-spirv        Emit declared kernels as OpenCL SPIR-V\n");
+  printf("  --emit-metal        Emit declared kernels as Metal Shading Language\n");
+  printf("  --metal-version=V   Metal language version: 3.1, 3.2 (default), 4.0, 4.1\n");
+  printf("  --metal-fast-math   Let Metal reassociate and contract float math\n");
   printf("  --linker <mode>     Linker backend: auto, internal, gcc, or msvc "
          "(default: internal with --build, otherwise %s)\n",
          linker_mode_name(LINKER_MODE_AUTO));

@@ -44,6 +44,10 @@ typedef struct {
   int report_launches;
   int report_gpu_types;
   int emit_spirv;
+  int emit_metal;
+  int metal_version_major;
+  int metal_version_minor;
+  int metal_fast_math;
   int emit_arm64;
   int emit_arm64_obj;
   int optimize;
