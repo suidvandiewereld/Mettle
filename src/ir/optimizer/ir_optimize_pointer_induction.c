@@ -316,7 +316,7 @@ static const char *ir_ptr_lookup_addr_temp(const IRPtrBaseBinding *bindings,
 
 static int ir_ptr_induction_rewrite_instruction(
     IRInstruction *ins, const IRPtrBaseBinding *bindings, size_t binding_count,
-    const char *iv_symbol, const char *end_ptr) {
+    const char *iv_symbol, const char *bound_symbol, const char *end_ptr) {
   if (!ins) {
     return 0;
   }
@@ -342,7 +342,8 @@ static int ir_ptr_induction_rewrite_instruction(
   }
   if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "<") == 0 &&
       end_ptr && binding_count > 0 &&
-      ir_operand_is_symbol_named(&ins->lhs, iv_symbol)) {
+      ir_operand_is_symbol_named(&ins->lhs, iv_symbol) &&
+      ir_operand_is_symbol_named(&ins->rhs, bound_symbol)) {
     ir_operand_destroy(&ins->lhs);
     ins->lhs = ir_operand_symbol(bindings[0].ptr_p);
     ir_operand_destroy(&ins->rhs);
@@ -681,8 +682,8 @@ static int ir_ptr_emit_loop(IRFunction *function, size_t header_index,
                             size_t body_start, size_t body_end,
                             const IRPtrBaseBinding *bindings,
                             size_t binding_count, const char *iv_symbol,
-                            const char *end_ptr, int keep_iv,
-                            IRInstructionVector *vector) {
+                            const char *bound_symbol, const char *end_ptr,
+                            int keep_iv, IRInstructionVector *vector) {
   for (size_t i = header_index; i < function->instruction_count; i++) {
     IRInstruction rewritten = {0};
     if (!ir_clone_instruction_plain(&function->instructions[i], &rewritten)) {
@@ -701,7 +702,7 @@ static int ir_ptr_emit_loop(IRFunction *function, size_t header_index,
     if (i <= jump_index &&
         !ir_ptr_induction_rewrite_instruction(&rewritten, bindings,
                                               binding_count, iv_symbol,
-                                              end_ptr)) {
+                                              bound_symbol, end_ptr)) {
       ir_instruction_destroy_storage(&rewritten);
       return 0;
     }
@@ -819,7 +820,8 @@ static int ir_try_pointer_induction_at(IRFunction *function, size_t header_index
                             bound_symbol, end_ptr, &vector) ||
       !ir_ptr_emit_loop(function, header_index, increment_index,
                         bounds.jump_index, body_start, body_end, bindings,
-                        binding_count, iv_symbol, end_ptr, keep_iv, &vector) ||
+                        binding_count, iv_symbol, bound_symbol, end_ptr,
+                        keep_iv, &vector) ||
       !ir_function_replace_instructions(function, &vector)) {
     ir_instruction_vector_destroy(&vector);
     ir_ptr_bindings_destroy(bindings, binding_count);

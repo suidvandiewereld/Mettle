@@ -1,0 +1,82 @@
+import "std/io";
+import "std/mem";
+
+fn fill(order: int32*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    order[i] = n - 1 - i;
+    i = i + 1;
+  }
+}
+
+fn place(order: int32*, mark: uint8*, n: int32, q: int32) -> int32 {
+  var taken: int32 = 0;
+  var r: int32 = 0;
+  while (r < n) {
+    var cell: int64 = (int64)order[r];
+    if (r < q) {
+      mark[cell] = 1;
+      taken = taken + 1;
+    }
+    r = r + 1;
+  }
+  return taken;
+}
+
+fn count_below(order: int32*, n: int32, q: int32) -> int32 {
+  var hits: int32 = 0;
+  var r: int32 = 0;
+  while (r < n) {
+    var v: int32 = order[r];
+    if (r < q) {
+      hits = hits + v;
+    }
+    if (r < n) {
+      hits = hits + 1;
+    }
+    r = r + 1;
+  }
+  return hits;
+}
+
+fn main() -> int32 {
+  var n: int32 = 128;
+  var q: int32 = 54;
+  var mark: uint8* = (uint8*)malloc((int64)n);
+  var order: int32* = (int32*)malloc((int64)n * 4);
+  if (mark == 0 || order == 0) {
+    println("malloc failed");
+    return 1;
+  }
+  memset(mark, 0, (int64)n);
+  fill(order, n);
+
+  var taken: int32 = place(order, mark, n, q);
+  if (taken != 54) {
+    println("taken = {(int64)taken}, expected 54");
+    return 2;
+  }
+  var c: int32 = 0;
+  while (c < n) {
+    var want: uint8 = 0;
+    if (c >= n - q) {
+      want = 1;
+    }
+    if (mark[c] != want) {
+      println("mark[{(int64)c}] = {(int64)mark[c]}, expected {(int64)want}");
+      return 3;
+    }
+    c = c + 1;
+  }
+
+  var hits: int32 = count_below(order, n, q);
+  if (hits != 5555) {
+    println("hits = {(int64)hits}, expected 5555");
+    return 4;
+  }
+
+  println("ptr_induction_guard OK");
+  free(mark);
+  free(order);
+  return 0;
+}

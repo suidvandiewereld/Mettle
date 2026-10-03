@@ -10180,6 +10180,40 @@ foreach ($relFlag in @($true, $false)) {
   }
 }
 
+foreach ($relFlag in @($true, $false)) {
+  $total++
+  $variant = if ($relFlag) { "release" } else { "debug" }
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "test_opt_ptr_induction_guard_$variant.exe"
+    $buildArgs = @("--build", "--emit-obj", "--linker", "internal")
+    if ($relFlag) { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_opt_ptr_induction_guard.mettle", "-o", $exePath)
+
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "ptr-induction guard build ($variant) failed: $buildOut"
+    }
+    if (-not (Test-Path $exePath)) {
+      throw "ptr-induction guard build ($variant) did not produce an executable"
+    }
+
+    $runOut = & $exePath 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "ptr-induction guard ($variant) reported a mismatch (exit $LASTEXITCODE): $runOut"
+    }
+    if ($runOut -notmatch "ptr_induction_guard OK") {
+      throw "ptr-induction guard ($variant) did not print OK: $runOut"
+    }
+
+    Write-CaseResult -Name "opt_ptr_induction_guard_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "opt_ptr_induction_guard_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
+
 # MIR loop rotation moves the header test above the header label, so it is only
 # legal when the latch is the sole edge into the header. A Hoare partition's
 # `if (i <= j)` false arm threads straight back to the enclosing `while (i <= j)`
