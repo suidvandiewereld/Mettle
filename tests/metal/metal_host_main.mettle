@@ -136,15 +136,66 @@ fn check_block_sum() -> int32 {
   return 0;
 }
 
+fn check_graph() -> int32 {
+  var n: int32 = 200;
+  var bytes: int64 = (int64)n * 4;
+  var ha: float32* = (float32*)malloc(bytes);
+  var hc: float32* = (float32*)malloc(bytes);
+  var i: int32 = 0;
+  while (i < n) {
+    ha[i] = (float32)i;
+    i = i + 1;
+  }
+  var da: int64 = gpu_malloc(bytes);
+  var dc: int64 = gpu_malloc(bytes);
+  if (da == 0 || dc == 0) { return 51; }
+  if (gpu_to_device(da, (uint8*)ha, bytes) != 0) { return 52; }
+  var stream: int64 = gpu_stream_create();
+  if (gpu_graph_capture_begin(stream) != 0) { return 53; }
+  dispatch host_vadd[work: n](da, da, dc, n) on stream;
+  dispatch host_vadd[work: n](dc, da, da, n) on stream;
+  var graph: int64 = gpu_graph_capture_end(stream);
+  if (graph == 0) { return 54; }
+  if (gpu_to_host((uint8*)hc, da, bytes) != 0) { return 55; }
+  if (hc[7] != (float32)7) { return 56; }
+  var start: int64 = gpu_event_create();
+  var finish: int64 = gpu_event_create();
+  gpu_event_record(start, stream);
+  if (gpu_graph_launch(graph, stream) != 0) { return 57; }
+  if (gpu_graph_launch(graph, stream) != 0) { return 57; }
+  gpu_event_record(finish, stream);
+  gpu_event_sync(finish);
+  var elapsed: float32 = (float32)-1;
+  if (gpu_event_elapsed_ms(start, finish, &elapsed) != 0 || elapsed < (float32)0) {
+    return 58;
+  }
+  if (gpu_to_host((uint8*)hc, da, bytes) != 0) { return 59; }
+  i = 0;
+  while (i < n) {
+    if (hc[i] != (float32)(9 * i)) { return 60; }
+    i = i + 1;
+  }
+  gpu_graph_destroy(graph);
+  if (gpu_graph_launch(graph, stream) == 0) { return 61; }
+  gpu_free(da);
+  gpu_free(dc);
+  return 0;
+}
+
 fn main() -> int32 {
   var path: cstring = getenv("METTLE_METAL_HOST_LIBRARY");
-  if (path == 0) { return 90; }
-  if (gpu_open(path) == 0) { return 91; }
+  if (path == 0) {
+    if (gpu_open_kernels("metal_host_kernels") == 0) { return 91; }
+  } else {
+    if (gpu_open(path) == 0) { return 91; }
+  }
   var status: int32 = check_vadd();
   if (status != 0) { return status; }
   status = check_mixed();
   if (status != 0) { return status; }
   status = check_rows();
   if (status != 0) { return status; }
-  return check_block_sum();
+  status = check_block_sum();
+  if (status != 0) { return status; }
+  return check_graph();
 }
