@@ -576,6 +576,12 @@ static void mettle_crash_print_trace_from_frame(uintptr_t program_counter,
       continue;
     }
 
+#if defined(MT_HOSTED)
+    if (g_runtime_debug_function_count > 0 &&
+        !mettle_crash_find_function(return_address - 1u)) {
+      break;
+    }
+#endif
     mettle_crash_print_frame(index, return_address - 1u);
     current_frame = next_frame;
     index++;

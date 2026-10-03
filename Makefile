@@ -35,6 +35,11 @@ LDFLAGS =
 SRCDIR = src
 OBJDIR = obj
 BINDIR = bin
+HOSTED ?= 0
+ifeq ($(HOSTED),1)
+OBJDIR = obj-hosted
+BINDIR = bin-hosted
+endif
 STDLIBDIR = stdlib
 RUNTIMEDIR = src/runtime
 
@@ -108,12 +113,25 @@ LD ?= ld
 NM ?= nm
 LIBMTLC = $(BINDIR)/libmtlc.a
 TARGET = $(BINDIR)/mettle
+ifeq ($(HOSTED),1)
+HOSTED_HOST_OBJECTS = $(OBJDIR)/runtime/host_libc.o \
+	$(OBJDIR)/runtime/hosted_posix.o
+DEPFILES += $(HOSTED_HOST_OBJECTS:.o=.d)
+endif
 
 .PHONY: all clean test check complexity install install-libmtlc dist-libmtlc bundle-stdlib bundle-runtime libmtlc
 
 all: $(TARGET) bundle-stdlib bundle-runtime
 libmtlc: $(LIBMTLC)
 
+ifeq ($(HOSTED),1)
+$(LIBMTLC): $(BACKEND_OBJECTS) $(HOSTED_HOST_OBJECTS) | $(BINDIR)
+	rm -f $@
+	$(AR) rcs $@ $(BACKEND_OBJECTS) $(HOSTED_HOST_OBJECTS)
+
+$(TARGET): $(FRONTEND_OBJECTS) $(LIBMTLC) | $(BINDIR)
+	$(CC) $(LDFLAGS) -o $@ $(FRONTEND_OBJECTS) $(LIBMTLC) -lm -ldl -pthread
+else
 # The static archive owns every host service it uses. Backend objects call the
 # private mtlc_host surface, which reaches the kernel without libc.
 $(LIBMTLC): $(BACKEND_OBJECTS) $(HOST_RUNTIME_OBJECT) | $(BINDIR)
@@ -136,6 +154,7 @@ $(TARGET): $(HOST_STARTUP_OBJECT) $(FRONTEND_OBJECTS) $(LIBMTLC) | $(BINDIR)
 		echo "error: $@ contains a shared library dependency"; exit 1; fi
 	@if test -n "$$($(NM) -u $@)"; then \
 		echo "error: $@ contains unresolved symbols"; $(NM) -u $@; exit 1; fi
+endif
 
 bundle-stdlib: | $(BINDIR)
 	rm -rf $(BINDIR)/stdlib
@@ -158,6 +177,11 @@ HOST_BACKEND_CFLAGS = -ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables \
 	-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
 	-include $(RUNTIMEDIR)/host_redirect.h
+ifeq ($(HOSTED),1)
+FREESTANDING_CFLAGS += -DMT_HOSTED -fvisibility=hidden
+HOST_BACKEND_CFLAGS = -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -DMT_HOSTED \
+	-include $(RUNTIMEDIR)/host_redirect.h
+endif
 
 $(BACKEND_OBJECTS): CFLAGS += $(HOST_BACKEND_CFLAGS)
 $(FRONTEND_OBJECTS): CFLAGS += $(HOST_BACKEND_CFLAGS)
@@ -170,6 +194,31 @@ $(HOST_RUNTIME_OBJECT): $(RUNTIMEDIR)/freestanding.c \
 $(HOST_STARTUP_OBJECT): $(RUNTIMEDIR)/host_startup.c | $(OBJDIR)
 	$(CC) $(FREESTANDING_CFLAGS) -c $< -o $@
 
+ifeq ($(HOSTED),1)
+bundle-runtime: $(TARGET) | $(BINDIR)
+	rm -rf $(BINDIR)/runtime
+	cp -r $(RUNTIMEDIR) $(BINDIR)/runtime
+	$(CC) $(FREESTANDING_CFLAGS) -Os -c $(RUNTIMEDIR)/freestanding.c -o $(OBJDIR)/runtime/freestanding_core.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -Os -c $(RUNTIMEDIR)/hosted_posix.c -o $(OBJDIR)/runtime/hosted_posix_rt.o
+	$(LD) -r $(OBJDIR)/runtime/freestanding_core.o $(OBJDIR)/runtime/hosted_posix_rt.o -o $(BINDIR)/runtime/freestanding.o
+	$(CC) $(FREESTANDING_CFLAGS) -Os -fPIC -DMT_SHARED_RUNTIME -c $(RUNTIMEDIR)/freestanding.c -o $(OBJDIR)/runtime/freestanding_shared_core.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -Os -fPIC -c $(RUNTIMEDIR)/hosted_posix.c -o $(OBJDIR)/runtime/hosted_posix_shared.o
+	$(LD) -r $(OBJDIR)/runtime/freestanding_shared_core.o $(OBJDIR)/runtime/hosted_posix_shared.o -o $(BINDIR)/runtime/freestanding_shared.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(STDLIBDIR)/tracy_helpers.c -o $(BINDIR)/runtime/tracy_helpers.o
+	cp $(BINDIR)/runtime/tracy_helpers.o $(BINDIR)/runtime/tracy_helpers.obj
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -DMETTLE_ATOMICS_IN_FREESTANDING \
+		-c $(RUNTIMEDIR)/atomics.c -o $(BINDIR)/runtime/atomics.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/crash_handler.c -o $(BINDIR)/runtime/crash_handler.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/safety.c -o $(BINDIR)/runtime/safety.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -fPIC -DMT_SHARED_RUNTIME -c $(RUNTIMEDIR)/safety.c -o $(BINDIR)/runtime/safety_shared.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/debug.c -o $(BINDIR)/runtime/debug.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/profile.c -o $(BINDIR)/runtime/profile.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/parallel.c -o $(BINDIR)/runtime/parallel.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/trace.c -o $(BINDIR)/runtime/trace.o
+	cp $(BINDIR)/runtime/trace.o $(BINDIR)/runtime/trace.obj
+	$(TARGET) --release --emit-obj $(RUNTIMEDIR)/swap.mettle -o $(BINDIR)/runtime/swap.o
+	$(TARGET) --release --emit-obj $(RUNTIMEDIR)/string.mettle -o $(BINDIR)/runtime/string.o
+else
 bundle-runtime: $(HOST_STARTUP_OBJECT) $(TARGET) | $(BINDIR)
 	rm -rf $(BINDIR)/runtime
 	cp -r $(RUNTIMEDIR) $(BINDIR)/runtime
@@ -201,6 +250,7 @@ bundle-runtime: $(HOST_STARTUP_OBJECT) $(TARGET) | $(BINDIR)
 	cp $(OBJDIR)/runtime/parallel.o      $(BINDIR)/runtime/parallel.o
 	cp $(OBJDIR)/runtime/trace.o         $(BINDIR)/runtime/trace.o
 	cp $(OBJDIR)/runtime/trace.o         $(BINDIR)/runtime/trace.obj
+endif
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	@mkdir -p $(dir $@)

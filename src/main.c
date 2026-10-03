@@ -1520,6 +1520,233 @@ static int elf_prepare_runtime_objects(const CompilerOptions *options,
       extra_objects, extra_object_count, on_demand_object_count);
 }
 
+static int g_link_output_ownership_verified;
+
+static int mettle_hosted_runtime_requested(void) {
+  const char *setting = getenv("METTLE_HOSTED_RUNTIME");
+  if (setting && setting[0]) {
+    return setting[0] != '0';
+  }
+#if defined(MT_HOSTED)
+  return 1;
+#else
+  return 0;
+#endif
+}
+
+static char *mettle_hosted_flag(const char *prefix, const char *value) {
+  size_t prefix_length = strlen(prefix);
+  size_t value_length = strlen(value);
+  char *flag = malloc(prefix_length + value_length + 1u);
+  if (flag) {
+    memcpy(flag, prefix, prefix_length);
+    memcpy(flag + prefix_length, value, value_length + 1u);
+  }
+  return flag;
+}
+
+static int mettle_hosted_add_flag(const char **argv_list, size_t *used,
+                                  char **owned, size_t *owned_count,
+                                  const char *prefix, const char *value) {
+  char *flag = mettle_hosted_flag(prefix, value);
+  if (!flag) {
+    return 0;
+  }
+  owned[(*owned_count)++] = flag;
+  argv_list[(*used)++] = flag;
+  return 1;
+}
+
+static int mettle_hosted_add_mode_flags(const char **argv_list, size_t *used,
+                                        char **owned, size_t *owned_count,
+                                        const CompilerOptions *options) {
+  int shared_output = options && options->shared_output;
+
+  argv_list[(*used)++] = shared_output ? "-shared" : "-no-pie";
+  argv_list[(*used)++] = "-Wl,--gc-sections";
+  argv_list[(*used)++] = "-Wl,-z,noexecstack";
+  if (shared_output) {
+    argv_list[(*used)++] = "-Wl,-Bsymbolic";
+    argv_list[(*used)++] = "-Wl,-z,notext";
+  }
+  if (!mettle_elf_keep_symbols(options)) {
+    argv_list[(*used)++] = "-s";
+  }
+  if (!options) {
+    return 1;
+  }
+  if (options->static_link) {
+    argv_list[(*used)++] = "-static";
+  }
+  if (options->export_dynamic) {
+    argv_list[(*used)++] = "-rdynamic";
+  }
+  if (shared_output && options->soname) {
+    return mettle_hosted_add_flag(argv_list, used, owned, owned_count,
+                                  "-Wl,-soname,", options->soname);
+  }
+  if (!shared_output && options->dynamic_linker) {
+    return mettle_hosted_add_flag(argv_list, used, owned, owned_count,
+                                  "-Wl,--dynamic-linker=",
+                                  options->dynamic_linker);
+  }
+  return 1;
+}
+
+static int mettle_hosted_add_library_flags(const char **argv_list,
+                                           size_t *used, char **owned,
+                                           size_t *owned_count,
+                                           const CompilerOptions *options) {
+  size_t i;
+
+  if (!options) {
+    return 1;
+  }
+  for (i = 0u; i < options->library_search_path_count; i++) {
+    if (!mettle_hosted_add_flag(argv_list, used, owned, owned_count, "-L",
+                                options->library_search_paths[i])) {
+      return 0;
+    }
+  }
+  for (i = 0u; i < options->runpath_count; i++) {
+    if (!mettle_hosted_add_flag(argv_list, used, owned, owned_count,
+                                "-Wl,-rpath,", options->runpaths[i])) {
+      return 0;
+    }
+  }
+  for (i = 0u; i < options->shared_library_count; i++) {
+    const char *name = options->shared_libraries[i];
+    if (strchr(name, '/')) {
+      argv_list[(*used)++] = name;
+    } else if (!mettle_hosted_add_flag(argv_list, used, owned, owned_count,
+                                       "-l", name)) {
+      return 0;
+    }
+  }
+  for (i = 0u; i < options->link_argument_count; i++) {
+    const char *argument = options->link_arguments[i];
+    if (argument && argument[0]) {
+      argv_list[(*used)++] = argument;
+    }
+  }
+  return 1;
+}
+
+static int mettle_link_elf_hosted(const char *object_filename,
+                                  const char *executable_filename,
+                                  const CompilerOptions *options,
+                                  const char *runtime_directory) {
+  char *crash_handler_object = NULL;
+  char *profile_object = NULL;
+  char *freestanding_object = NULL;
+  char *extra_objects[16];
+  size_t extra_object_count = 0u;
+  size_t on_demand_object_count = 0u;
+  const char *cc = getenv("METTLE_HOSTED_CC");
+  const char **argv_list = NULL;
+  char **owned = NULL;
+  size_t owned_count = 0u;
+  size_t used = 0u;
+  size_t capacity;
+  size_t i;
+  int profile_runtime =
+      options && (compiler_options_use_profile_runtime(options) ||
+                  options->pgo_gen)
+          ? 1
+          : 0;
+  int stack_trace = compiler_options_install_crash_handler(options);
+  int result = 1;
+  char reason[256];
+
+  memset(extra_objects, 0, sizeof(extra_objects));
+  if (!cc || !cc[0]) {
+    cc = "cc";
+  }
+  if (!elf_prepare_runtime_objects(options, object_filename, runtime_directory,
+                                   stack_trace, profile_runtime,
+                                   &freestanding_object, &crash_handler_object,
+                                   &profile_object, extra_objects,
+                                   &extra_object_count,
+                                   &on_demand_object_count)) {
+    goto cleanup;
+  }
+  if (!freestanding_object || access(freestanding_object, F_OK) != 0) {
+    fprintf(stderr,
+            "Error: Required hosted runtime object not found in '%s'\n",
+            runtime_directory ? runtime_directory : "");
+    goto cleanup;
+  }
+  if (!elf_append_runtime_helpers(stack_trace, profile_runtime,
+                                  crash_handler_object, profile_object,
+                                  extra_objects, &extra_object_count)) {
+    goto cleanup;
+  }
+
+  capacity = 24u + extra_object_count +
+             (options ? options->link_argument_count +
+                            options->shared_library_count +
+                            options->library_search_path_count +
+                            options->runpath_count
+                      : 0u);
+  argv_list = calloc(capacity, sizeof(*argv_list));
+  owned = calloc(capacity, sizeof(*owned));
+  if (!argv_list || !owned) {
+    fprintf(stderr, "Error: Failed to allocate the hosted link command\n");
+    goto cleanup;
+  }
+
+  argv_list[used++] = cc;
+  if (!mettle_hosted_add_mode_flags(argv_list, &used, owned, &owned_count,
+                                    options)) {
+    goto cleanup;
+  }
+  argv_list[used++] = freestanding_object;
+  argv_list[used++] = object_filename;
+  for (i = 0u; i < extra_object_count; i++) {
+    if (extra_objects[i]) {
+      argv_list[used++] = extra_objects[i];
+    }
+  }
+  argv_list[used++] = "-o";
+  argv_list[used++] = executable_filename;
+  if (!mettle_hosted_add_library_flags(argv_list, &used, owned, &owned_count,
+                                       options)) {
+    goto cleanup;
+  }
+  argv_list[used++] = "-pthread";
+  argv_list[used++] = "-ldl";
+  argv_list[used] = NULL;
+
+  if (mettle_run_process(cc, argv_list) != 0) {
+    fprintf(stderr, "Error: %s failed to link the hosted executable '%s'\n",
+            cc, executable_filename);
+    goto cleanup;
+  }
+  if (!mettle_verify_owned_dynamic_executable(executable_filename, reason,
+                                              sizeof(reason))) {
+    fprintf(stderr, "Error: Refusing linked output '%s': %s\n",
+            executable_filename, reason);
+    remove(executable_filename);
+    goto cleanup;
+  }
+  g_link_output_ownership_verified = 1;
+  result = 0;
+
+cleanup:
+  for (i = 0u; i < owned_count; i++) {
+    free(owned[i]);
+  }
+  free(owned);
+  free(argv_list);
+  for (i = 0u; i < on_demand_object_count; i++) {
+    free(extra_objects[i]);
+  }
+  free(crash_handler_object);
+  free(profile_object);
+  free(freestanding_object);
+  return result;
+}
+
 static int mettle_link_elf_executable(const char *object_filename,
                                       const char *executable_filename,
                                       const CompilerOptions *options,
@@ -1540,6 +1767,11 @@ static int mettle_link_elf_executable(const char *object_filename,
           ? 1
           : 0;
   int stack_trace = compiler_options_install_crash_handler(options);
+
+  if (mettle_hosted_runtime_requested()) {
+    return mettle_link_elf_hosted(object_filename, executable_filename,
+                                  options, runtime_directory);
+  }
 
   memset(extra_objects, 0, sizeof(extra_objects));
 

@@ -53,7 +53,10 @@ typedef struct MtFile {
 static MtFile mt_stdin_file = {0, MT_FILE_STANDARD | MT_FILE_READ, 0, 0, 0, 0, 0, 0, 0};
 static MtFile mt_stdout_file = {1, MT_FILE_STANDARD | MT_FILE_WRITE, 0, 0, 0, 0, 0, 0, 0};
 static MtFile mt_stderr_file = {2, MT_FILE_STANDARD | MT_FILE_WRITE, 0, 0, 0, 0, 0, 0, 0};
-#if defined(_WIN32) || defined(MT_SHARED_RUNTIME)
+#if defined(MT_HOSTED)
+#include "hosted_posix.h"
+#define mt_errno_value (*mt_hosted_errno_location())
+#elif defined(_WIN32) || defined(MT_SHARED_RUNTIME)
 static int mt_errno_value;
 #else
 static __thread int mt_errno_value;
@@ -1804,11 +1807,42 @@ int pclose(void *stream) {
 #else
 
 static char **mt_environment;
+#if !defined(MT_HOSTED)
 static char mt_environment_value[32768];
 static char *mt_environment_items[512];
+#endif
 static char *mt_environment_overrides[64];
 static mt_size mt_environment_override_count;
 static char *mt_read_environment_value(const char *name, mt_size name_length);
+
+#if defined(MT_HOSTED)
+
+int atexit(void (*function)(void));
+
+__attribute__((weak)) void mettle_crash_startup(void) {}
+
+__attribute__((weak)) void mettle_profile_report(void) {}
+
+void *mettle_thread_stack_high(void) { return mt_hosted_thread_stack_high(); }
+
+void mettle_rt_startup(mt_i64 argc, char **argv) {
+  mt_hosted_startup((int)argc, argv);
+  mt_environment = argv ? argv + argc + 1 : mt_hosted_environ();
+}
+
+__attribute__((constructor(101))) static void
+mt_hosted_initialize(int argc, char **argv, char **envp) {
+  mettle_rt_startup(argc, argv);
+  if (envp) {
+    mt_environment = envp;
+  }
+  (void)atexit(mt_flush_open_streams);
+  (void)atexit(mettle_profile_report);
+  mettle_crash_startup();
+}
+
+#else
+
 static int mt_initialize_initial_tls(mt_i64 argc, char **argv);
 static int mt_thread_pointer_installed(void);
 #if defined(MTLC_HOST_PREFIX_H)
@@ -1831,6 +1865,8 @@ void mettle_rt_startup(mt_i64 argc, char **argv) {
   mt_raise_stack_limit();
 #endif
 }
+
+#endif
 
 char *getenv(const char *name) {
   mt_size name_length = strlen(name);
@@ -1886,6 +1922,7 @@ unsigned long long mettle_environment_write(char *buffer,
   return used;
 }
 
+#if !defined(MT_HOSTED)
 #if defined(__x86_64__)
 static mt_i64 mt_syscall6(mt_i64 number, mt_i64 a1, mt_i64 a2, mt_i64 a3,
                           mt_i64 a4, mt_i64 a5, mt_i64 a6) {
@@ -2002,6 +2039,7 @@ static mt_i64 mt_syscall6(mt_i64 number, mt_i64 a1, mt_i64 a2, mt_i64 a3,
 #else
 #error The freestanding Mettle runtime needs a syscall table for this target
 #endif
+#endif
 
 #define MT_AT_FDCWD -100
 #define MT_O_RDONLY 0
@@ -2016,7 +2054,7 @@ static mt_i64 mt_syscall6(mt_i64 number, mt_i64 a1, mt_i64 a2, mt_i64 a3,
 #define MT_MAP_PRIVATE 2
 #define MT_MAP_ANONYMOUS 0x20
 
-#if defined(MTLC_HOST_PREFIX_H)
+#if defined(MTLC_HOST_PREFIX_H) && !defined(MT_HOSTED)
 #define MT_RLIMIT_STACK 3
 #define MT_HOST_STACK_BYTES ((mt_u64)64 * 1024 * 1024)
 
@@ -2045,6 +2083,31 @@ static void mt_raise_stack_limit(void) {
   mt_syscall6(MT_SYS_PRLIMIT64, 0, MT_RLIMIT_STACK, (mt_i64)&next, 0, 0, 0);
 }
 #endif
+
+#if defined(MT_HOSTED)
+
+mt_ssize write(int fd, const void *buffer, mt_size count);
+mt_ssize read(int fd, void *buffer, mt_size count);
+int close(int fd);
+int access(const char *path, int mode);
+int mkdir(const char *path, unsigned int mode);
+mt_ssize readlink(const char *path, char *buffer, mt_size size);
+int unlink(const char *path);
+mt_i64 lseek(int fd, mt_i64 offset, int origin);
+int nanosleep(const void *request, void *remaining);
+MT_NORETURN void exit(int status);
+MT_NORETURN void _Exit(int status);
+
+int mettle_install_signal_handler(
+    int signal_number, void (*handler)(int, void *, void *)) {
+  return mt_hosted_install_signal_handler(signal_number, handler);
+}
+
+int mettle_address_is_readable(const void *address, mt_u64 length) {
+  return mt_hosted_address_is_readable(address, length);
+}
+
+#else
 
 static mt_i64 mt_sys_result(mt_i64 result) {
   if ((mt_u64)result >= (mt_u64)-4095) {
@@ -2282,6 +2345,18 @@ mt_ssize read(int fd, void *buffer, mt_size count) {
       mt_syscall6(MT_SYS_READ, fd, (mt_i64)buffer, count, 0, 0, 0));
 }
 
+#endif
+
+#if defined(MT_HOSTED)
+
+static char *mt_read_environment_value(const char *name, mt_size name_length) {
+  (void)name_length;
+  mt_environment = mt_hosted_environ();
+  return mt_environment ? getenv(name) : MT_NULL;
+}
+
+#else
+
 static char *mt_read_environment_value(const char *name, mt_size name_length) {
   mt_i64 fd = mt_syscall6(MT_SYS_OPENAT, MT_AT_FDCWD,
                            (mt_i64)"/proc/self/environ", MT_O_RDONLY, 0, 0, 0);
@@ -2316,6 +2391,8 @@ static char *mt_read_environment_value(const char *name, mt_size name_length) {
   return found;
 }
 
+#endif
+
 int putenv(char *setting) {
   char *equals = setting ? strchr(setting, '=') : MT_NULL;
   if (!equals || equals == setting) {
@@ -2339,6 +2416,7 @@ int putenv(char *setting) {
   return 0;
 }
 
+#if !defined(MT_HOSTED)
 int close(int fd) {
   return (int)mt_sys_result(mt_syscall6(MT_SYS_CLOSE, fd, 0, 0, 0, 0, 0));
 }
@@ -2347,9 +2425,15 @@ int access(const char *path, int mode) {
   return (int)mt_sys_result(mt_syscall6(MT_SYS_FACCESSAT, MT_AT_FDCWD,
                                         (mt_i64)path, mode, 0, 0, 0));
 }
+#endif
 
 int mettle_path_exists(const char *path) { return access(path, 0) == 0; }
 
+#if defined(MT_HOSTED)
+int mettle_path_is_directory(const char *path) {
+  return mt_hosted_is_directory(path);
+}
+#else
 int mettle_path_is_directory(const char *path) {
   mt_i64 fd = mt_syscall6(MT_SYS_OPENAT, MT_AT_FDCWD, (mt_i64)path,
                            MT_O_RDONLY | MT_O_DIRECTORY, 0, 0, 0);
@@ -2357,6 +2441,7 @@ int mettle_path_is_directory(const char *path) {
   (void)mt_syscall6(MT_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
   return 1;
 }
+#endif
 
 static char *mt_getcwd_impl(char *buffer, mt_size size) {
   int allocated = 0;
@@ -2366,6 +2451,13 @@ static char *mt_getcwd_impl(char *buffer, mt_size size) {
     if (!buffer) return MT_NULL;
     allocated = 1;
   }
+#if defined(MT_HOSTED)
+  if (!mt_hosted_getcwd(buffer, size)) {
+    if (allocated) free(buffer);
+    return MT_NULL;
+  }
+  return buffer;
+#else
   mt_i64 result = mt_sys_result(
       mt_syscall6(MT_SYS_GETCWD, (mt_i64)buffer, size, 0, 0, 0, 0));
   if (result < 0) {
@@ -2373,6 +2465,7 @@ static char *mt_getcwd_impl(char *buffer, mt_size size) {
     return MT_NULL;
   }
   return buffer;
+#endif
 }
 
 #ifdef getcwd
@@ -2385,6 +2478,7 @@ int mettle_getcwd(char *buffer, mt_i32 size) {
   return buffer && size > 0 && mt_getcwd_impl(buffer, (mt_size)size) ? 0 : -1;
 }
 
+#if !defined(MT_HOSTED)
 int mkdir(const char *path, unsigned int mode) {
 #if defined(__x86_64__)
   return (int)mt_sys_result(
@@ -2404,6 +2498,7 @@ int chmod(const char *path, unsigned int mode) {
                                         (mt_i64)path, mode, 0, 0, 0));
 #endif
 }
+#endif
 
 int mettle_make_directory(const char *path) { return mkdir(path, 0777); }
 
@@ -2416,6 +2511,63 @@ int mettle_dir_create(const char *path) { return mkdir(path, 0755); }
 int mettle_file_exists(const char *path) {
   return path && access(path, 0) == 0 && !mettle_path_is_directory(path);
 }
+
+#if defined(MT_HOSTED)
+
+static void mt_scan_md_files(const char *root, const char *prefix, char *paths,
+                             mt_i32 capacity, mt_i32 *used, mt_i32 *count,
+                             mt_i32 limit) {
+  char full_path[4096];
+  char relative_path[4096];
+  mt_size root_length;
+  void *directory;
+  const char *name;
+  int type = 0;
+  if (!root || !paths || !used || !count || *count >= limit) {
+    return;
+  }
+  directory = mt_hosted_dir_open(root);
+  if (!directory) {
+    return;
+  }
+  root_length = strlen(root);
+  while (*count < limit && (name = mt_hosted_dir_next(directory, &type))) {
+    mt_size name_length;
+    mt_size prefix_length;
+    int is_directory;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
+    name_length = strlen(name);
+    prefix_length = prefix ? strlen(prefix) : 0;
+    if (root_length + name_length + 2 > sizeof(full_path) ||
+        prefix_length + name_length + (prefix_length ? 2 : 1) >
+            sizeof(relative_path)) {
+      continue;
+    }
+    memcpy(full_path, root, root_length);
+    full_path[root_length] = '/';
+    memcpy(full_path + root_length + 1, name, name_length + 1);
+    if (prefix_length) {
+      memcpy(relative_path, prefix, prefix_length);
+      relative_path[prefix_length] = '/';
+      memcpy(relative_path + prefix_length + 1, name, name_length + 1);
+    } else {
+      memcpy(relative_path, name, name_length + 1);
+    }
+    is_directory =
+        type == 4 || (type == 0 && mettle_path_is_directory(full_path));
+    if (is_directory) {
+      mt_scan_md_files(full_path, relative_path, paths, capacity, used, count,
+                       limit);
+    } else if ((type == 8 || type == 0) && mt_is_markdown_name(name)) {
+      mt_append_md_path(paths, capacity, used, count, limit, relative_path);
+    }
+  }
+  mt_hosted_dir_close(directory);
+}
+
+#else
 
 typedef struct MtLinuxDirent64 {
   mt_u64 inode;
@@ -2496,6 +2648,8 @@ static void mt_scan_md_files(const char *root, const char *prefix, char *paths,
   mt_syscall6(MT_SYS_CLOSE, directory, 0, 0, 0, 0, 0);
 }
 
+#endif
+
 int mettle_dir_list_md_files(const char *root, char *paths, mt_i32 capacity,
                              mt_i32 limit) {
   mt_i32 used = 0;
@@ -2509,6 +2663,7 @@ int mettle_dir_list_md_files(const char *root, char *paths, mt_i32 capacity,
   return count;
 }
 
+#if !defined(MT_HOSTED)
 int gettimeofday(void *time_value, void *timezone_value) {
   mt_i64 timespec_value[2] = {0, 0};
   (void)timezone_value;
@@ -2525,11 +2680,17 @@ mt_ssize readlink(const char *path, char *buffer, mt_size size) {
   return mt_sys_result(mt_syscall6(MT_SYS_READLINKAT, MT_AT_FDCWD,
                                     (mt_i64)path, (mt_i64)buffer, size, 0, 0));
 }
+#endif
 
 mt_i64 mettle_readlink(const char *path, char *buffer, mt_u64 size) {
   return (mt_i64)readlink(path, buffer, (mt_size)size);
 }
 
+#if defined(MT_HOSTED)
+mt_i64 mettle_executable_path(char *buffer, mt_u64 size) {
+  return mt_hosted_executable_path(buffer, size);
+}
+#else
 mt_i64 mettle_executable_path(char *buffer, mt_u64 size) {
   return mettle_readlink("/proc/self/exe", buffer, size);
 }
@@ -2543,6 +2704,7 @@ int unlink(const char *path) {
   return (int)mt_sys_result(mt_syscall6(MT_SYS_UNLINKAT, MT_AT_FDCWD,
                                         (mt_i64)path, 0, 0, 0, 0));
 }
+#endif
 
 char *realpath(const char *path, char *resolved) {
   char full[4096];
@@ -2597,6 +2759,7 @@ char *mettle_realpath(const char *path, char *resolved) {
   return realpath(path, resolved);
 }
 
+#if !defined(MT_HOSTED)
 void *mmap(void *address, mt_size length, int protection, int flags, int fd,
            mt_i64 offset) {
   mt_i64 result = mt_syscall6(MT_SYS_MMAP, (mt_i64)address, length, protection,
@@ -2617,6 +2780,7 @@ int mprotect(void *address, mt_size length, int protection) {
   return (int)mt_sys_result(mt_syscall6(MT_SYS_MPROTECT, (mt_i64)address,
                                         length, protection, 0, 0, 0));
 }
+#endif
 
 #define MT_HEAP_HEADER 16
 #define MT_HEAP_CLASS_COUNT 11
@@ -2642,7 +2806,11 @@ __attribute__((noinline)) static void mt_heap_lock_contended(void) {
   int spins = 0;
   while (__atomic_exchange_n(&mt_heap_lock, 1, __ATOMIC_ACQUIRE)) {
     if (++spins > 64) {
+#if defined(MT_HOSTED)
+      mt_hosted_yield();
+#else
       mt_syscall6(MT_SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0);
+#endif
       spins = 0;
     }
   }
@@ -2659,9 +2827,13 @@ static void mt_heap_release(void) {
 }
 
 __attribute__((noinline)) static void *mt_heap_map(mt_size bytes) {
+#if defined(MT_HOSTED)
+  return mt_hosted_map(bytes);
+#else
   void *mapping = mmap(MT_NULL, bytes, MT_PROT_READ | MT_PROT_WRITE,
                        MT_MAP_PRIVATE | MT_MAP_ANONYMOUS, -1, 0);
   return mapping == (void *)-1 ? MT_NULL : mapping;
+#endif
 }
 
 __attribute__((noinline)) static int mt_heap_refill(void) {
@@ -2744,7 +2916,11 @@ void free(void *memory) {
   mt_u64 *base = (mt_u64 *)memory - 2;
   mt_free_count++;
   if (base[0] > MT_HEAP_CLASS_COUNT) {
+#if defined(MT_HOSTED)
+    mt_hosted_unmap(base, base[0]);
+#else
     munmap(base, base[0]);
+#endif
     return;
   }
   mt_heap_acquire();
@@ -2786,8 +2962,12 @@ static mt_ssize mt_file_write(MtFile *file, const void *buffer, mt_size count) {
 }
 
 static mt_i64 mt_file_seek(MtFile *file, mt_i64 offset, int origin) {
+#if defined(MT_HOSTED)
+  return lseek((int)file->handle, offset, origin);
+#else
   return mt_sys_result(mt_syscall6(MT_SYS_LSEEK, file->handle, offset, origin,
                                    0, 0, 0));
+#endif
 }
 
 void *fopen(const char *path, const char *mode) {
@@ -2805,9 +2985,13 @@ void *fopen(const char *path, const char *mode) {
       flags = (flags & ~MT_O_RDONLY) | MT_O_RDWR;
     }
   }
+#if defined(MT_HOSTED)
+  int fd = mt_hosted_open(path, flags, MT_FILE_MODE);
+#else
   int fd = (int)mt_sys_result(mt_syscall6(MT_SYS_OPENAT, MT_AT_FDCWD,
                                            (mt_i64)path, flags, MT_FILE_MODE,
                                            0, 0));
+#endif
   if (fd < 0) {
     return MT_NULL;
   }
@@ -2849,6 +3033,57 @@ int fclose(void *stream) {
 }
 
 int posix_get_errno(void) { return mt_errno_value; }
+
+#if defined(MT_HOSTED)
+
+void posix_yield(void) { mt_hosted_yield(); }
+
+typedef mt_u32 (*MtThreadStart)(void *);
+
+mt_i64 mettle_thread_create(void *attributes, mt_u64 stack_size,
+                            MtThreadStart start, void *argument,
+                            mt_u32 creation_flags, mt_u32 *thread_id) {
+  (void)attributes;
+  (void)creation_flags;
+  return mt_hosted_thread_create(stack_size, start, argument, thread_id);
+}
+
+mt_u32 mettle_thread_wait(mt_i64 handle, mt_u32 milliseconds) {
+  return mt_hosted_thread_wait(handle, milliseconds);
+}
+
+int mettle_thread_close(mt_i64 handle) {
+  return mt_hosted_thread_close(handle);
+}
+
+mt_u32 mettle_thread_current_id(void) {
+  return mt_hosted_thread_current_id();
+}
+
+void mettle_thread_sleep_ms(mt_u32 milliseconds) {
+  mt_hosted_thread_sleep_ms(milliseconds);
+}
+
+mt_i64 mettle_mutex_create(void *attributes, int initial_owner,
+                           const char *name) {
+  (void)attributes;
+  (void)name;
+  return mt_hosted_mutex_create(initial_owner);
+}
+
+mt_u32 mettle_mutex_wait(mt_i64 handle, mt_u32 milliseconds) {
+  return mt_hosted_mutex_wait(handle, milliseconds);
+}
+
+int mettle_mutex_release(mt_i64 handle) {
+  return mt_hosted_mutex_release(handle);
+}
+
+int mettle_mutex_close(mt_i64 handle) {
+  return mt_hosted_mutex_close(handle);
+}
+
+#else
 
 int socket(int domain, int type, int protocol) {
   return (int)mt_sys_result(
@@ -3360,6 +3595,8 @@ int pthread_cond_broadcast(MtCondition *condition) {
   return 0;
 }
 
+#endif
+
 int mettle_atomic_compare_exchange_i32(volatile int *target, int exchange,
                                        int comparand) {
   __atomic_compare_exchange_n(target, &comparand, exchange, 0,
@@ -3391,6 +3628,15 @@ int posix_atomic_exchange_i32(volatile int *target, int value) {
 int posix_atomic_add_i32(volatile int *target, int value) {
   return __atomic_fetch_add(target, value, __ATOMIC_SEQ_CST);
 }
+
+#if defined(MT_HOSTED)
+
+MT_NORETURN void _exit(int status) {
+  mt_flush_open_streams();
+  _Exit(status);
+}
+
+#else
 
 MT_NORETURN void exit(int status) {
   mt_flush_open_streams();
@@ -3428,6 +3674,8 @@ static void mt_exec_search(const char *program, const char *const *arguments) {
   }
 }
 
+#endif
+
 int mettle_find_executable(const char *program) {
   const char *path;
   if (!program || !program[0]) return 0;
@@ -3452,6 +3700,60 @@ int mettle_find_executable(const char *program) {
   }
   return 0;
 }
+
+#if defined(MT_HOSTED)
+
+int mettle_run_process(const char *program, const char *const *arguments) {
+  const char *path = program && !strchr(program, '/') ? getenv("PATH")
+                                                       : MT_NULL;
+  return mt_hosted_run_process(program, arguments, mt_environment, path);
+}
+
+void *popen(const char *command, const char *mode) {
+  int descriptor = -1;
+  mt_i64 pid;
+  if (!command || !mode || mode[0] != 'r' || mode[1] != 0) {
+    mt_errno_value = 22;
+    return MT_NULL;
+  }
+  (void)getenv("PATH");
+  pid = mt_hosted_spawn_shell_reader(command, mt_environment, &descriptor);
+  if (pid < 0) {
+    return MT_NULL;
+  }
+  MtFile *file = (MtFile *)malloc(sizeof(MtFile));
+  if (!file) {
+    close(descriptor);
+    (void)mt_hosted_wait_process(pid, MT_NULL);
+    return MT_NULL;
+  }
+  file->handle = descriptor;
+  file->flags = MT_FILE_READ;
+  file->child_pid = pid;
+  file->read_buffer = MT_NULL;
+  file->read_fill = 0;
+  file->read_pos = 0;
+  file->write_buffer = MT_NULL;
+  file->write_fill = 0;
+  file->next_open = MT_NULL;
+  return file;
+}
+
+int pclose(void *stream) {
+  MtFile *file = (MtFile *)stream;
+  int status = 0;
+  if (!file || file->child_pid <= 0) {
+    mt_errno_value = 22;
+    return -1;
+  }
+  mt_i64 pid = file->child_pid;
+  close((int)file->handle);
+  free(file->read_buffer);
+  free(file);
+  return mt_hosted_wait_process(pid, &status) == 0 ? status : -1;
+}
+
+#else
 
 int mettle_run_process(const char *program, const char *const *arguments) {
   mt_i64 pid = mt_syscall6(MT_SYS_CLONE, 17, 0, 0, 0, 0, 0);
@@ -3533,6 +3835,8 @@ int pclose(void *stream) {
     if (result != -4) return -1;
   }
 }
+
+#endif
 
 #endif
 
@@ -3897,6 +4201,7 @@ int fileno(void *stream) {
   return file ? (int)file->handle : -1;
 }
 
+#if !defined(MT_HOSTED)
 int isatty(int descriptor) {
 #if defined(_WIN32)
   MtFile *file = descriptor == 0 ? &mt_stdin_file
@@ -3928,9 +4233,10 @@ int ioctl(int descriptor, unsigned long request, ...) {
                                         0));
 #endif
 }
+#endif
 
 int remove(const char *path) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(MT_HOSTED)
   return unlink(path);
 #else
   return (int)mt_sys_result(mt_syscall6(MT_SYS_UNLINKAT, MT_AT_FDCWD,
@@ -3941,6 +4247,12 @@ int remove(const char *path) {
 mt_i64 clock(void) {
 #if defined(_WIN32)
   return (mt_i64)GetTickCount64() * 1000;
+#elif defined(MT_HOSTED)
+  mt_i64 value[2] = {0, 0};
+  if (mt_hosted_monotonic(value) != 0) {
+    return -1;
+  }
+  return value[0] * 1000000 + value[1] / 1000;
 #else
   mt_i64 value[2] = {0, 0};
   if (clock_gettime(1, value) != 0) {

@@ -131,6 +131,40 @@ static void mtp_os_wake(uint32_t *word, unsigned count) {
   }
 }
 
+#elif defined(MT_HOSTED)
+
+#include "runtime/hosted_posix.h"
+
+#define MTP_THREAD_STACK_BYTES (1024u * 1024u)
+
+static void *mtp_thread_entry(void *argument) {
+  mtp_worker((unsigned)(size_t)argument);
+  return NULL;
+}
+
+static unsigned mtp_os_hardware_threads(void) {
+  return mt_hosted_hardware_threads();
+}
+
+static void mtp_os_init(void) {}
+
+static int mtp_os_spawn(unsigned index) {
+  return mt_hosted_spawn_detached(mtp_thread_entry, (void *)(size_t)index,
+                                  MTP_THREAD_STACK_BYTES);
+}
+
+static void mtp_os_yield(void) { mt_hosted_yield(); }
+
+static void mtp_os_wait(uint32_t *word, uint32_t seen) {
+  (void)mt_hosted_wait_on((volatile int *)word, (int)seen,
+                          MT_HOSTED_INFINITE);
+}
+
+static void mtp_os_wake(uint32_t *word, unsigned count) {
+  (void)count;
+  mt_hosted_wake((volatile int *)word);
+}
+
 #else
 
 #if defined(__x86_64__)

@@ -901,6 +901,13 @@ void mettle_profile_report(void) {
   MettleProfileSortEntry *entries = NULL;
   uint64_t root_total_ns = 0;
   size_t i = 0;
+#if defined(MT_HOSTED)
+  static int reported;
+
+  if (__atomic_exchange_n(&reported, 1, __ATOMIC_ACQ_REL)) {
+    return;
+  }
+#endif
 
   mettle_profile_write_sidecar();
 

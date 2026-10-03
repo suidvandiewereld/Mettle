@@ -64,7 +64,11 @@ typedef unsigned long DWORD;
 extern long read(int fd, void *buffer, unsigned long count);
 extern long write(int fd, const void *buffer, unsigned long count);
 extern int close(int fd);
+#if defined(MT_HOSTED)
+extern int ioctl(int fd, unsigned long request, ...);
+#else
 extern int ioctl(int fd, unsigned long request, void *argument);
+#endif
 extern void usleep(unsigned long microseconds);
 extern unsigned int mettle_thread_current_id(void);
 extern int32_t mettle_atomic_exchange_i32(int32_t *target, int32_t value);
@@ -80,8 +84,15 @@ extern int pthread_cond_init(void *cond, const void *attr);
 extern int pthread_cond_wait(void *cond, void *mutex);
 extern int pthread_cond_broadcast(void *cond);
 
+#if defined(MT_HOSTED)
+typedef struct { unsigned char opaque[64]; } __attribute__((aligned(16)))
+CRITICAL_SECTION;
+typedef struct { unsigned char opaque[64]; } __attribute__((aligned(16)))
+CONDITION_VARIABLE;
+#else
 typedef struct { unsigned char opaque[64]; } CRITICAL_SECTION;
 typedef struct { unsigned char opaque[64]; } CONDITION_VARIABLE;
+#endif
 
 #define InitializeCriticalSection(cs) pthread_mutex_init((cs), 0)
 #define EnterCriticalSection(cs) pthread_mutex_lock((cs))
@@ -128,7 +139,11 @@ static int dbg_posix_read(HANDLE fd, void *buffer, DWORD count, DWORD *got,
   return n > 0;
 }
 
+#if defined(MT_HOSTED) && defined(__APPLE__)
+#define DBG_FIONREAD 0x4004667Ful
+#else
 #define DBG_FIONREAD 0x541Bul
+#endif
 
 static int dbg_posix_peek(HANDLE fd, void *a, DWORD b, void *c, DWORD *avail,
                           void *d) {
