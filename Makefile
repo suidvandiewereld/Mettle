@@ -1,4 +1,9 @@
 CC = gcc
+UNAME_S := $(shell uname -s 2>/dev/null)
+ifeq ($(UNAME_S),Darwin)
+CC = cc
+HOSTED ?= 1
+endif
 PYTHON ?= python3
 # EXTRA_CFLAGS lets release builds stamp the version, e.g.
 #   make EXTRA_CFLAGS='-DMETTLE_VERSION_RAW=v0.13.0'
@@ -37,8 +42,16 @@ OBJDIR = obj
 BINDIR = bin
 HOSTED ?= 0
 ifeq ($(HOSTED),1)
+ifneq ($(UNAME_S),Darwin)
 OBJDIR = obj-hosted
 BINDIR = bin-hosted
+endif
+endif
+LD_RELOCATABLE = $(LD) -r
+HOSTED_LINK_FLAGS =
+ifeq ($(UNAME_S),Darwin)
+LD_RELOCATABLE = $(LD) -r -keep_private_externs
+HOSTED_LINK_FLAGS = -Wl,-stack_size,0x4000000
 endif
 STDLIBDIR = stdlib
 RUNTIMEDIR = src/runtime
@@ -130,7 +143,7 @@ $(LIBMTLC): $(BACKEND_OBJECTS) $(HOSTED_HOST_OBJECTS) | $(BINDIR)
 	$(AR) rcs $@ $(BACKEND_OBJECTS) $(HOSTED_HOST_OBJECTS)
 
 $(TARGET): $(FRONTEND_OBJECTS) $(LIBMTLC) | $(BINDIR)
-	$(CC) $(LDFLAGS) -o $@ $(FRONTEND_OBJECTS) $(LIBMTLC) -lm -ldl -pthread
+	$(CC) $(LDFLAGS) $(HOSTED_LINK_FLAGS) -o $@ $(FRONTEND_OBJECTS) $(LIBMTLC) -lm -ldl -pthread
 else
 # The static archive owns every host service it uses. Backend objects call the
 # private mtlc_host surface, which reaches the kernel without libc.
@@ -200,10 +213,10 @@ bundle-runtime: $(TARGET) | $(BINDIR)
 	cp -r $(RUNTIMEDIR) $(BINDIR)/runtime
 	$(CC) $(FREESTANDING_CFLAGS) -Os -c $(RUNTIMEDIR)/freestanding.c -o $(OBJDIR)/runtime/freestanding_core.o
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -Os -c $(RUNTIMEDIR)/hosted_posix.c -o $(OBJDIR)/runtime/hosted_posix_rt.o
-	$(LD) -r $(OBJDIR)/runtime/freestanding_core.o $(OBJDIR)/runtime/hosted_posix_rt.o -o $(BINDIR)/runtime/freestanding.o
+	$(LD_RELOCATABLE) $(OBJDIR)/runtime/freestanding_core.o $(OBJDIR)/runtime/hosted_posix_rt.o -o $(BINDIR)/runtime/freestanding.o
 	$(CC) $(FREESTANDING_CFLAGS) -Os -fPIC -DMT_SHARED_RUNTIME -c $(RUNTIMEDIR)/freestanding.c -o $(OBJDIR)/runtime/freestanding_shared_core.o
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -Os -fPIC -c $(RUNTIMEDIR)/hosted_posix.c -o $(OBJDIR)/runtime/hosted_posix_shared.o
-	$(LD) -r $(OBJDIR)/runtime/freestanding_shared_core.o $(OBJDIR)/runtime/hosted_posix_shared.o -o $(BINDIR)/runtime/freestanding_shared.o
+	$(LD_RELOCATABLE) $(OBJDIR)/runtime/freestanding_shared_core.o $(OBJDIR)/runtime/hosted_posix_shared.o -o $(BINDIR)/runtime/freestanding_shared.o
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(STDLIBDIR)/tracy_helpers.c -o $(BINDIR)/runtime/tracy_helpers.o
 	cp $(BINDIR)/runtime/tracy_helpers.o $(BINDIR)/runtime/tracy_helpers.obj
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -DMETTLE_ATOMICS_IN_FREESTANDING \
@@ -216,6 +229,10 @@ bundle-runtime: $(TARGET) | $(BINDIR)
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/parallel.c -o $(BINDIR)/runtime/parallel.o
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/trace.c -o $(BINDIR)/runtime/trace.o
 	cp $(BINDIR)/runtime/trace.o $(BINDIR)/runtime/trace.obj
+ifeq ($(UNAME_S),Darwin)
+	$(CC) -std=c99 -O2 -fno-ident -fvisibility=hidden -c $(RUNTIMEDIR)/metal_runtime.c -o $(BINDIR)/runtime/metal_runtime.o
+	$(CC) -std=c99 -O2 -fno-ident -fvisibility=hidden -c $(RUNTIMEDIR)/metal_provider.c -o $(BINDIR)/runtime/metal_provider.o
+endif
 	$(TARGET) --release --emit-obj $(RUNTIMEDIR)/swap.mettle -o $(BINDIR)/runtime/swap.o
 	$(TARGET) --release --emit-obj $(RUNTIMEDIR)/string.mettle -o $(BINDIR)/runtime/string.o
 else

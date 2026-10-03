@@ -10,9 +10,13 @@
 #include <string.h>
 
 #ifdef _WIN32
+#include <io.h>
 #include <windows.h>
+#define rt_write_fd _write
 #else
 #include <time.h>
+#include <unistd.h>
+#define rt_write_fd write
 #endif
 
 #define METAL_RT_MAX_KERNELS 256
@@ -49,6 +53,18 @@ static void rt_error(const char *text) {
   snprintf(g_error, sizeof(g_error), "%s", text);
 }
 
+static void rt_print(const char *text) {
+  size_t length = text ? strlen(text) : 0;
+  while (length > 0) {
+    int written = (int)rt_write_fd(2, text, (unsigned)length);
+    if (written <= 0) {
+      return;
+    }
+    text += written;
+    length -= (size_t)written;
+  }
+}
+
 static void rt_forget_kernels(void) {
   for (size_t i = 0; i < g_kernel_count; i++) {
     free(g_kernels[i]);
@@ -79,8 +95,9 @@ int32_t mettle_metal_rt_sync(void) {
     return 0;
   }
   if (!mettle_metal_sync(g_metal, g_error, sizeof(g_error))) {
-    fprintf(stderr, "mettle: Metal: %s\n", g_error);
-    fflush(stderr);
+    char line[2200];
+    snprintf(line, sizeof(line), "mettle: Metal: %s\n", g_error);
+    rt_print(line);
     return 1;
   }
   return 0;
@@ -456,14 +473,15 @@ int32_t mettle_metal_rt_graph_destroy(int64_t handle) {
 }
 
 void mettle_metal_rt_note(const char *text) {
-  fputs(text ? text : "", stderr);
+  rt_print(text);
 }
 
 void mettle_metal_rt_fail(const char *first, const char *second,
                           const char *third) {
-  fprintf(stderr, "%s%s%s\n", first ? first : "", second ? second : "",
-          third ? third : "");
-  fflush(stderr);
+  rt_print(first);
+  rt_print(second);
+  rt_print(third);
+  rt_print("\n");
   exit(1);
 }
 
@@ -476,12 +494,15 @@ void mettle_metal_rt_launch_checked(int64_t kernel, int32_t gx, int32_t gy,
                              stream, params, nargs) == 0) {
     return;
   }
-  fprintf(stderr,
-          "mettle: GPU launch of %s failed with grid %dx%dx%d, block "
-          "%dx%dx%d, %d shared bytes\n  Metal: %s\n",
-          mettle_metal_rt_kernel_name(kernel), (int)gx, (int)gy, (int)gz,
-          (int)bx, (int)by, (int)bz, (int)shared_bytes, g_error);
-  fflush(stderr);
+  {
+    char line[2600];
+    snprintf(line, sizeof(line),
+             "mettle: GPU launch of %s failed with grid %dx%dx%d, block "
+             "%dx%dx%d, %d shared bytes\n  Metal: %s\n",
+             mettle_metal_rt_kernel_name(kernel), (int)gx, (int)gy, (int)gz,
+             (int)bx, (int)by, (int)bz, (int)shared_bytes, g_error);
+    rt_print(line);
+  }
   exit(1);
 }
 

@@ -27,13 +27,13 @@ export fn closesocket(s: int64) -> int32 {
   return close(s);
 }
 
-export extern fn socket(af: int32, sock_type: int32, protocol: int32) -> int64 = "socket";
+export extern fn socket(af: int32, sock_type: int32, protocol: int32) -> int32 = "socket";
 export extern fn shutdown(s: int64, how: int32) -> int32 = "shutdown";
 
 export extern fn connect(s: int64, addr: cstring, addrlen: int32) -> int32 = "connect";
 export extern fn bind(s: int64, addr: cstring, addrlen: int32) -> int32 = "bind";
 export extern fn listen(s: int64, backlog: int32) -> int32 = "listen";
-export extern fn accept(s: int64, addr: cstring, addrlen: cstring) -> int64 = "accept";
+export extern fn accept(s: int64, addr: cstring, addrlen: cstring) -> int32 = "accept";
 export extern fn setsockopt(s: int64, level: int32, optname: int32, optval: cstring, optlen: int32) -> int32 = "setsockopt";
 export extern fn send(s: int64, buf: cstring, len: int32, flags: int32) -> int32 = "send";
 export extern fn recv(s: int64, buf: cstring, len: int32, flags: int32) -> int32 = "recv";

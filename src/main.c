@@ -1355,6 +1355,10 @@ static void elf_select_runtime_helpers(const char *runtime_directory,
   }
 }
 
+static int object_needs_metal_runtime(const char *object_path) {
+  return object_needs_runtime_object(object_path, "mettle_metal_rt_");
+}
+
 static int elf_collect_on_demand_objects(const char *runtime_directory,
                                          const char *object_filename,
                                          int shared_output,
@@ -1373,6 +1377,8 @@ static int elf_collect_on_demand_objects(const char *runtime_directory,
       {"debug.o", "debug.o", object_needs_debug_runtime},
       {"atomics.o", "atomics.o", object_needs_atomics},
       {"parallel.o", "parallel.o", object_needs_parallel_runtime},
+      {"metal_runtime.o", "metal_runtime.o", object_needs_metal_runtime},
+      {"metal_provider.o", "metal_provider.o", object_needs_metal_runtime},
   };
   size_t i = 0u;
 
@@ -1747,6 +1753,179 @@ cleanup:
   return result;
 }
 
+static int macho_file_is_executable_image(const char *path, char *reason,
+                                          size_t reason_size) {
+  unsigned char header[16];
+  FILE *file = fopen(path, "rb");
+  size_t got;
+  unsigned int filetype;
+  if (!file) {
+    snprintf(reason, reason_size, "cannot open the linked output");
+    return 0;
+  }
+  got = fread(header, 1, sizeof(header), file);
+  fclose(file);
+  if (got != sizeof(header) || read_u32_le(header) != 0xfeedfacfu) {
+    snprintf(reason, reason_size, "the linked output is not a 64-bit Mach-O");
+    return 0;
+  }
+  filetype = read_u32_le(header + 12);
+  if (filetype != 2u && filetype != 6u) {
+    snprintf(reason, reason_size,
+             "the linked output is Mach-O file type %u, not an executable or "
+             "a dynamic library",
+             filetype);
+    return 0;
+  }
+  return 1;
+}
+
+static int mettle_link_macho_hosted(const char *object_filename,
+                                    const char *executable_filename,
+                                    const CompilerOptions *options,
+                                    const char *runtime_directory) {
+  char *crash_handler_object = NULL;
+  char *profile_object = NULL;
+  char *freestanding_object = NULL;
+  char *extra_objects[16];
+  size_t extra_object_count = 0u;
+  size_t on_demand_object_count = 0u;
+  const char *cc = getenv("METTLE_HOSTED_CC");
+  const char **argv_list = NULL;
+  char **owned = NULL;
+  size_t owned_count = 0u;
+  size_t used = 0u;
+  size_t capacity;
+  size_t i;
+  int shared_output = options && options->shared_output;
+  int metal = object_needs_metal_runtime(object_filename);
+  int profile_runtime =
+      options && (compiler_options_use_profile_runtime(options) ||
+                  options->pgo_gen)
+          ? 1
+          : 0;
+  int stack_trace = compiler_options_install_crash_handler(options);
+  int result = 1;
+  char reason[256];
+
+  memset(extra_objects, 0, sizeof(extra_objects));
+  if (!cc || !cc[0]) {
+    cc = "cc";
+  }
+  if (options && options->static_link) {
+    fprintf(stderr,
+            "Error: macOS has no static executables; libSystem is always "
+            "linked dynamically, so drop --static\n");
+    return 1;
+  }
+  if (options && options->dynamic_linker) {
+    fprintf(stderr,
+            "Error: --dynamic-linker names an ELF interpreter; macOS "
+            "executables always load through dyld\n");
+    return 1;
+  }
+  if (!elf_prepare_runtime_objects(options, object_filename, runtime_directory,
+                                   stack_trace, profile_runtime,
+                                   &freestanding_object, &crash_handler_object,
+                                   &profile_object, extra_objects,
+                                   &extra_object_count,
+                                   &on_demand_object_count)) {
+    goto cleanup;
+  }
+  if (!freestanding_object || access(freestanding_object, F_OK) != 0) {
+    fprintf(stderr,
+            "Error: Required hosted runtime object not found in '%s'\n",
+            runtime_directory ? runtime_directory : "");
+    goto cleanup;
+  }
+  if (!elf_append_runtime_helpers(stack_trace, profile_runtime,
+                                  crash_handler_object, profile_object,
+                                  extra_objects, &extra_object_count)) {
+    goto cleanup;
+  }
+
+  capacity = 32u + extra_object_count +
+             (options ? options->link_argument_count +
+                            options->shared_library_count +
+                            options->library_search_path_count +
+                            options->runpath_count
+                      : 0u);
+  argv_list = calloc(capacity, sizeof(*argv_list));
+  owned = calloc(capacity, sizeof(*owned));
+  if (!argv_list || !owned) {
+    fprintf(stderr, "Error: Failed to allocate the macOS link command\n");
+    goto cleanup;
+  }
+
+  argv_list[used++] = cc;
+  argv_list[used++] = "-Wl,-dead_strip";
+  if (shared_output) {
+    argv_list[used++] = "-dynamiclib";
+    if (options->soname &&
+        !mettle_hosted_add_flag(argv_list, &used, owned, &owned_count,
+                                "-Wl,-install_name,", options->soname)) {
+      goto cleanup;
+    }
+  }
+  if (!mettle_elf_keep_symbols(options)) {
+    argv_list[used++] = "-Wl,-S";
+  }
+  if (options && options->export_dynamic) {
+    argv_list[used++] = "-Wl,-export_dynamic";
+  }
+  argv_list[used++] = freestanding_object;
+  argv_list[used++] = object_filename;
+  for (i = 0u; i < extra_object_count; i++) {
+    if (extra_objects[i]) {
+      argv_list[used++] = extra_objects[i];
+    }
+  }
+  argv_list[used++] = "-o";
+  argv_list[used++] = executable_filename;
+  if (!mettle_hosted_add_library_flags(argv_list, &used, owned, &owned_count,
+                                       options)) {
+    goto cleanup;
+  }
+  if (metal) {
+    argv_list[used++] = "-framework";
+    argv_list[used++] = "Metal";
+    argv_list[used++] = "-framework";
+    argv_list[used++] = "Foundation";
+    argv_list[used++] = "-lobjc";
+  }
+  argv_list[used++] = "-pthread";
+  argv_list[used] = NULL;
+
+  if (mettle_run_process(cc, argv_list) != 0) {
+    fprintf(stderr, "Error: %s failed to link the macOS executable '%s'\n",
+            cc, executable_filename);
+    goto cleanup;
+  }
+  if (!macho_file_is_executable_image(executable_filename, reason,
+                                      sizeof(reason))) {
+    fprintf(stderr, "Error: Refusing linked output '%s': %s\n",
+            executable_filename, reason);
+    remove(executable_filename);
+    goto cleanup;
+  }
+  g_link_output_ownership_verified = 1;
+  result = 0;
+
+cleanup:
+  for (i = 0u; i < owned_count; i++) {
+    free(owned[i]);
+  }
+  free(owned);
+  free(argv_list);
+  for (i = 0u; i < on_demand_object_count; i++) {
+    free(extra_objects[i]);
+  }
+  free(crash_handler_object);
+  free(profile_object);
+  free(freestanding_object);
+  return result;
+}
+
 static int mettle_link_elf_executable(const char *object_filename,
                                       const char *executable_filename,
                                       const CompilerOptions *options,
@@ -1768,6 +1947,10 @@ static int mettle_link_elf_executable(const char *object_filename,
           : 0;
   int stack_trace = compiler_options_install_crash_handler(options);
 
+  if (host_target_is_macho()) {
+    return mettle_link_macho_hosted(object_filename, executable_filename,
+                                    options, runtime_directory);
+  }
   if (mettle_hosted_runtime_requested()) {
     return mettle_link_elf_hosted(object_filename, executable_filename,
                                   options, runtime_directory);
@@ -4603,7 +4786,9 @@ int main(int argc, char *argv[]) {
 
   BinaryTargetFormat host_format = mtlc_target()->format;
   int elf_build = host_format == BINARY_TARGET_FORMAT_ELF_X64 ||
-                  host_format == BINARY_TARGET_FORMAT_ELF_ARM64;
+                  host_format == BINARY_TARGET_FORMAT_ELF_ARM64 ||
+                  host_format == BINARY_TARGET_FORMAT_MACHO_X64 ||
+                  host_format == BINARY_TARGET_FORMAT_MACHO_ARM64;
 
   if (flags.build_executable) {
     if (!elf_build && (options.shared_library_count > 0u ||

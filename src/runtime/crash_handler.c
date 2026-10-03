@@ -15,7 +15,9 @@
 #else
 #include <signal.h>
 #include <unistd.h>
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#elif defined(__linux__)
 #include <ucontext.h>
 #endif
 #endif
@@ -757,6 +759,17 @@ static void mettle_crash_extract_fault_context(void *ucontext_raw,
   if (uc) {
     *out_pc = (uintptr_t)uc->uc_mcontext.pc;
     *out_fp = (uintptr_t)uc->uc_mcontext.regs[29];
+  }
+#elif defined(__APPLE__) && defined(__aarch64__)
+  ucontext_t *uc = (ucontext_t *)ucontext_raw;
+  if (uc && uc->uc_mcontext) {
+#if defined(__darwin_arm_thread_state64_get_pc)
+    *out_pc = (uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss);
+    *out_fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
+#else
+    *out_pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
+    *out_fp = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+#endif
   }
 #else
   (void)ucontext_raw;
