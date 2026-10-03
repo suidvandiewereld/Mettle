@@ -24,6 +24,27 @@ static size_t g_kernel_count;
 static int g_version_major = 3;
 static int g_version_minor = 2;
 
+typedef struct {
+  int64_t kernel;
+  uint32_t grid[3];
+  uint32_t block[3];
+  unsigned char *args;
+  size_t args_size;
+  size_t shared_bytes;
+} RtLaunch;
+
+typedef struct {
+  RtLaunch *launches;
+  size_t count;
+  size_t capacity;
+  int live;
+} RtGraph;
+
+static RtGraph *g_graphs;
+static size_t g_graph_count;
+static int g_capturing;
+static size_t g_capture;
+
 static void rt_error(const char *text) {
   snprintf(g_error, sizeof(g_error), "%s", text);
 }
@@ -336,11 +357,102 @@ int32_t mettle_metal_rt_launch(int64_t kernel, int32_t gx, int32_t gy,
   threads[0] = (uint32_t)bx;
   threads[1] = (uint32_t)by;
   threads[2] = (uint32_t)bz;
+  if (g_capturing) {
+    RtGraph *graph = &g_graphs[g_capture];
+    RtLaunch *launch;
+    if (graph->count == graph->capacity) {
+      size_t next = graph->capacity ? graph->capacity * 2 : 16;
+      RtLaunch *grown =
+          (RtLaunch *)realloc(graph->launches, next * sizeof(RtLaunch));
+      if (!grown) {
+        free(block);
+        rt_error("out of memory capturing a Metal launch graph");
+        return 1;
+      }
+      graph->launches = grown;
+      graph->capacity = next;
+    }
+    launch = &graph->launches[graph->count++];
+    launch->kernel = kernel;
+    memcpy(launch->grid, grid, sizeof(grid));
+    memcpy(launch->block, threads, sizeof(threads));
+    launch->args = block;
+    launch->args_size = block_size;
+    launch->shared_bytes = (size_t)shared_bytes;
+    return 0;
+  }
   ok = mettle_metal_launch(g_metal, g_kernels[kernel - 1], grid, threads,
                            block, block_size, (size_t)shared_bytes, g_error,
                            sizeof(g_error));
   free(block);
   return ok ? 0 : 1;
+}
+
+int32_t mettle_metal_rt_capture_begin(void) {
+  RtGraph *grown;
+  if (g_capturing) {
+    rt_error("a Metal launch graph is already being captured");
+    return 1;
+  }
+  grown = (RtGraph *)realloc(g_graphs, (g_graph_count + 1) * sizeof(RtGraph));
+  if (!grown) {
+    rt_error("out of memory starting a Metal launch graph");
+    return 1;
+  }
+  g_graphs = grown;
+  memset(&g_graphs[g_graph_count], 0, sizeof(RtGraph));
+  g_graphs[g_graph_count].live = 1;
+  g_capture = g_graph_count++;
+  g_capturing = 1;
+  return 0;
+}
+
+int64_t mettle_metal_rt_capture_end(void) {
+  if (!g_capturing) {
+    rt_error("no Metal launch graph is being captured");
+    return 0;
+  }
+  g_capturing = 0;
+  return (int64_t)g_capture + 1;
+}
+
+int32_t mettle_metal_rt_graph_launch(int64_t handle) {
+  RtGraph *graph;
+  if (handle < 1 || (uint64_t)handle > g_graph_count ||
+      !g_graphs[handle - 1].live || g_capturing || !g_metal) {
+    rt_error("the launch names no captured Metal graph");
+    return 1;
+  }
+  graph = &g_graphs[handle - 1];
+  for (size_t i = 0; i < graph->count; i++) {
+    RtLaunch *launch = &graph->launches[i];
+    if ((uint64_t)launch->kernel > g_kernel_count) {
+      rt_error("a captured Metal graph outlived the library it launches");
+      return 1;
+    }
+    if (!mettle_metal_launch(g_metal, g_kernels[launch->kernel - 1],
+                             launch->grid, launch->block, launch->args,
+                             launch->args_size, launch->shared_bytes, g_error,
+                             sizeof(g_error))) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int32_t mettle_metal_rt_graph_destroy(int64_t handle) {
+  RtGraph *graph;
+  if (handle < 1 || (uint64_t)handle > g_graph_count ||
+      !g_graphs[handle - 1].live) {
+    return 1;
+  }
+  graph = &g_graphs[handle - 1];
+  for (size_t i = 0; i < graph->count; i++) {
+    free(graph->launches[i].args);
+  }
+  free(graph->launches);
+  memset(graph, 0, sizeof(*graph));
+  return 0;
 }
 
 void mettle_metal_rt_note(const char *text) {

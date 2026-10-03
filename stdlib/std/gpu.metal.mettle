@@ -24,6 +24,10 @@ extern fn __mtlc_metal_note(text: cstring) = "mettle_metal_rt_note";
 extern fn __mtlc_metal_fail(first: cstring, second: cstring, third: cstring) = "mettle_metal_rt_fail";
 extern fn __mtlc_metal_now_ms() -> float64 = "mettle_metal_rt_now_ms";
 extern fn __mtlc_metal_sync() -> int32 = "mettle_metal_rt_sync";
+extern fn __mtlc_metal_capture_begin() -> int32 = "mettle_metal_rt_capture_begin";
+extern fn __mtlc_metal_capture_end() -> int64 = "mettle_metal_rt_capture_end";
+extern fn __mtlc_metal_graph_launch(graph: int64) -> int32 = "mettle_metal_rt_graph_launch";
+extern fn __mtlc_metal_graph_destroy(graph: int64) -> int32 = "mettle_metal_rt_graph_destroy";
 
 @inline fn __mtlc_metal_cstr(s: string) -> cstring { return s.chars; }
 
@@ -258,10 +262,38 @@ export fn mtlc_gpu_launch_checked(f: int64,
   return gpu_launch_3d(f, grid, 1, 1, block, 1, 1, 0, stream, params, nargs);
 }
 
-@inline export fn gpu_graph_capture_begin(stream: int64) -> int32 { return 1; }
-export fn gpu_graph_capture_end(stream: int64) -> int64 { return 0; }
-@inline export fn gpu_graph_launch(exec: int64, stream: int64) -> int32 { return 1; }
-@inline export fn gpu_graph_destroy(exec: int64) -> int32 { return 1; }
+@inline export fn gpu_graph_capture_begin(stream: int64) -> int32 {
+  return __mtlc_metal_capture_begin();
+}
+export fn gpu_graph_capture_end(stream: int64) -> int64 {
+  return __mtlc_metal_capture_end();
+}
+@inline export fn gpu_graph_launch(exec: int64, stream: int64) -> int32 {
+  return __mtlc_metal_graph_launch(exec);
+}
+@inline export fn gpu_graph_destroy(exec: int64) -> int32 {
+  return __mtlc_metal_graph_destroy(exec);
+}
+
+var g_gpu_kernel_path: uint8[1024];
+
+export fn gpu_open_kernels(stem: cstring) -> int32 {
+  var n: int64 = 0;
+  while (n < 1000 && stem[n] != 0) {
+    g_gpu_kernel_path[n] = (uint8)stem[n];
+    n = n + 1;
+  }
+  var extension: cstring = __mtlc_metal_cstr(".metal");
+  var k: int64 = 0;
+  while (extension[k] != 0) {
+    g_gpu_kernel_path[n + k] = (uint8)extension[k];
+    k = k + 1;
+  }
+  g_gpu_kernel_path[n + k] = 0;
+  return gpu_open((cstring)&g_gpu_kernel_path[0]);
+}
+
+export fn gpu_provider_name() -> cstring { return __mtlc_metal_cstr("Metal"); }
 
 var g_gpu_bound_module: int64 = 0;
 

@@ -2190,8 +2190,11 @@ the host next touches device memory: a copy, a free, `gpu_sync`, an event
 record, every 512 launches, and at exit. An error in a batch names its first
 and last kernel; `METTLE_METAL_SYNC=1` waits after every launch to find the
 one that failed. Streams are one ordered queue, and events record host time
-after waiting. Metal has one GPU per process, no managed memory
-(`gpu_managed_malloc` returns null) and no graph capture.
+after waiting. Graph capture records the packed launches, and a replay encodes
+them all into the current command buffer. Metal has one GPU per process and
+no managed memory (`gpu_managed_malloc` returns null). `gpu_open_kernels(stem)`
+loads `stem.ptx` under CUDA and `stem.metal` under Metal, so one host program
+serves both.
 
 A launch needs each argument's size and alignment to build the argument
 struct. `dispatch` appends them to the parameter table it passes the

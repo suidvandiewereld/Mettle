@@ -1,43 +1,95 @@
 import "std/io";
 import "std/mem";
 import "std/gpu";
+import "std/math";
 import "decode_decls";
-
-extern fn sqrtf(x: float32) -> float32 = "sqrtf";
-extern fn expf(x: float32) -> float32 = "expf";
 
 const DIM: int32 = 1024;
 const HIDDEN: int32 = 2816;
 const STEPS: int32 = 200;
 
-fn cpu_rmsnorm(x: float32*, weight: float32*, out: float32*, dim: int32) {
-  var squares: float32 = (float32)0.0;
-  for i in 0..dim {
-    squares = squares + x[i] * x[i];
-  }
-  var mean: float32 = squares / (float32)dim + (float32)0.00001;
-  var scale: float32 = (float32)1.0 / sqrtf(mean);
-  for i in 0..dim {
-    out[i] = x[i] * scale * weight[i];
-  }
+fn unit() -> float64 {
+  return 0.000000059604644775390625;
 }
 
-fn cpu_matvec(w: float32*, x: float32*, out: float32*, rows: int32, cols: int32) {
+fn magnitude(v: float64) -> float64 {
+  if (v < 0.0) { return -v; }
+  return v;
+}
+
+fn bound_use(got: float32, exact: float64, bound: float64) -> float64 {
+  var limit: float64 = bound;
+  if (limit < 1.0e-30) { limit = 1.0e-30; }
+  return magnitude((float64)got - exact) / limit;
+}
+
+fn larger(a: float64, b: float64) -> float64 {
+  if (b > a) { return b; }
+  return a;
+}
+
+fn check_rmsnorm(x: float32*, weight: float32*, got: float32*, dim: int32) -> float64 {
+  var squares: float64 = 0.0;
+  for i in 0..dim {
+    squares = squares + (float64)x[i] * (float64)x[i];
+  }
+  var epsilon: float64 = (float64)((float32)0.00001);
+  var scale: float64 = 1.0 / sqrt(squares / (float64)dim + epsilon);
+  var worst: float64 = 0.0;
+  for i in 0..dim {
+    var exact: float64 = (float64)x[i] * scale * (float64)weight[i];
+    var bound: float64 = magnitude(exact) * (float64)(dim + 16) * unit();
+    worst = larger(worst, bound_use(got[i], exact, bound));
+  }
+  return worst;
+}
+
+fn check_matvec(w: float32*, x: float32*, got: float32*, rows: int32, cols: int32) -> float64 {
+  var gamma: float64 = (float64)(cols + 2) * unit();
+  gamma = gamma / (1.0 - gamma);
+  var worst: float64 = 0.0;
   for r in 0..rows {
-    var acc: float32 = (float32)0.0;
+    var exact: float64 = 0.0;
+    var size: float64 = 0.0;
     var base: int32 = r * cols;
     for c in 0..cols {
-      acc = acc + w[base + c] * x[c];
+      var term: float64 = (float64)w[base + c] * (float64)x[c];
+      exact = exact + term;
+      size = size + magnitude(term);
     }
-    out[r] = acc;
+    worst = larger(worst, bound_use(got[r], exact, gamma * size));
   }
+  return worst;
 }
 
-fn cpu_silu_mul(gate: float32*, up: float32*, out: float32*, n: int32) {
+fn check_silu_mul(gate: float32*, up: float32*, got: float32*, n: int32) -> float64 {
+  var worst: float64 = 0.0;
   for i in 0..n {
-    var g: float32 = gate[i];
-    out[i] = g / ((float32)1.0 + expf(-g)) * up[i];
+    var g: float64 = (float64)gate[i];
+    var exact: float64 = g / (1.0 + exp(-g)) * (float64)up[i];
+    var bound: float64 = magnitude(exact) * 32.0 * unit();
+    worst = larger(worst, bound_use(got[i], exact, bound));
   }
+  return worst;
+}
+
+fn check_softmax(logits: float32*, got: float32*, n: int32) -> float64 {
+  var largest: float64 = (float64)logits[0];
+  for i in 0..n {
+    if ((float64)logits[i] > largest) { largest = (float64)logits[i]; }
+  }
+  var total: float64 = 0.0;
+  for i in 0..n {
+    total = total + exp((float64)logits[i] - largest);
+  }
+  var worst: float64 = 0.0;
+  for i in 0..n {
+    var gap: float64 = largest - (float64)logits[i];
+    var exact: float64 = exp(-gap) / total;
+    var bound: float64 = magnitude(exact) * (gap + (float64)n + 16.0) * unit();
+    worst = larger(worst, bound_use(got[i], exact, bound));
+  }
+  return worst;
 }
 
 fn fill(buffer: float32*, n: int32, seed: int32) {
@@ -50,11 +102,17 @@ fn fill(buffer: float32*, n: int32, seed: int32) {
 }
 
 fn main() -> int32 {
-  if (gpu_open("decode_kernels.ptx") == 0) { return 1; }
+  if (gpu_open_kernels("decode_kernels") == 0) { return 1; }
 
   var name: uint8[128];
   println("device   {gpu_device_name(0, &name[0], 128)}");
-  println("         {gpu_sm_count(0)} SMs, compute {gpu_compute_capability(0)}, CUDA {gpu_driver_version() / 1000}.{(gpu_driver_version() % 1000) / 10}");
+  if (gpu_sm_count(0) > 0) {
+    println("         {gpu_sm_count(0)} SMs, compute {gpu_compute_capability(0)}, CUDA {gpu_driver_version() / 1000}.{(gpu_driver_version() % 1000) / 10}");
+  } else {
+    print_cstr("         ");
+    print_cstr(gpu_provider_name());
+    println("");
+  }
   println("layer    dim {DIM} -> hidden {HIDDEN}, {STEPS} steps");
   println("");
 
@@ -102,48 +160,30 @@ fn main() -> int32 {
   dispatch softmax[1, 256](d_down, d_out, DIM) on stream;
   gpu_stream_sync(stream);
 
-  var gpu_out: float32* = malloc(vector_bytes);
-  gpu_to_host((uint8*)gpu_out, d_out, vector_bytes);
+  var g_normed: float32* = malloc(vector_bytes);
+  var g_gate: float32* = malloc(hidden_bytes);
+  var g_up: float32* = malloc(hidden_bytes);
+  var g_activated: float32* = malloc(hidden_bytes);
+  var g_down: float32* = malloc(vector_bytes);
+  var g_out: float32* = malloc(vector_bytes);
+  gpu_to_host((uint8*)g_normed, d_normed, vector_bytes);
+  gpu_to_host((uint8*)g_gate, d_gate, hidden_bytes);
+  gpu_to_host((uint8*)g_up, d_up, hidden_bytes);
+  gpu_to_host((uint8*)g_activated, d_activated, hidden_bytes);
+  gpu_to_host((uint8*)g_down, d_down, vector_bytes);
+  gpu_to_host((uint8*)g_out, d_out, vector_bytes);
 
-  var ref_normed: float32* = malloc(vector_bytes);
-  var ref_gate: float32* = malloc(hidden_bytes);
-  var ref_up: float32* = malloc(hidden_bytes);
-  var ref_activated: float32* = malloc(hidden_bytes);
-  var ref_down: float32* = malloc(vector_bytes);
-  cpu_rmsnorm(h_x, h_norm_weight, ref_normed, DIM);
-  cpu_matvec(h_gate_w, ref_normed, ref_gate, HIDDEN, DIM);
-  cpu_matvec(h_up_w, ref_normed, ref_up, HIDDEN, DIM);
-  cpu_silu_mul(ref_gate, ref_up, ref_activated, HIDDEN);
-  cpu_matvec(h_down_w, ref_activated, ref_down, DIM, HIDDEN);
-
-  var largest: float32 = ref_down[0];
-  for i in 0..DIM {
-    if (ref_down[i] > largest) { largest = ref_down[i]; }
-  }
-  var total: float32 = (float32)0.0;
-  for i in 0..DIM {
-    ref_down[i] = expf(ref_down[i] - largest);
-    total = total + ref_down[i];
-  }
-
-  var worst: float32 = (float32)0.0;
-  var worst_at: int32 = 0;
-  for i in 0..DIM {
-    var expected: float32 = ref_down[i] / total;
-    var got: float32 = gpu_out[i];
-    var delta: float32 = got - expected;
-    if (delta < (float32)0.0) { delta = -delta; }
-    var scale: float32 = expected;
-    if (scale < (float32)0.0) { scale = -scale; }
-    if (scale < (float32)0.000001) { scale = (float32)0.000001; }
-    var relative: float32 = delta / scale;
-    if (relative > worst) { worst = relative; worst_at = i; }
-  }
-  if (worst > (float32)0.002) {
-    println("MISMATCH: worst relative error {worst} at {worst_at}");
+  var worst: float64 = check_rmsnorm(h_x, h_norm_weight, g_normed, DIM);
+  worst = larger(worst, check_matvec(h_gate_w, g_normed, g_gate, HIDDEN, DIM));
+  worst = larger(worst, check_matvec(h_up_w, g_normed, g_up, HIDDEN, DIM));
+  worst = larger(worst, check_silu_mul(g_gate, g_up, g_activated, HIDDEN));
+  worst = larger(worst, check_matvec(h_down_w, g_activated, g_down, DIM, HIDDEN));
+  worst = larger(worst, check_softmax(g_down, g_out, DIM));
+  if (worst > 1.0) {
+    println("MISMATCH: a stage is {worst} times its float32 error bound");
     return 1;
   }
-  println("correct  worst relative error {worst} over {DIM} outputs");
+  println("correct  every stage within its float32 error bound, worst at {worst * 100.0}% of it");
 
   var start: int64 = gpu_event_create();
   var finish: int64 = gpu_event_create();

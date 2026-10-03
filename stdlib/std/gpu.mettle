@@ -189,6 +189,26 @@ export fn gpu_open(ptx_path: cstring) -> int32 {
   return gpu_open_on(0, ptx_path);
 }
 
+var g_gpu_kernel_path: uint8[1024];
+
+export fn gpu_open_kernels(stem: cstring) -> int32 {
+  var n: int64 = 0;
+  while (n < 1000 && stem[n] != 0) {
+    g_gpu_kernel_path[n] = (uint8)stem[n];
+    n = n + 1;
+  }
+  var extension: cstring = __mtlc_gpu_cstr(".ptx");
+  var k: int64 = 0;
+  while (extension[k] != 0) {
+    g_gpu_kernel_path[n + k] = (uint8)extension[k];
+    k = k + 1;
+  }
+  g_gpu_kernel_path[n + k] = 0;
+  return gpu_open((cstring)&g_gpu_kernel_path[0]);
+}
+
+export fn gpu_provider_name() -> cstring { return __mtlc_gpu_cstr("CUDA"); }
+
 export fn gpu_open_on(ordinal: int32, ptx_path: cstring) -> int32 {
   if (gpu_init_on(ordinal) == 0) { return 0; }
   if (gpu_module_file(ptx_path) == 0) { return 0; }

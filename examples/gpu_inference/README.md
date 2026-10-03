@@ -5,8 +5,9 @@ the gate and up projections, SwiGLU, the down projection, and a softmax. Six
 launches, the shape a decode step actually has.
 
 There is no `nvcc`, no `cudart`, and no LLVM anywhere in this. The kernels are
-Mettle source compiled straight to PTX by Mettle's own backend; the host is an
-ordinary Mettle program that links `nvcuda`, the OS driver.
+Mettle source compiled straight to PTX by Mettle's own backend, or to Metal
+Shading Language on a Mac; the host is an ordinary Mettle program that links
+`nvcuda`, the OS driver, or runs on Metal.
 
 ## Running it
 
@@ -26,6 +27,20 @@ Neither compile names a GPU architecture. `--emit-ptx` asks the driver what is
 in the machine and targets that; `mettle --gpu-info` prints the same answer
 before you build anything.
 
+On a Mac the kernels go to Metal and the host is unchanged:
+
+```bash
+mettle -O --emit-metal decode_kernels.mettle -o decode_kernels.metal \
+  --emit-kernel-decls=decode_decls.mettle
+
+mettle --build --release decode_host.mettle -o decode_host
+
+./decode_host
+```
+
+`gpu_open_kernels("decode_kernels")` loads `decode_kernels.ptx` under CUDA
+and `decode_kernels.metal` under Metal.
+
 On an RTX 5060 Ti:
 
 ```
@@ -33,19 +48,22 @@ device   NVIDIA GeForce RTX 5060 Ti
          36 SMs, compute 120, CUDA 12.9
 layer    dim 1024 -> hidden 2816, 200 steps
 
-correct  worst relative error 2.226411e-7 over 1024 outputs
+correct  every stage within its float32 error bound, worst at 82.660693% of it
 
-per step launched   0.06685 ms
-per step replayed   0.051075 ms  (one captured graph)
+per step launched   0.06207 ms
+per step replayed   0.050183 ms  (one captured graph)
 ```
 
 ## What each part is showing
 
-**The output is checked, not asserted.** The host runs the same layer on the
-CPU and compares. A chain of three matrix-vector products is about three
-million multiply-adds deep, and a subgroup reduction adds in a different order
-than a CPU loop, so the check is relative rather than exact. Anything above
-0.2% fails the run.
+**The output is checked, not asserted.** The host reads every stage back and
+recomputes it in float64 from the GPU's own inputs. Each element must land
+within the worst-case float32 error bound for its stage: for a dot product of
+K terms that is about K·2⁻²⁴ times the sum of the terms' magnitudes, which
+holds for any summation order. A subgroup reduction adds in a different order
+than a CPU loop, and the bound does not care; a kernel that drops a term or
+misrounds a constant lands far outside it. The line reports the worst
+element's share of its bound.
 
 **`--emit-kernel-decls` writes the host's declarations.** `decode_decls.mettle`
 is generated from the kernels, and the host imports it rather than restating
