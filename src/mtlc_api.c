@@ -6,6 +6,7 @@
 #include "codegen/code_generator.h"
 #include "codegen/ptx_emitter.h"
 #include "codegen/spirv_emitter.h"
+#include "codegen/msl_emitter.h"
 #include "ir/ir.h"
 #include "ir/ir_optimize.h"
 #include "ir/ml_opt.h"
@@ -48,6 +49,8 @@ const char *mtlc_arch_name(MtlcArch arch) {
     return "ptx";
   case MTLC_ARCH_SPIRV:
     return "spirv";
+  case MTLC_ARCH_METAL:
+    return "metal";
   }
   return "?";
 }
@@ -62,6 +65,8 @@ struct MtlcContext {
   int ptx_isa_major;
   int ptx_isa_minor;
   int ptx_tensor_tuple_budget;
+  int metal_version_major;
+  int metal_version_minor;
   char runtime_directory[1024];
   MtlcDiagHandler diag_handler;
   void *diag_user_data;
@@ -247,6 +252,26 @@ int mtlc_context_ptx_tensor_tuple_budget(const MtlcContext *ctx) {
   return ctx ? ctx->ptx_tensor_tuple_budget : 0;
 }
 
+int mtlc_context_set_metal_version(MtlcContext *ctx, int major, int minor) {
+  char text[16];
+  MslEmitOptions options;
+  if (!ctx) return 0;
+  snprintf(text, sizeof(text), "%d.%d", major, minor);
+  msl_emit_default_options(&options);
+  if (!msl_parse_version(text, &options)) return 0;
+  ctx->metal_version_major = options.version_major;
+  ctx->metal_version_minor = options.version_minor;
+  return 1;
+}
+
+int mtlc_context_metal_version_major(const MtlcContext *ctx) {
+  return ctx && ctx->metal_version_major ? ctx->metal_version_major : 3;
+}
+
+int mtlc_context_metal_version_minor(const MtlcContext *ctx) {
+  return ctx && ctx->metal_version_major ? ctx->metal_version_minor : 2;
+}
+
 struct MtlcModule {
   IRProgram *ir;
 };
@@ -336,6 +361,7 @@ int mtlc_optimize_for(MtlcContext *ctx, MtlcModule *module, MtlcArch arch) {
     return mtlc_optimize_policy(ctx, module, 1, 0);
   case MTLC_ARCH_PTX:
   case MTLC_ARCH_SPIRV:
+  case MTLC_ARCH_METAL:
     return mtlc_optimize_policy(ctx, module, 1, 1);
   default:
     mtlc_diag(ctx, MTLC_DIAG_ERROR,
@@ -477,6 +503,30 @@ int mtlc_emit(MtlcContext *ctx, MtlcModule *module, MtlcArch arch,
       mtlc_diag(ctx, MTLC_DIAG_ERROR, "SPIR-V emission failed: %s",
                 err ? err : "unknown error");
       free(err);
+    }
+    return ok;
+  }
+
+  case MTLC_ARCH_METAL: {
+    FILE *out = fopen(path, "w");
+    char *err = NULL;
+    MslEmitOptions metal_options;
+    int ok;
+    if (!out) {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "could not open Metal output '%s'",
+                path);
+      return 0;
+    }
+    msl_emit_default_options(&metal_options);
+    metal_options.version_major = mtlc_context_metal_version_major(ctx);
+    metal_options.version_minor = mtlc_context_metal_version_minor(ctx);
+    ok = msl_emit_program(module->ir, out, &metal_options, &err);
+    fclose(out);
+    if (!ok) {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "Metal emission failed: %s",
+                err ? err : "unknown error");
+      free(err);
+      remove(path);
     }
     return ok;
   }

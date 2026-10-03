@@ -48,6 +48,10 @@ int mtlc_context_set_ptx_tensor_tuple_budget(MtlcContext *ctx,
                                              int tuple_budget);
 int mtlc_context_ptx_tensor_tuple_budget(const MtlcContext *ctx);
 
+int mtlc_context_set_metal_version(MtlcContext *ctx, int major, int minor);
+int mtlc_context_metal_version_major(const MtlcContext *ctx);
+int mtlc_context_metal_version_minor(const MtlcContext *ctx);
+
 #ifdef __cplusplus
 }
 #endif

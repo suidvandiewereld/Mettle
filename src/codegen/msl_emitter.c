@@ -3921,6 +3921,43 @@ static void print_condition(MslFn *fn, const IRInstruction *term,
   }
 }
 
+static int block_prints_nothing(MslFn *fn, size_t b) {
+  MslBlock *block = &fn->blocks[b];
+  for (size_t i = block->lo; i < block->hi; i++) {
+    const IRInstruction *in = &fn->func->instructions[i];
+    if (in == block->term) {
+      break;
+    }
+    switch (in->op) {
+    case IR_OP_NOP:
+    case IR_OP_LABEL:
+    case IR_OP_DECLARE_LOCAL:
+    case IR_OP_ADDRESS_SPACE_ALLOC:
+    case IR_OP_ASYNC_COMMIT:
+    case IR_OP_ASYNC_WAIT:
+    case IR_OP_PREFETCH:
+    case IR_OP_TENSOR_COMMIT:
+      break;
+    default:
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int seq_prints_nothing(MslFn *fn, const GpuSNode *seq) {
+  if (!seq) {
+    return 1;
+  }
+  for (size_t i = 0; i < seq->child_count; i++) {
+    const GpuSNode *child = seq->children[i];
+    if (child->kind != GPU_SNODE_CODE || !block_prints_nothing(fn, child->block)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int seq_always_leaves(const GpuSNode *seq) {
   const GpuSNode *last;
   if (!seq || seq->child_count == 0) {
@@ -4008,8 +4045,8 @@ static void emit_tree(MslFn *fn, const GpuSNode *node) {
   case GPU_SNODE_IF: {
     char cond[4096];
     const IRInstruction *term = fn->blocks[node->block].term;
-    int then_empty = !node->then_node || node->then_node->child_count == 0;
-    int else_empty = !node->else_node || node->else_node->child_count == 0;
+    int then_empty = seq_prints_nothing(fn, node->then_node);
+    int else_empty = seq_prints_nothing(fn, node->else_node);
     if (!term) {
       mod_error(fn->m, "Metal: branch without a condition in '%s'",
                 fn_name(fn));

@@ -2600,6 +2600,20 @@ int main(int argc, char **argv) {
         spirv_count_opcode(spv, 57u) != 6u) {
       return fail("SPIR-V device reachability/function-call contract");
     }
+    {
+      char *metal = path_join(outdir, "pubapi_kernel.metal");
+      if (mtlc_context_set_metal_version(ctx, 2, 0) ||
+          !mtlc_context_set_metal_version(ctx, 3, 2) ||
+          mtlc_context_metal_version_major(ctx) != 3 ||
+          mtlc_context_metal_version_minor(ctx) != 2) {
+        return fail("Metal language version validation");
+      }
+      if (mtlc_emit(ctx, m, MTLC_ARCH_METAL, metal) ||
+          strcmp(mtlc_arch_name(MTLC_ARCH_METAL), "metal") != 0) {
+        return fail("Metal silently accepted 64-bit atomic read-modify-write");
+      }
+      free(metal);
+    }
     printf("gpu: %s, %s\n", ptx, spv);
     free(ptx);
     free(ptx_portable);
@@ -2620,6 +2634,16 @@ int main(int argc, char **argv) {
 
     if (mtlc_emit(ctx, m, MTLC_ARCH_SPIRV, spv)) {
       return fail("SPIR-V OpenCL 2.0 silently accepted non-uniform shuffle");
+    }
+    {
+      char *metal = path_join(outdir, "pubapi_subgroup_shuffle.metal");
+      if (!mtlc_emit(ctx, m, MTLC_ARCH_METAL, metal) ||
+          file_occurrences(metal, "simd_shuffle(") != 2 ||
+          !file_contains(metal, "simd_active_threads_mask") ||
+          !file_contains(metal, "#pragma METAL fp math_mode(safe)")) {
+        return fail("mtlc_emit Metal non-uniform shuffle");
+      }
+      free(metal);
     }
     free(ptx);
     free(spv);

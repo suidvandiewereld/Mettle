@@ -10,7 +10,8 @@ typedef enum {
   MTLC_ARCH_X86_64 = 0,
   MTLC_ARCH_ARM64,
   MTLC_ARCH_PTX,
-  MTLC_ARCH_SPIRV
+  MTLC_ARCH_SPIRV,
+  MTLC_ARCH_METAL
 } MtlcArch;
 
 typedef enum {
