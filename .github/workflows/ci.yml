@@ -463,3 +463,67 @@ jobs:
         run: |
           ./bin/mettle --version
           bash tools/test-elf-native.sh
+
+  # Apple silicon. The macOS runtime, the Mach-O link through cc, Apple's Metal
+  # compiler on every emitted kernel file, and Metal itself where the runner
+  # exposes a Metal 3 device. Not yet a required gate.
+  macos:
+    name: macOS arm64 and Metal
+    runs-on: macos-15
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show toolchain versions
+        run: |
+          cc --version
+          xcrun -sdk macosx metal --version || true
+          sw_vers
+
+      - name: Build compiler
+        run: make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build and run programs
+        run: |
+          ./bin/mettle --build examples/hello/hello.mettle -o /tmp/hello
+          /tmp/hello
+          ./bin/mettle --build tests/test_native_heap_threads.mettle -o /tmp/threads
+          /tmp/threads
+          ./bin/mettle --build tests/test_parallel_loop.mettle -o /tmp/parallel
+          /tmp/parallel
+
+      - name: Report the GPU
+        run: ./bin/mettle --gpu-info || true
+
+      - name: Apple's Metal compiler accepts every emitted kernel file
+        run: |
+          mkdir -p /tmp/metal
+          for source in tests/metal/metal_kernels.mettle tests/metal/metal_host_kernels.mettle \
+              examples/gpu_inference/decode_kernels.mettle tests/gpu/compute_kernels.mettle \
+              tests/gpu/subgroup_shuffle.mettle tests/gpu/tensor_loop.mettle \
+              tests/gpu/record_kernels.mettle tests/gpu/metal_coherence_scope.mettle; do
+            out="/tmp/metal/$(basename "$source" .mettle)"
+            ./bin/mettle -O --emit-metal "$source" -o "$out.metal"
+            xcrun -sdk macosx metal -std=metal3.2 -c "$out.metal" -o "$out.air"
+          done
+
+      - name: Metal contracts on the GPU
+        run: |
+          cc -std=c99 -O2 -DMETAL_HARNESS_NATIVE tests/metal/metal_harness.c \
+            src/runtime/metal_provider.c -framework Metal -framework Foundation \
+            -lobjc -o /tmp/metal_harness
+          /tmp/metal_harness /tmp/metal/metal_kernels.metal
+
+      - name: A Mettle host program drives Metal
+        run: |
+          ./bin/mettle --build tests/metal/metal_host_main.mettle -o /tmp/metal_host
+          METTLE_METAL_HOST_LIBRARY=/tmp/metal/metal_host_kernels.metal /tmp/metal_host
+
+      - name: The decode example on Metal
+        working-directory: examples/gpu_inference
+        run: |
+          ../../bin/mettle -O --emit-metal decode_kernels.mettle -o decode_kernels.metal \
+            --emit-kernel-decls=decode_decls.mettle
+          ../../bin/mettle --build --release decode_host.mettle -o /tmp/decode_host
+          /tmp/decode_host
