@@ -225,6 +225,11 @@ images, Linux emits ELF and reaches the kernel through direct system calls, so
 neither carries a libc. Windows has `std/ui` for windows and controls; Linux
 does not. See [what is missing](docs/known-limitations.md).
 
+macOS is newer. Mettle emits Mach-O for Apple silicon and Intel Macs, links
+against libSystem, and runs GPU kernels through Metal from the same `std/gpu`
+host code that drives CUDA. It has not yet run on a Mac; the `macos` CI job
+is the first place it will. See [macOS and Metal](docs/macos.md).
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md): install, first program, a tour of
