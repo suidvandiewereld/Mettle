@@ -1,0 +1,31 @@
+import "std/numerics";
+import "std/mem";
+
+const SCALES: Numerics = { k_order: k_ascending };
+
+extern fn h2f(bits: int32) -> float32 = "h2f";
+
+@numerics(SCALES) kernel(block = 32) pair_full(codes: uint16*, out: float32*) {
+  var t: int32 = thread.x;
+  var cw: int32 = (int32)codes[t];
+  var lo: int32 = (cw & 0x7F) << 5;
+  var hi: int32 = ((cw >> 8) & 0x7F) << 21;
+  out[t] = h2f((lo | hi) >> 16);
+}
+
+@numerics(SCALES) kernel(block = 32) pair_masked(codes: uint16*, out: float32*) {
+  var t: int32 = thread.x;
+  var cw: int32 = (int32)codes[t];
+  var lo: int32 = (cw & 0x3F) << 5;
+  var hi: int32 = ((cw >> 8) & 0x7F) << 21;
+  out[t] = h2f((lo | hi) >> 16);
+}
+
+@numerics(SCALES) fn pairs_agree() {
+  var codes: uint16* = (uint16*)numerics_input(64);
+  var one: float32* = (float32*)calloc(32, 4);
+  var two: float32* = (float32*)calloc(32, 4);
+  dispatch pair_full[grid: (1, 1, 1), block: (32, 1, 1)](codes, one);
+  dispatch pair_masked[grid: (1, 1, 1), block: (32, 1, 1)](codes, two);
+  numerics_same(one, two, 1, 32, 32);
+}

@@ -388,7 +388,30 @@ NumTerm num_byte(NumStore *store, NumTerm word, unsigned index) {
   if (node->op == NUM_CONCAT) {
     return num_arg(store, word, index);
   }
+  if (node->op == NUM_SEXT && index * 8u < node->imm) {
+    return num_byte(store, store->pool[node->args], index);
+  }
   return num_intern(store, NUM_BYTE, 8, index, &word, 1, NUM_FACT_ALL);
+}
+
+static NumTerm num_sext_under(NumStore *store, const NumTerm *bytes,
+                              unsigned count) {
+  const NumNode *top = num_node(store, bytes[count - 1]);
+  NumTerm wide;
+  if (!top || top->op != NUM_BYTE || top->imm != count - 1) {
+    return 0;
+  }
+  wide = store->pool[top->args];
+  if (num_opcode(store, wide) != NUM_SEXT ||
+      num_imm(store, wide) >= 8u * count) {
+    return 0;
+  }
+  for (unsigned i = 0; i + 1 < count; i++) {
+    if (num_byte(store, wide, i) != bytes[i]) {
+      return 0;
+    }
+  }
+  return wide;
 }
 
 NumTerm num_concat(NumStore *store, const NumTerm *bytes, unsigned count) {
@@ -426,6 +449,10 @@ NumTerm num_concat(NumStore *store, const NumTerm *bytes, unsigned count) {
     return num_const(store, 8u * count, value);
   }
   if (same && word && num_width(store, word) == 8u * count) {
+    return word;
+  }
+  word = num_sext_under(store, bytes, count);
+  if (word && num_width(store, word) == 8u * count) {
     return word;
   }
   return num_intern(store, NUM_CONCAT, 8u * count, 0, bytes, count,
@@ -467,12 +494,24 @@ NumTerm num_resize(NumStore *store, NumTerm value, unsigned width,
     num_bytes_of(store, value, bytes);
     return num_concat(store, bytes, width / 8u);
   }
-  if (!is_signed) {
+  {
     unsigned have = num_bytes_of(store, value, bytes);
-    for (unsigned i = have; i < width / 8u; i++) {
-      bytes[i] = num_const(store, 8, 0);
+    uint64_t top = 0;
+    NumTerm wide;
+    if (!have) {
+      return 0;
     }
-    return num_concat(store, bytes, width / 8u);
+    if (!is_signed || num_constant(store, bytes[have - 1], &top)) {
+      NumTerm fill = num_const(store, 8, is_signed && (top & 0x80u) ? 0xFF : 0);
+      for (unsigned i = have; i < width / 8u; i++) {
+        bytes[i] = fill;
+      }
+      return num_concat(store, bytes, width / 8u);
+    }
+    wide = num_sext_under(store, bytes, have);
+    if (wide) {
+      return num_resize(store, num_arg(store, wide, 0), width, 1);
+    }
   }
   return num_intern(store, NUM_SEXT, width, from, &value, 1, NUM_FACT_ALL);
 }

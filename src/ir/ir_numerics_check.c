@@ -411,7 +411,12 @@ static unsigned nc_interchangeable(const NumStore *store, NumTerm term) {
   if ((op == NUM_FADD || op == NUM_FMUL || op == NUM_FFMA) && count >= 2) {
     return 2;
   }
-  if (op == NUM_FCMP && count == 2 &&
+  if ((op == NUM_ADD || op == NUM_MUL || op == NUM_AND || op == NUM_OR ||
+       op == NUM_XOR) &&
+      count == 2) {
+    return 2;
+  }
+  if ((op == NUM_FCMP || op == NUM_ICMP) && count == 2 &&
       (imm == NUM_CMP_EQ || imm == NUM_CMP_NE)) {
     return 2;
   }
@@ -453,6 +458,10 @@ static unsigned nc_differing(const NumStore *store, NumTerm a, NumTerm b,
   return differing;
 }
 
+static int nc_both_constant(const NumStore *store, NumTerm a, NumTerm b) {
+  return num_opcode(store, a) == NUM_CONST && num_opcode(store, b) == NUM_CONST;
+}
+
 static void nc_part_walk(const NumStore *store, NcPartMemo *memo, NumTerm a,
                          NumTerm b, unsigned depth, NumTerm *pa, NumTerm *pb) {
   for (int guard = 0; guard < 100000; guard++) {
@@ -468,8 +477,13 @@ static void nc_part_walk(const NumStore *store, NcPartMemo *memo, NumTerm a,
     }
     differing = nc_differing(store, a, b, which, which_b);
     if (differing == 1) {
-      a = num_arg(store, a, which[0]);
-      b = num_arg(store, b, which_b[0]);
+      ca = num_arg(store, a, which[0]);
+      cb = num_arg(store, b, which_b[0]);
+      if (nc_both_constant(store, ca, cb)) {
+        break;
+      }
+      a = ca;
+      b = cb;
       continue;
     }
     if (differing > 1 && nc_reordered_sum(store, a, b)) {
@@ -484,6 +498,10 @@ static void nc_part_walk(const NumStore *store, NcPartMemo *memo, NumTerm a,
       NumTerm xa = num_arg(store, a, which[k]);
       NumTerm xb = num_arg(store, b, which_b[k]);
       NumTerm ra = 0, rb = 0;
+      if (nc_both_constant(store, xa, xb)) {
+        agree = 0;
+        break;
+      }
       if (!nc_part_lookup(memo, xa, xb, &ra, &rb)) {
         memo->visits++;
         nc_part_walk(store, memo, xa, xb, depth + 1, &ra, &rb);

@@ -2688,6 +2688,11 @@ $cases = @(
      Args = @("-O", "--emit-ptx", "--gpu-arch=gb10", "--explain")
      SkipBinaryCheck = $true
      OutputMustMatch = @("numerics contract Q4_TILES: proven for q4_whole, q4_halves", "numerics contract SOFT_ROWS: proven for soft_lane_major, soft_two_rows") },
+  @{ Name = "gpu_numerics_int32_copies"; Path = "tests/gpu/numerics_int32_copies.mettle"; ShouldSucceed = $true
+     Args = @("-O", "--emit-ptx", "--gpu-arch=gb10", "--explain")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("numerics contract SCALES: proven for scales_one, scales_two") },
+  @{ Name = "err_numerics_shared_operand"; Path = "tests/err_numerics_shared_operand.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "They part at and at line 11 of pair_full, of .input 0 byte 0. and .the constant 0x7f., against and at line 19 of pair_masked, of .input 0 byte 0. and .the constant 0x3f." },
   @{ Name = "err_numerics_k_reorder"; Path = "tests/err_numerics_k_reorder.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0004.: contract TILES accumulates K ascending, and tile_whole and tile_reversed visit the same K steps in different orders" },
   @{ Name = "err_numerics_split_k"; Path = "tests/err_numerics_split_k.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0004.: contract TILES accumulates K in one ascending chain, and tile_split splits it into partial sums" },
   @{ Name = "err_numerics_data_branch"; Path = "tests/err_numerics_data_branch.mettle"; ShouldSucceed = $false; Args = @("-O", "--emit-ptx", "--gpu-arch=gb10"); Pattern = "error.C0002.: contract TILES cannot be decided: harness tiles_agree stopped at line 31 of tile_checked: a branch on a value computed from the contract.s inputs" },

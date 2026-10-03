@@ -1,0 +1,43 @@
+import "std/numerics";
+import "std/mem";
+
+const SCALES: Numerics = { k_order: k_ascending };
+
+extern fn h2f(bits: int32) -> float32 = "h2f";
+
+@inline fn widen(c: int32, rw: int32) -> int32 {
+  var sh: int32 = 3 + ((rw >> 16) & 3);
+  return (c & 0x7F) << sh;
+}
+
+@inline fn widen_pair(cw: int32, rw: int32) -> uint32 {
+  return (uint32)(widen(cw & 0xFF, rw) | (widen((cw >> 8) & 0xFF, rw) << 16));
+}
+
+@numerics(SCALES) kernel(block = 32) scales_one(codes: uint16*, words: int32*, out: float32*) {
+  var t: int32 = thread.x;
+  var pair: uint32 = widen_pair((int32)codes[t], words[0]);
+  out[t * 2] = h2f((int32)(pair & 0xFFFF));
+  out[t * 2 + 1] = h2f((int32)(pair >> 16));
+}
+
+@numerics(SCALES) kernel(block = 16) scales_two(codes: uint16*, words: int32*, out: float32*) {
+  var t: int32 = thread.x;
+  var rw: int32 = words[0];
+  var lo: uint32 = widen_pair((int32)codes[t * 2], rw);
+  var hi: uint32 = widen_pair((int32)codes[t * 2 + 1], rw);
+  out[t * 4] = h2f((int32)(lo & 0xFFFF));
+  out[t * 4 + 1] = h2f((int32)(lo >> 16));
+  out[t * 4 + 2] = h2f((int32)(hi & 0xFFFF));
+  out[t * 4 + 3] = h2f((int32)(hi >> 16));
+}
+
+@numerics(SCALES) fn scales_agree() {
+  var codes: uint16* = (uint16*)numerics_input(64);
+  var words: int32* = (int32*)numerics_input(4);
+  var one: float32* = (float32*)calloc(64, 4);
+  var two: float32* = (float32*)calloc(64, 4);
+  dispatch scales_one[grid: (1, 1, 1), block: (32, 1, 1)](codes, words, one);
+  dispatch scales_two[grid: (1, 1, 1), block: (16, 1, 1)](codes, words, two);
+  numerics_same(one, two, 1, 64, 64);
+}
