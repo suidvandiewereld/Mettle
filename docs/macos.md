@@ -80,7 +80,10 @@ their output lands in the system log rather than on stdout; read it with
 
 Mettle needs a Metal 3 GPU, because kernels address device memory through
 64-bit GPU addresses: any Apple silicon Mac, or an Intel Mac with a recent
-AMD GPU. Metal 3.2, the default language version, needs macOS 15.
+AMD GPU. Metal 3.2, the default language version, needs macOS 15. For macOS
+14, emit with `--metal-version=3.1` and run with `METTLE_METAL_VERSION=3.1`;
+kernel printing and ordered device-scope atomics need 3.2 and are refused at
+3.1.
 
 ## Calling convention
 
