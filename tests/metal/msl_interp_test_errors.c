@@ -102,7 +102,7 @@ static const char helper_barrier_source[] =
   "}\n";
 
 static const char cross_thread_body[] =
-  "  threadgroup alignas(16) ulong slot[1];\n"
+  "  alignas(16) threadgroup ulong slot[1];\n"
   "  uint mine = 7u;\n"
   "  if (tid.x == 0u) {\n"
   "    *(threadgroup ulong*)((threadgroup uchar*)slot) = reinterpret_cast<ulong>(&mine);\n"
@@ -115,7 +115,7 @@ static const char cross_thread_body[] =
   "  threadgroup_barrier(mem_flags::mem_threadgroup);\n";
 
 static const char space_mismatch_body[] =
-  "  threadgroup alignas(16) uint tg[4];\n"
+  "  alignas(16) threadgroup uint tg[4];\n"
   "  ulong bits = reinterpret_cast<ulong>((threadgroup uchar*)tg);\n"
   "  device uint* d = reinterpret_cast<device uint*>(bits);\n"
   "  *d = 1u;\n";
@@ -146,15 +146,17 @@ const MslCase msl_error_cases[] = {
   {.name = "misaligned_vector", .body = "  float4 v = *(device float4*)(a.in + 1);\n", .input = eight_words, .input_count = 8,
    .error = "misaligned"},
   {.name = "write_constant_memory", .body = "  a.out = a.in;\n", .error = "line 5: write through a constant pointer"},
-  {.name = "address_space_cast", .body = "  threadgroup alignas(16) uint tg[4];\n  device uint* d = (device uint*)tg;\n",
+  {.name = "address_space_cast", .body = "  alignas(16) threadgroup uint tg[4];\n  device uint* d = (device uint*)tg;\n",
    .error = "changes the address space"},
   {.name = "address_space_mismatch", .body = space_mismatch_body, .error = "pointer to threadgroup memory used as a device pointer"},
   {.name = "uninitialized_local", .body = "  ulong2 v;\n", .error = "must be initialized"},
   {.name = "uninitialized_matrix_store", .body = "  simdgroup_float8x8 m;\n  simdgroup_store(m, (device float*)a.out, 8ul, ulong2(0ul, 0ul), false);\n",
    .block = {32}, .initial = one_word, .expect_count = 1, .error = "read before every element"},
-  {.name = "uninitialized_thread_array", .body = "  thread alignas(16) uint arr[4];\n  uint v = *(thread uint*)((thread uchar*)arr + 4l);\n",
+  {.name = "alignas_after_address_space", .body = "  threadgroup alignas(16) uint tg[4];\n",
+   .error = "alignas must come before the address space"},
+  {.name = "uninitialized_thread_array", .body = "  alignas(16) thread uint arr[4];\n  uint v = *(thread uint*)((thread uchar*)arr + 4l);\n",
    .error = "read of uninitialized thread memory"},
-  {.name = "uninitialized_threadgroup", .body = "  threadgroup alignas(16) uint tg[4];\n  uint v = *(threadgroup uint*)((threadgroup uchar*)tg);\n",
+  {.name = "uninitialized_threadgroup", .body = "  alignas(16) threadgroup uint tg[4];\n  uint v = *(threadgroup uint*)((threadgroup uchar*)tg);\n",
    .error = "uninitialized threadgroup memory"},
   {.name = "bool_not_zero_or_one", .body = "  bool b = *(device bool*)((device uchar*)a.in);\n", .input = bad_bool, .input_count = 1,
    .error = "neither 0 nor 1"},

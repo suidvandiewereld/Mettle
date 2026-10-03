@@ -72,7 +72,7 @@ Line comments `//` may appear and are ignored. Identifiers are C identifiers.
 
 - `TYPE NAME = EXPR;`, `TYPE NAME;` (records/matrices/arrays),
   `TYPE NAME = {};` (records),
-  `threadgroup alignas(16) TYPE NAME[N];` and `thread alignas(16) TYPE NAME[N];`
+  `alignas(16) threadgroup TYPE NAME[N];` and `alignas(16) thread TYPE NAME[N];`
   (arrays, kernel scope only for threadgroup).
 - `LVALUE = EXPR;` where LVALUE is a name, `*(PTR-TYPE)(EXPR)`, or a matrix
   array element `NAME[INT]`.

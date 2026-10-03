@@ -357,30 +357,9 @@ static void type_checker_if_join_arm(TypeChecker *checker,
   free(arm_state);
 }
 
-int type_checker_check_if_statement(TypeChecker *checker,
-                                           ASTNode *statement) {
-  IfStatement *if_stmt = (IfStatement *)statement->data;
-  if (!if_stmt || !if_stmt->condition) {
-    type_checker_set_error_at_location(checker, statement->location,
-                                       "Invalid if statement");
-    return 0;
-  }
-
-  Type *condition_type = type_checker_infer_type(checker, if_stmt->condition);
-  if (!condition_type) {
-    return 0;
-  }
-  if (type_checker_reject_comptime_escape(checker, if_stmt->condition->location,
-                                          condition_type)) {
-    return 0;
-  }
-
-  if (!type_checker_is_numeric_type(condition_type)) {
-    type_checker_report_type_mismatch(checker, if_stmt->condition->location,
-                                      "numeric type", condition_type->name);
-    return 0;
-  }
-
+static int type_checker_if_check_uniform_condition(TypeChecker *checker,
+                                                   IfStatement *if_stmt,
+                                                   Type *condition_type) {
   if (if_stmt->uniform_mode || (condition_type && condition_type->refine_uniform)) {
     const char *why = NULL;
     if (!type_checker_expression_is_uniform(checker, if_stmt->condition,
@@ -411,6 +390,37 @@ int type_checker_check_if_statement(TypeChecker *checker,
     const char *why = NULL;
     if_stmt->condition_uniform =
         type_checker_expression_is_uniform(checker, if_stmt->condition, &why);
+  }
+  return 1;
+}
+
+int type_checker_check_if_statement(TypeChecker *checker,
+                                           ASTNode *statement) {
+  IfStatement *if_stmt = (IfStatement *)statement->data;
+  if (!if_stmt || !if_stmt->condition) {
+    type_checker_set_error_at_location(checker, statement->location,
+                                       "Invalid if statement");
+    return 0;
+  }
+
+  Type *condition_type = type_checker_infer_type(checker, if_stmt->condition);
+  if (!condition_type) {
+    return 0;
+  }
+  if (type_checker_reject_comptime_escape(checker, if_stmt->condition->location,
+                                          condition_type)) {
+    return 0;
+  }
+
+  if (!type_checker_is_numeric_type(condition_type)) {
+    type_checker_report_type_mismatch(checker, if_stmt->condition->location,
+                                      "numeric type", condition_type->name);
+    return 0;
+  }
+
+  if (!type_checker_if_check_uniform_condition(checker, if_stmt,
+                                               condition_type)) {
+    return 0;
   }
 
   size_t init_snapshot_count = 0;

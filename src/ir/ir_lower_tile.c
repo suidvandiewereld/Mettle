@@ -185,6 +185,72 @@ static int tile_result(IRLoweringContext *context, IRFunction *function,
   return tile_new_temp(context, function, type, location, out);
 }
 
+static int tile_call_operands(IRLoweringContext *context,
+                              IRFunction *function, CallExpression *call,
+                              Type *type, IROperand *arguments,
+                              MtlcType **argument_types, const char **op,
+                              size_t *count) {
+  Type *element = NULL;
+  switch (call->tile_builtin) {
+  case TILE_BUILTIN_ROW:
+    *op = "row";
+    break;
+  case TILE_BUILTIN_COL:
+    *op = "col";
+    break;
+  case TILE_BUILTIN_ROW_MAX:
+  case TILE_BUILTIN_ROW_SUM:
+    *op = call->tile_builtin == TILE_BUILTIN_ROW_MAX ? "row_max" : "row_sum";
+    if (!tile_operand(context, function, call->arguments[0], NULL,
+                      &arguments[0], &argument_types[0])) {
+      return 0;
+    }
+    *count = 1;
+    break;
+  case TILE_BUILTIN_SELECT:
+    *op = "select";
+    element = type->base_type;
+    if (!tile_operand(context, function, call->arguments[0], NULL,
+                      &arguments[0], &argument_types[0]) ||
+        !tile_operand(context, function, call->arguments[1], element,
+                      &arguments[1], &argument_types[1]) ||
+        !tile_operand(context, function, call->arguments[2], element,
+                      &arguments[2], &argument_types[2])) {
+      tile_release(arguments, 3);
+      return 0;
+    }
+    *count = 3;
+    break;
+  case TILE_BUILTIN_MAX:
+  case TILE_BUILTIN_MIN:
+    *op = call->tile_builtin == TILE_BUILTIN_MAX ? "max" : "min";
+    element = type->base_type;
+    if (!tile_operand(context, function, call->arguments[0], element,
+                      &arguments[0], &argument_types[0]) ||
+        !tile_operand(context, function, call->arguments[1], element,
+                      &arguments[1], &argument_types[1])) {
+      tile_release(arguments, 2);
+      return 0;
+    }
+    *count = 2;
+    break;
+  case TILE_BUILTIN_MATH:
+    *op = tile_math_name(call->function_name);
+    if (!*op || !tile_operand(context, function, call->arguments[0], NULL,
+                              &arguments[0], &argument_types[0])) {
+      if (!*op) ir_set_error(context, "Unknown tile math function");
+      return 0;
+    }
+    *count = 1;
+    break;
+  default:
+    ir_set_error(context, "Call '%s' reached tile lowering",
+                 call->function_name ? call->function_name : "?");
+    return 0;
+  }
+  return 1;
+}
+
 int ir_lower_tile_expression(IRLoweringContext *context, IRFunction *function,
                              ASTNode *expression, const IROperand *dest,
                              IROperand *out) {
@@ -258,62 +324,8 @@ int ir_lower_tile_expression(IRLoweringContext *context, IRFunction *function,
   }
   case AST_FUNCTION_CALL: {
     CallExpression *call = (CallExpression *)expression->data;
-    Type *element = NULL;
-    switch (call->tile_builtin) {
-    case TILE_BUILTIN_ROW:
-      op = "row";
-      break;
-    case TILE_BUILTIN_COL:
-      op = "col";
-      break;
-    case TILE_BUILTIN_ROW_MAX:
-    case TILE_BUILTIN_ROW_SUM:
-      op = call->tile_builtin == TILE_BUILTIN_ROW_MAX ? "row_max" : "row_sum";
-      if (!tile_operand(context, function, call->arguments[0], NULL,
-                        &arguments[0], &argument_types[0])) {
-        return 0;
-      }
-      count = 1;
-      break;
-    case TILE_BUILTIN_SELECT:
-      op = "select";
-      element = type->base_type;
-      if (!tile_operand(context, function, call->arguments[0], NULL,
-                        &arguments[0], &argument_types[0]) ||
-          !tile_operand(context, function, call->arguments[1], element,
-                        &arguments[1], &argument_types[1]) ||
-          !tile_operand(context, function, call->arguments[2], element,
-                        &arguments[2], &argument_types[2])) {
-        tile_release(arguments, 3);
-        return 0;
-      }
-      count = 3;
-      break;
-    case TILE_BUILTIN_MAX:
-    case TILE_BUILTIN_MIN:
-      op = call->tile_builtin == TILE_BUILTIN_MAX ? "max" : "min";
-      element = type->base_type;
-      if (!tile_operand(context, function, call->arguments[0], element,
-                        &arguments[0], &argument_types[0]) ||
-          !tile_operand(context, function, call->arguments[1], element,
-                        &arguments[1], &argument_types[1])) {
-        tile_release(arguments, 2);
-        return 0;
-      }
-      count = 2;
-      break;
-    case TILE_BUILTIN_MATH:
-      op = tile_math_name(call->function_name);
-      if (!op || !tile_operand(context, function, call->arguments[0], NULL,
-                               &arguments[0], &argument_types[0])) {
-        if (!op) ir_set_error(context, "Unknown tile math function");
-        return 0;
-      }
-      count = 1;
-      break;
-    default:
-      ir_set_error(context, "Call '%s' reached tile lowering",
-                   call->function_name ? call->function_name : "?");
+    if (!tile_call_operands(context, function, call, type, arguments,
+                            argument_types, &op, &count)) {
       return 0;
     }
     break;

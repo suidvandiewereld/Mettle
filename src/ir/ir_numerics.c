@@ -527,76 +527,141 @@ static NumTerm num_byte_op(NumStore *store, NumOp op, NumTerm x, NumTerm y) {
   return num_intern(store, op, 8, 0, args, 2, NUM_FACT_ALL);
 }
 
+static int num_integer_compare(const NumStore *store, uint64_t imm,
+                               const NumTerm *args, uint64_t a, uint64_t b) {
+  int result = 0;
+  uint64_t ua = a & num_mask(num_width(store, args[0]));
+  uint64_t ub = b & num_mask(num_width(store, args[1]));
+  int64_t xa = num_signed(a, num_width(store, args[0]));
+  int64_t xb = num_signed(b, num_width(store, args[1]));
+  switch ((NumCompare)imm) {
+  case NUM_CMP_EQ: result = ua == ub; break;
+  case NUM_CMP_NE: result = ua != ub; break;
+  case NUM_CMP_LT: result = xa < xb; break;
+  case NUM_CMP_LE: result = xa <= xb; break;
+  case NUM_CMP_GT: result = xa > xb; break;
+  case NUM_CMP_GE: result = xa >= xb; break;
+  case NUM_CMP_ULT: result = ua < ub; break;
+  case NUM_CMP_ULE: result = ua <= ub; break;
+  case NUM_CMP_UGT: result = ua > ub; break;
+  case NUM_CMP_UGE: result = ua >= ub; break;
+  default: break;
+  }
+  return result;
+}
+
+static int num_integer_fold(const NumStore *store, NumOp op, unsigned width,
+                            uint64_t imm, const NumTerm *args, uint64_t a,
+                            uint64_t b, uint64_t *value) {
+  uint64_t mask = num_mask(width);
+  int64_t sa = num_signed(a, width), sb = num_signed(b, width);
+  switch (op) {
+  case NUM_ADD: *value = a + b; return 1;
+  case NUM_SUB: *value = a - b; return 1;
+  case NUM_MUL: *value = a * b; return 1;
+  case NUM_AND: *value = a & b; return 1;
+  case NUM_OR: *value = a | b; return 1;
+  case NUM_XOR: *value = a ^ b; return 1;
+  case NUM_SHL: *value = b >= width ? 0 : a << b; return 1;
+  case NUM_LSHR: *value = b >= width ? 0 : (a & mask) >> b; return 1;
+  case NUM_ASHR:
+    *value = (uint64_t)(sa >> (b >= width ? width - 1 : b));
+    return 1;
+  case NUM_UDIV:
+    if ((b & mask) != 0) {
+      *value = (a & mask) / (b & mask);
+      return 1;
+    }
+    return 0;
+  case NUM_UREM:
+    if ((b & mask) != 0) {
+      *value = (a & mask) % (b & mask);
+      return 1;
+    }
+    return 0;
+  case NUM_SDIV:
+    if (sb != 0 && !(sb == -1 && sa == INT64_MIN)) {
+      *value = (uint64_t)(sa / sb);
+      return 1;
+    }
+    return 0;
+  case NUM_SREM:
+    if (sb != 0 && !(sb == -1 && sa == INT64_MIN)) {
+      *value = (uint64_t)(sa % sb);
+      return 1;
+    }
+    return 0;
+  case NUM_ICMP:
+    *value = (uint64_t)num_integer_compare(store, imm, args, a, b);
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static NumTerm num_integer_bytewise(NumStore *store, NumOp op,
+                                    const NumTerm *args) {
+  NumTerm x[8], y[8], r[8];
+  unsigned n = num_bytes_of(store, args[0], x);
+  num_bytes_of(store, args[1], y);
+  for (unsigned i = 0; i < n; i++) r[i] = num_byte_op(store, op, x[i], y[i]);
+  return num_concat(store, r, n);
+}
+
+static NumTerm num_integer_byte_shift(NumStore *store, NumOp op,
+                                      NumTerm value, uint64_t b) {
+  NumTerm x[8], r[8];
+  unsigned n = num_bytes_of(store, value, x);
+  unsigned shift = (unsigned)(b / 8u);
+  for (unsigned i = 0; i < n; i++) {
+    if (op == NUM_SHL) {
+      r[i] = i >= shift ? x[i - shift] : num_const(store, 8, 0);
+    } else {
+      r[i] = i + shift < n ? x[i + shift] : num_const(store, 8, 0);
+    }
+  }
+  return num_concat(store, r, n);
+}
+
+static NumTerm num_integer_binary(NumStore *store, NumOp op, unsigned width,
+                                  uint64_t imm, const NumTerm *args, int ac,
+                                  uint64_t a, int bc, uint64_t b) {
+  uint64_t mask = num_mask(width);
+  NumTerm ordered[2];
+  if ((op == NUM_ADD || op == NUM_SUB || op == NUM_OR || op == NUM_XOR ||
+       op == NUM_SHL || op == NUM_LSHR || op == NUM_ASHR) &&
+      bc && (b & mask) == 0) {
+    return args[0];
+  }
+  if (op == NUM_ADD && ac && (a & mask) == 0) return args[1];
+  if (op == NUM_MUL && bc && (b & mask) == 1) return args[0];
+  if (op == NUM_MUL && ac && (a & mask) == 1) return args[1];
+  if (op == NUM_MUL && ((bc && (b & mask) == 0) || (ac && (a & mask) == 0)))
+    return num_const(store, width, 0);
+  if (op == NUM_ADD || op == NUM_MUL || op == NUM_AND || op == NUM_OR ||
+      op == NUM_XOR ||
+      (op == NUM_ICMP && (imm == NUM_CMP_EQ || imm == NUM_CMP_NE))) {
+    ordered[0] = args[0] < args[1] ? args[0] : args[1];
+    ordered[1] = args[0] < args[1] ? args[1] : args[0];
+    return num_intern(store, op, width, imm, ordered, 2, NUM_FACT_ALL);
+  }
+  return num_intern(store, op, width, imm, args, 2, NUM_FACT_ALL);
+}
+
 static NumTerm num_integer(NumStore *store, NumOp op, unsigned width,
                            uint64_t imm, const NumTerm *args,
                            unsigned count) {
-  uint64_t a = 0, b = 0;
+  uint64_t a = 0, b = 0, folded = 0;
   int ac = count > 0 && num_constant(store, args[0], &a);
   int bc = count > 1 && num_constant(store, args[1], &b);
-  uint64_t mask = num_mask(width);
-  NumTerm ordered[2];
-  if (count == 2 && ac && bc) {
-    int64_t sa = num_signed(a, width), sb = num_signed(b, width);
-    switch (op) {
-    case NUM_ADD: return num_const(store, width, a + b);
-    case NUM_SUB: return num_const(store, width, a - b);
-    case NUM_MUL: return num_const(store, width, a * b);
-    case NUM_AND: return num_const(store, width, a & b);
-    case NUM_OR: return num_const(store, width, a | b);
-    case NUM_XOR: return num_const(store, width, a ^ b);
-    case NUM_SHL: return num_const(store, width, b >= width ? 0 : a << b);
-    case NUM_LSHR:
-      return num_const(store, width, b >= width ? 0 : (a & mask) >> b);
-    case NUM_ASHR:
-      return num_const(store, width,
-                       (uint64_t)(sa >> (b >= width ? width - 1 : b)));
-    case NUM_UDIV:
-      if ((b & mask) != 0) return num_const(store, width, (a & mask) / (b & mask));
-      break;
-    case NUM_UREM:
-      if ((b & mask) != 0) return num_const(store, width, (a & mask) % (b & mask));
-      break;
-    case NUM_SDIV:
-      if (sb != 0 && !(sb == -1 && sa == INT64_MIN))
-        return num_const(store, width, (uint64_t)(sa / sb));
-      break;
-    case NUM_SREM:
-      if (sb != 0 && !(sb == -1 && sa == INT64_MIN))
-        return num_const(store, width, (uint64_t)(sa % sb));
-      break;
-    case NUM_ICMP: {
-      int result = 0;
-      uint64_t ua = a & num_mask(num_width(store, args[0]));
-      uint64_t ub = b & num_mask(num_width(store, args[1]));
-      int64_t xa = num_signed(a, num_width(store, args[0]));
-      int64_t xb = num_signed(b, num_width(store, args[1]));
-      switch ((NumCompare)imm) {
-      case NUM_CMP_EQ: result = ua == ub; break;
-      case NUM_CMP_NE: result = ua != ub; break;
-      case NUM_CMP_LT: result = xa < xb; break;
-      case NUM_CMP_LE: result = xa <= xb; break;
-      case NUM_CMP_GT: result = xa > xb; break;
-      case NUM_CMP_GE: result = xa >= xb; break;
-      case NUM_CMP_ULT: result = ua < ub; break;
-      case NUM_CMP_ULE: result = ua <= ub; break;
-      case NUM_CMP_UGT: result = ua > ub; break;
-      case NUM_CMP_UGE: result = ua >= ub; break;
-      default: break;
-      }
-      return num_const(store, width, (uint64_t)result);
-    }
-    default:
-      break;
-    }
+  if (count == 2 && ac && bc &&
+      num_integer_fold(store, op, width, imm, args, a, b, &folded)) {
+    return num_const(store, width, folded);
   }
   if ((op == NUM_AND || op == NUM_OR || op == NUM_XOR) && count == 2 &&
       width % 8u == 0 && num_width(store, args[0]) == width &&
       num_width(store, args[1]) == width) {
-    NumTerm x[8], y[8], r[8];
-    unsigned n = num_bytes_of(store, args[0], x);
-    num_bytes_of(store, args[1], y);
-    for (unsigned i = 0; i < n; i++) r[i] = num_byte_op(store, op, x[i], y[i]);
-    return num_concat(store, r, n);
+    return num_integer_bytewise(store, op, args);
   }
   if ((op == NUM_SHL || op == NUM_LSHR) && count == 2 && bc &&
       width % 8u == 0 && num_width(store, args[0]) == width) {
@@ -604,37 +669,11 @@ static NumTerm num_integer(NumStore *store, NumOp op, unsigned width,
       return num_const(store, width, 0);
     }
     if (b % 8u == 0) {
-      NumTerm x[8], r[8];
-      unsigned n = num_bytes_of(store, args[0], x);
-      unsigned shift = (unsigned)(b / 8u);
-      for (unsigned i = 0; i < n; i++) {
-        if (op == NUM_SHL) {
-          r[i] = i >= shift ? x[i - shift] : num_const(store, 8, 0);
-        } else {
-          r[i] = i + shift < n ? x[i + shift] : num_const(store, 8, 0);
-        }
-      }
-      return num_concat(store, r, n);
+      return num_integer_byte_shift(store, op, args[0], b);
     }
   }
   if (count == 2) {
-    if ((op == NUM_ADD || op == NUM_SUB || op == NUM_OR || op == NUM_XOR ||
-         op == NUM_SHL || op == NUM_LSHR || op == NUM_ASHR) &&
-        bc && (b & mask) == 0) {
-      return args[0];
-    }
-    if (op == NUM_ADD && ac && (a & mask) == 0) return args[1];
-    if (op == NUM_MUL && bc && (b & mask) == 1) return args[0];
-    if (op == NUM_MUL && ac && (a & mask) == 1) return args[1];
-    if (op == NUM_MUL && ((bc && (b & mask) == 0) || (ac && (a & mask) == 0)))
-      return num_const(store, width, 0);
-    if (op == NUM_ADD || op == NUM_MUL || op == NUM_AND || op == NUM_OR ||
-        op == NUM_XOR ||
-        (op == NUM_ICMP && (imm == NUM_CMP_EQ || imm == NUM_CMP_NE))) {
-      ordered[0] = args[0] < args[1] ? args[0] : args[1];
-      ordered[1] = args[0] < args[1] ? args[1] : args[0];
-      return num_intern(store, op, width, imm, ordered, 2, NUM_FACT_ALL);
-    }
+    return num_integer_binary(store, op, width, imm, args, ac, a, bc, b);
   }
   return num_intern(store, op, width, imm, args, count, NUM_FACT_ALL);
 }
@@ -710,6 +749,108 @@ static unsigned num_float_facts(NumStore *store, NumOp op, uint64_t imm,
   }
 }
 
+static int num_fold_convert(NumStore *store, uint64_t imm, uint64_t v,
+                            NumTerm *out) {
+  switch ((NumConvert)imm) {
+  case NUM_CVT_F16_TO_F32:
+    *out = num_const(store, 32, mettle_f16bits_to_f32bits((uint16_t)v));
+    return 1;
+  case NUM_CVT_BF16_TO_F32:
+    *out = num_const(store, 32, mettle_bf16bits_to_f32bits((uint16_t)v));
+    return 1;
+  case NUM_CVT_F32_TO_F16:
+    *out = num_const(store, 16, mettle_f32bits_to_f16bits((uint32_t)v));
+    return 1;
+  case NUM_CVT_F32_TO_BF16:
+    *out = num_const(store, 16, mettle_f32bits_to_bf16bits((uint32_t)v));
+    return 1;
+  case NUM_CVT_F32_TO_F64:
+    *out = num_const(store, 64, num_f64_bits((double)num_f32(v)));
+    return 1;
+  case NUM_CVT_F64_TO_F32:
+    *out = num_const(store, 32, num_f32_bits((float)num_f64(v)));
+    return 1;
+  case NUM_CVT_S64_TO_F32:
+    *out = num_const(store, 32, num_f32_bits((float)(int64_t)v));
+    return 1;
+  case NUM_CVT_U64_TO_F32:
+    *out = num_const(store, 32, num_f32_bits((float)v));
+    return 1;
+  case NUM_CVT_S64_TO_F64:
+    *out = num_const(store, 64, num_f64_bits((double)(int64_t)v));
+    return 1;
+  case NUM_CVT_U64_TO_F64:
+    *out = num_const(store, 64, num_f64_bits((double)v));
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static int num_fold_float32(NumStore *store, NumOp op, uint64_t imm,
+                            const uint64_t *v, NumTerm *out) {
+  float a = num_f32(v[0]), b = num_f32(v[1]), r;
+  switch (op) {
+  case NUM_FADD: r = a + b; break;
+  case NUM_FSUB: r = a - b; break;
+  case NUM_FMUL: r = a * b; break;
+  case NUM_FDIV: r = a / b; break;
+  case NUM_FFMA: r = mettle_fmaf_exact(a, b, num_f32(v[2])); break;
+  case NUM_FNEG: r = -a; break;
+  case NUM_FABS: r = a < 0.0f || (a == 0.0f && (v[0] & 0x80000000u)) ? -a : a; break;
+  case NUM_FMAX: r = num_max_num(a, b, 1); break;
+  case NUM_FMIN: r = num_max_num(a, b, 0); break;
+  case NUM_FCMP: {
+    int result = 0;
+    switch ((NumCompare)imm) {
+    case NUM_CMP_EQ: result = a == b; break;
+    case NUM_CMP_NE: result = a != b; break;
+    case NUM_CMP_LT: result = a < b; break;
+    case NUM_CMP_LE: result = a <= b; break;
+    case NUM_CMP_GT: result = a > b; break;
+    case NUM_CMP_GE: result = a >= b; break;
+    default: return 0;
+    }
+    *out = num_const(store, 64, (uint64_t)result);
+    return 1;
+  }
+  default:
+    return 0;
+  }
+  *out = num_const(store, 32, num_f32_bits(r));
+  return 1;
+}
+
+static int num_fold_float64(NumStore *store, NumOp op, uint64_t imm,
+                            const uint64_t *v, NumTerm *out) {
+  double a = num_f64(v[0]), b = num_f64(v[1]), r;
+  switch (op) {
+  case NUM_FADD: r = a + b; break;
+  case NUM_FSUB: r = a - b; break;
+  case NUM_FMUL: r = a * b; break;
+  case NUM_FDIV: r = a / b; break;
+  case NUM_FNEG: r = -a; break;
+  case NUM_FCMP: {
+    int result = 0;
+    switch ((NumCompare)imm) {
+    case NUM_CMP_EQ: result = a == b; break;
+    case NUM_CMP_NE: result = a != b; break;
+    case NUM_CMP_LT: result = a < b; break;
+    case NUM_CMP_LE: result = a <= b; break;
+    case NUM_CMP_GT: result = a > b; break;
+    case NUM_CMP_GE: result = a >= b; break;
+    default: return 0;
+    }
+    *out = num_const(store, 64, (uint64_t)result);
+    return 1;
+  }
+  default:
+    return 0;
+  }
+  *out = num_const(store, 64, num_f64_bits(r));
+  return 1;
+}
+
 static int num_fold_float(NumStore *store, NumOp op, unsigned width,
                           uint64_t imm, const NumTerm *args, unsigned count,
                           NumTerm *out) {
@@ -719,40 +860,7 @@ static int num_fold_float(NumStore *store, NumOp op, unsigned width,
   }
   if (count > 3) return 0;
   if (op == NUM_CVT) {
-    switch ((NumConvert)imm) {
-    case NUM_CVT_F16_TO_F32:
-      *out = num_const(store, 32, mettle_f16bits_to_f32bits((uint16_t)v[0]));
-      return 1;
-    case NUM_CVT_BF16_TO_F32:
-      *out = num_const(store, 32, mettle_bf16bits_to_f32bits((uint16_t)v[0]));
-      return 1;
-    case NUM_CVT_F32_TO_F16:
-      *out = num_const(store, 16, mettle_f32bits_to_f16bits((uint32_t)v[0]));
-      return 1;
-    case NUM_CVT_F32_TO_BF16:
-      *out = num_const(store, 16, mettle_f32bits_to_bf16bits((uint32_t)v[0]));
-      return 1;
-    case NUM_CVT_F32_TO_F64:
-      *out = num_const(store, 64, num_f64_bits((double)num_f32(v[0])));
-      return 1;
-    case NUM_CVT_F64_TO_F32:
-      *out = num_const(store, 32, num_f32_bits((float)num_f64(v[0])));
-      return 1;
-    case NUM_CVT_S64_TO_F32:
-      *out = num_const(store, 32, num_f32_bits((float)(int64_t)v[0]));
-      return 1;
-    case NUM_CVT_U64_TO_F32:
-      *out = num_const(store, 32, num_f32_bits((float)v[0]));
-      return 1;
-    case NUM_CVT_S64_TO_F64:
-      *out = num_const(store, 64, num_f64_bits((double)(int64_t)v[0]));
-      return 1;
-    case NUM_CVT_U64_TO_F64:
-      *out = num_const(store, 64, num_f64_bits((double)v[0]));
-      return 1;
-    default:
-      return 0;
-    }
+    return num_fold_convert(store, imm, v[0], out);
   }
   if (op == NUM_APPROX) {
     if (imm == NUM_APPROX_EX2 && width == 32 &&
@@ -763,69 +871,107 @@ static int num_fold_float(NumStore *store, NumOp op, unsigned width,
     return 0;
   }
   if (width == 32) {
-    float a = num_f32(v[0]), b = num_f32(v[1]), r;
-    switch (op) {
-    case NUM_FADD: r = a + b; break;
-    case NUM_FSUB: r = a - b; break;
-    case NUM_FMUL: r = a * b; break;
-    case NUM_FDIV: r = a / b; break;
-    case NUM_FFMA: r = mettle_fmaf_exact(a, b, num_f32(v[2])); break;
-    case NUM_FNEG: r = -a; break;
-    case NUM_FABS: r = a < 0.0f || (a == 0.0f && (v[0] & 0x80000000u)) ? -a : a; break;
-    case NUM_FMAX: r = num_max_num(a, b, 1); break;
-    case NUM_FMIN: r = num_max_num(a, b, 0); break;
-    case NUM_FCMP: {
-      int result = 0;
-      switch ((NumCompare)imm) {
-      case NUM_CMP_EQ: result = a == b; break;
-      case NUM_CMP_NE: result = a != b; break;
-      case NUM_CMP_LT: result = a < b; break;
-      case NUM_CMP_LE: result = a <= b; break;
-      case NUM_CMP_GT: result = a > b; break;
-      case NUM_CMP_GE: result = a >= b; break;
-      default: return 0;
-      }
-      *out = num_const(store, 64, (uint64_t)result);
-      return 1;
-    }
-    default:
-      return 0;
-    }
-    *out = num_const(store, 32, num_f32_bits(r));
-    return 1;
+    return num_fold_float32(store, op, imm, v, out);
   }
   if (width == 64) {
-    double a = num_f64(v[0]), b = num_f64(v[1]), r;
-    switch (op) {
-    case NUM_FADD: r = a + b; break;
-    case NUM_FSUB: r = a - b; break;
-    case NUM_FMUL: r = a * b; break;
-    case NUM_FDIV: r = a / b; break;
-    case NUM_FNEG: r = -a; break;
-    case NUM_FCMP: {
-      int result = 0;
-      switch ((NumCompare)imm) {
-      case NUM_CMP_EQ: result = a == b; break;
-      case NUM_CMP_NE: result = a != b; break;
-      case NUM_CMP_LT: result = a < b; break;
-      case NUM_CMP_LE: result = a <= b; break;
-      case NUM_CMP_GT: result = a > b; break;
-      case NUM_CMP_GE: result = a >= b; break;
-      default: return 0;
-      }
-      *out = num_const(store, 64, (uint64_t)result);
-      return 1;
-    }
-    default:
-      return 0;
-    }
-    *out = num_const(store, 64, num_f64_bits(r));
-    return 1;
+    return num_fold_float64(store, op, imm, v, out);
   }
   return 0;
 }
 
 static int num_term_less(NumTerm a, NumTerm b) { return a < b; }
+
+static NumTerm num_float_minmax(NumStore *store, NumOp op, unsigned width,
+                                uint64_t imm, NumTerm *args, unsigned count) {
+  NumTerm flat[NUM_MAX_ARGS];
+  unsigned n = 0;
+  int have_const = 0;
+  float constant = 0.0f;
+  for (unsigned i = 0; i < count; i++) {
+    if (num_opcode(store, args[i]) == op && num_width(store, args[i]) == width) {
+      unsigned inner = num_arg_count(store, args[i]);
+      for (unsigned j = 0; j < inner && n < NUM_MAX_ARGS; j++)
+        flat[n++] = num_arg(store, args[i], j);
+    } else if (n < NUM_MAX_ARGS) {
+      flat[n++] = args[i];
+    }
+  }
+  count = 0;
+  for (unsigned i = 0; i < n; i++) {
+    uint64_t bits;
+    if (width == 32 && num_constant(store, flat[i], &bits)) {
+      constant = have_const ? num_max_num(constant, num_f32(bits), op == NUM_FMAX)
+                            : num_f32(bits);
+      have_const = 1;
+      continue;
+    }
+    args[count++] = flat[i];
+  }
+  if (have_const) args[count++] = num_const(store, 32, num_f32_bits(constant));
+  for (unsigned i = 1; i < count; i++) {
+    NumTerm key = args[i];
+    unsigned j = i;
+    while (j > 0 && num_term_less(key, args[j - 1])) {
+      args[j] = args[j - 1];
+      j--;
+    }
+    args[j] = key;
+  }
+  n = 0;
+  for (unsigned i = 0; i < count; i++) {
+    if (n == 0 || args[n - 1] != args[i]) args[n++] = args[i];
+  }
+  count = n;
+  if (count == 1) return args[0];
+  return num_intern(store, op, width, imm, args, count,
+                    num_float_facts(store, op, imm, args, count));
+}
+
+static int num_float_identity(NumStore *store, NumOp op, unsigned width,
+                              const NumTerm *args, unsigned count,
+                              NumTerm *out) {
+  if (op == NUM_FADD && count == 2) {
+    for (int i = 0; i < 2; i++) {
+      NumTerm other = args[1 - i];
+      if (num_is_float_const(store, args[i], width, 0.0, 1)) {
+        *out = other;
+        return 1;
+      }
+      if (num_is_float_const(store, args[i], width, 0.0, 0) &&
+          !(num_facts(store, other) & NUM_FACT_NEGZERO)) {
+        *out = other;
+        return 1;
+      }
+    }
+  }
+  if (op == NUM_FSUB && count == 2) {
+    if (num_is_float_const(store, args[1], width, 0.0, 0)) {
+      *out = args[0];
+      return 1;
+    }
+    if (num_is_float_const(store, args[1], width, 0.0, 1) &&
+        !(num_facts(store, args[0]) & NUM_FACT_NEGZERO)) {
+      *out = args[0];
+      return 1;
+    }
+  }
+  if (op == NUM_FMUL && count == 2) {
+    if (num_is_float_const(store, args[1], width, 1.0, 0)) {
+      *out = args[0];
+      return 1;
+    }
+    if (num_is_float_const(store, args[0], width, 1.0, 0)) {
+      *out = args[1];
+      return 1;
+    }
+  }
+  if (op == NUM_FDIV && count == 2 &&
+      num_is_float_const(store, args[1], width, 1.0, 0)) {
+    *out = args[0];
+    return 1;
+  }
+  return 0;
+}
 
 static NumTerm num_float(NumStore *store, NumOp op, unsigned width,
                          uint64_t imm, const NumTerm *source,
@@ -846,74 +992,13 @@ static NumTerm num_float(NumStore *store, NumOp op, unsigned width,
                       num_float_facts(store, op, imm, args, count));
   }
   if (op == NUM_FMAX || op == NUM_FMIN) {
-    NumTerm flat[NUM_MAX_ARGS];
-    unsigned n = 0;
-    int have_const = 0;
-    float constant = 0.0f;
-    for (unsigned i = 0; i < count; i++) {
-      if (num_opcode(store, args[i]) == op && num_width(store, args[i]) == width) {
-        unsigned inner = num_arg_count(store, args[i]);
-        for (unsigned j = 0; j < inner && n < NUM_MAX_ARGS; j++)
-          flat[n++] = num_arg(store, args[i], j);
-      } else if (n < NUM_MAX_ARGS) {
-        flat[n++] = args[i];
-      }
-    }
-    count = 0;
-    for (unsigned i = 0; i < n; i++) {
-      uint64_t bits;
-      if (width == 32 && num_constant(store, flat[i], &bits)) {
-        constant = have_const ? num_max_num(constant, num_f32(bits), op == NUM_FMAX)
-                              : num_f32(bits);
-        have_const = 1;
-        continue;
-      }
-      args[count++] = flat[i];
-    }
-    if (have_const) args[count++] = num_const(store, 32, num_f32_bits(constant));
-    for (unsigned i = 1; i < count; i++) {
-      NumTerm key = args[i];
-      unsigned j = i;
-      while (j > 0 && num_term_less(key, args[j - 1])) {
-        args[j] = args[j - 1];
-        j--;
-      }
-      args[j] = key;
-    }
-    n = 0;
-    for (unsigned i = 0; i < count; i++) {
-      if (n == 0 || args[n - 1] != args[i]) args[n++] = args[i];
-    }
-    count = n;
-    if (count == 1) return args[0];
-    return num_intern(store, op, width, imm, args, count,
-                      num_float_facts(store, op, imm, args, count));
+    return num_float_minmax(store, op, width, imm, args, count);
   }
   if (num_fold_float(store, op, width, imm, args, count, &folded)) {
     return folded;
   }
-  if (op == NUM_FADD && count == 2) {
-    for (int i = 0; i < 2; i++) {
-      NumTerm other = args[1 - i];
-      if (num_is_float_const(store, args[i], width, 0.0, 1)) return other;
-      if (num_is_float_const(store, args[i], width, 0.0, 0) &&
-          !(num_facts(store, other) & NUM_FACT_NEGZERO))
-        return other;
-    }
-  }
-  if (op == NUM_FSUB && count == 2) {
-    if (num_is_float_const(store, args[1], width, 0.0, 0)) return args[0];
-    if (num_is_float_const(store, args[1], width, 0.0, 1) &&
-        !(num_facts(store, args[0]) & NUM_FACT_NEGZERO))
-      return args[0];
-  }
-  if (op == NUM_FMUL && count == 2) {
-    if (num_is_float_const(store, args[1], width, 1.0, 0)) return args[0];
-    if (num_is_float_const(store, args[0], width, 1.0, 0)) return args[1];
-  }
-  if (op == NUM_FDIV && count == 2 &&
-      num_is_float_const(store, args[1], width, 1.0, 0)) {
-    return args[0];
+  if (num_float_identity(store, op, width, args, count, &folded)) {
+    return folded;
   }
   if (op == NUM_FFMA && count == 3) {
     NumTerm pair[2];
@@ -1067,29 +1152,8 @@ static const char *num_compare_name(uint64_t imm) {
   }
 }
 
-const char *num_op_name(const NumStore *store, NumTerm term) {
-  const NumNode *node = num_node(store, term);
-  if (!node) return "nothing";
+static const char *num_float_op_name(const NumNode *node) {
   switch ((NumOp)node->op) {
-  case NUM_CONST: return "constant";
-  case NUM_INPUT: return "input byte";
-  case NUM_BYTE: return "byte of";
-  case NUM_CONCAT: return "bytes";
-  case NUM_ADD: return "add";
-  case NUM_SUB: return "sub";
-  case NUM_MUL: return "mul";
-  case NUM_AND: return "and";
-  case NUM_OR: return "or";
-  case NUM_XOR: return "xor";
-  case NUM_SHL: return "shl";
-  case NUM_LSHR: return "shr.u";
-  case NUM_ASHR: return "shr.s";
-  case NUM_UDIV: return "div.u";
-  case NUM_SDIV: return "div.s";
-  case NUM_UREM: return "rem.u";
-  case NUM_SREM: return "rem.s";
-  case NUM_SEXT: return "sign extension";
-  case NUM_ICMP: return "integer compare";
   case NUM_FADD: return node->width == 64 ? "add.rn.f64" : "add.rn.f32";
   case NUM_FSUB: return node->width == 64 ? "sub.rn.f64" : "sub.rn.f32";
   case NUM_FMUL: return node->width == 64 ? "mul.rn.f64" : "mul.rn.f32";
@@ -1113,11 +1177,38 @@ const char *num_op_name(const NumStore *store, NumTerm term) {
     case NUM_APPROX_TANH: return "tanh.approx.f32";
     default: return "approx";
     }
+  default: return "?";
+  }
+}
+
+const char *num_op_name(const NumStore *store, NumTerm term) {
+  const NumNode *node = num_node(store, term);
+  if (!node) return "nothing";
+  switch ((NumOp)node->op) {
+  case NUM_CONST: return "constant";
+  case NUM_INPUT: return "input byte";
+  case NUM_BYTE: return "byte of";
+  case NUM_CONCAT: return "bytes";
+  case NUM_ADD: return "add";
+  case NUM_SUB: return "sub";
+  case NUM_MUL: return "mul";
+  case NUM_AND: return "and";
+  case NUM_OR: return "or";
+  case NUM_XOR: return "xor";
+  case NUM_SHL: return "shl";
+  case NUM_LSHR: return "shr.u";
+  case NUM_ASHR: return "shr.s";
+  case NUM_UDIV: return "div.u";
+  case NUM_SDIV: return "div.s";
+  case NUM_UREM: return "rem.u";
+  case NUM_SREM: return "rem.s";
+  case NUM_SEXT: return "sign extension";
+  case NUM_ICMP: return "integer compare";
   case NUM_IDOT: return "int8 block dot";
   case NUM_MMA: return "mma.m16n8k16 step";
   case NUM_NIBBLE: return "nibble";
   case NUM_BSCALE: return "block scale";
-  default: return "?";
+  default: return num_float_op_name(node);
   }
 }
 

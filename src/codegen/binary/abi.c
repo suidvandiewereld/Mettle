@@ -1673,6 +1673,27 @@ static int code_generator_binary_mark_float_globals(
   return 1;
 }
 
+static int code_generator_binary_record_address_taken(
+    CodeGenerator *generator, IRFunction *ir_function,
+    BinaryFunctionContext *context) {
+  for (size_t i = 0; i < ir_function->instruction_count; i++) {
+    const IRInstruction *instruction = &ir_function->instructions[i];
+    if (!instruction || instruction->op != IR_OP_ADDRESS_OF ||
+        instruction->lhs.kind != IR_OPERAND_SYMBOL || !instruction->lhs.name) {
+      continue;
+    }
+    if (!binary_named_slot_table_add(&context->address_taken_symbols,
+                                     instruction->lhs.name, 1)) {
+      code_generator_set_error(
+          generator,
+          "Failed to record address-taken symbol metadata in function '%s'",
+          ir_function->name);
+      return 0;
+    }
+  }
+  return 1;
+}
+
 int code_generator_binary_prepare_function_context(
     CodeGenerator *generator,
     IRFunction *ir_function, BinaryFunctionContext *context) {
@@ -1698,21 +1719,10 @@ int code_generator_binary_prepare_function_context(
   parameter_home_size =
       (int)(ir_function->parameter_count * BINARY_FUNCTION_STACK_SLOT_SIZE);
 
-  for (size_t i = 0; i < ir_function->instruction_count; i++) {
-    const IRInstruction *instruction = &ir_function->instructions[i];
-    if (!instruction || instruction->op != IR_OP_ADDRESS_OF ||
-        instruction->lhs.kind != IR_OPERAND_SYMBOL || !instruction->lhs.name) {
-      continue;
-    }
-    if (!binary_named_slot_table_add(&context->address_taken_symbols,
-                                     instruction->lhs.name, 1)) {
-      code_generator_set_error(
-          generator,
-          "Failed to record address-taken symbol metadata in function '%s'",
-          ir_function->name);
-      binary_function_context_destroy(context);
-      return 0;
-    }
+  if (!code_generator_binary_record_address_taken(generator, ir_function,
+                                                  context)) {
+    binary_function_context_destroy(context);
+    return 0;
   }
 
   const MtlcType *fn_return_type =

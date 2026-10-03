@@ -1146,6 +1146,69 @@ static int ii_aggregate_value_is_bytes(IRInterpMachine *machine,
   return 1;
 }
 
+static int ii_var_write_aggregate(IRInterpMachine *machine,
+                                  const IIVar *var,
+                                  const IRInterpValue *value) {
+  unsigned long long src = (unsigned long long)ii_as_int(value);
+  unsigned long long dst = (unsigned long long)var->value.i;
+  long long src_off = 0, dst_off = 0;
+  IIBuffer *sbuf = ii_addr_to_buffer(machine, src, var->agg_size, &src_off);
+  IIBuffer *dbuf = ii_addr_to_buffer(machine, dst, var->agg_size, &dst_off);
+  if (!sbuf && dbuf) {
+    unsigned char bytes[8];
+    if (ii_aggregate_value_is_bytes(machine, value, var->agg_size, bytes)) {
+      memcpy(dbuf->data + dst_off, bytes, (size_t)var->agg_size);
+      return 1;
+    }
+  }
+  if (!sbuf || !dbuf) {
+    ii_fail(machine, IR_INTERP_TRAP,
+            "aggregate copy out of bounds / after free");
+    return 0;
+  }
+  if (machine->num && !ii_sym_copy(machine, dst, src, var->agg_size)) {
+    return 0;
+  }
+  if (sbuf != dbuf || src_off != dst_off) {
+    memmove(dbuf->data + dst_off, sbuf->data + src_off,
+            (size_t)var->agg_size);
+  }
+  if (sbuf->escaped_local && sbuf != dbuf) {
+    ii_reclaim_buffer(machine, (size_t)((sbuf->base - II_ADDR_BASE) /
+                                        II_ADDR_STRIDE));
+  }
+  return 1;
+}
+
+static unsigned long long ii_var_slot_raw(const IIVar *var,
+                                          const IRInterpValue *value) {
+  unsigned long long raw = 0;
+  if (var->slot_is_float) {
+    if (var->slot_size == 4) {
+      float f = (float)ii_as_float(value);
+      unsigned int bits;
+      memcpy(&bits, &f, 4);
+      raw = bits;
+    } else if (var->slot_size == 2 && var->slot_alias == IR_ALIAS_CLASS_BF16) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_bf16bits(b);
+    } else if (var->slot_size == 2) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
+    } else {
+      double d = ii_as_float(value);
+      memcpy(&raw, &d, 8);
+    }
+  } else {
+    raw = (unsigned long long)ii_as_int(value);
+  }
+  return raw;
+}
+
 static int ii_var_write(IRInterpMachine *machine, IIVar *var,
                         const IRInterpValue *value) {
   if (var->string_record && !value->is_float) {
@@ -1164,35 +1227,7 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
     }
   }
   if (var->agg_size > 0) {
-    unsigned long long src = (unsigned long long)ii_as_int(value);
-    unsigned long long dst = (unsigned long long)var->value.i;
-    long long src_off = 0, dst_off = 0;
-    IIBuffer *sbuf = ii_addr_to_buffer(machine, src, var->agg_size, &src_off);
-    IIBuffer *dbuf = ii_addr_to_buffer(machine, dst, var->agg_size, &dst_off);
-    if (!sbuf && dbuf) {
-      unsigned char bytes[8];
-      if (ii_aggregate_value_is_bytes(machine, value, var->agg_size, bytes)) {
-        memcpy(dbuf->data + dst_off, bytes, (size_t)var->agg_size);
-        return 1;
-      }
-    }
-    if (!sbuf || !dbuf) {
-      ii_fail(machine, IR_INTERP_TRAP,
-              "aggregate copy out of bounds / after free");
-      return 0;
-    }
-    if (machine->num && !ii_sym_copy(machine, dst, src, var->agg_size)) {
-      return 0;
-    }
-    if (sbuf != dbuf || src_off != dst_off) {
-      memmove(dbuf->data + dst_off, sbuf->data + src_off,
-              (size_t)var->agg_size);
-    }
-    if (sbuf->escaped_local && sbuf != dbuf) {
-      ii_reclaim_buffer(machine, (size_t)((sbuf->base - II_ADDR_BASE) /
-                                          II_ADDR_STRIDE));
-    }
-    return 1;
+    return ii_var_write_aggregate(machine, var, value);
   }
   if (!var->slotted) {
     var->value = *value;
@@ -1228,30 +1263,7 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
       return 1;
     }
   }
-  unsigned long long raw = 0;
-  if (var->slot_is_float) {
-    if (var->slot_size == 4) {
-      float f = (float)ii_as_float(value);
-      unsigned int bits;
-      memcpy(&bits, &f, 4);
-      raw = bits;
-    } else if (var->slot_size == 2 && var->slot_alias == IR_ALIAS_CLASS_BF16) {
-      float f = (float)ii_as_float(value);
-      uint32_t b;
-      memcpy(&b, &f, (size_t)4);
-      raw = (unsigned long long)mettle_f32bits_to_bf16bits(b);
-    } else if (var->slot_size == 2) {
-      float f = (float)ii_as_float(value);
-      uint32_t b;
-      memcpy(&b, &f, (size_t)4);
-      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
-    } else {
-      double d = ii_as_float(value);
-      memcpy(&raw, &d, 8);
-    }
-  } else {
-    raw = (unsigned long long)ii_as_int(value);
-  }
+  unsigned long long raw = ii_var_slot_raw(var, value);
   return ii_mem_write(machine, (unsigned long long)var->value.i,
                       var->slot_size, raw);
 }
@@ -5604,6 +5616,46 @@ static int ii_op_call_indirect(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
+static unsigned long long ii_store_raw(const IRInstruction *insn,
+                                       const IRInterpValue *value,
+                                       long long size) {
+  unsigned long long raw;
+  if (value->is_float || insn->is_float) {
+    if (size == 4) {
+      float f = (float)ii_as_float(value);
+      unsigned int bits;
+      memcpy(&bits, &f, 4);
+      raw = bits;
+    } else if (size == 8) {
+      double d = ii_as_float(value);
+      memcpy(&raw, &d, 8);
+    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_F16) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
+    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_BF16) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_bf16bits(b);
+    } else if (size == 2) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
+    } else {
+      raw = (unsigned long long)ii_as_int(value);
+    }
+    if (!value->is_float && !insn->is_float) {
+      raw = (unsigned long long)value->i;
+    }
+  } else {
+    raw = (unsigned long long)value->i;
+  }
+  return raw;
+}
+
 static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
                         const IRInstruction *insn) {
   unsigned long long addr;
@@ -5680,40 +5732,7 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
       return 1;
     }
   }
-  unsigned long long raw;
-  if (value.is_float || insn->is_float) {
-    if (size == 4) {
-      float f = (float)ii_as_float(&value);
-      unsigned int bits;
-      memcpy(&bits, &f, 4);
-      raw = bits;
-    } else if (size == 8) {
-      double d = ii_as_float(&value);
-      memcpy(&raw, &d, 8);
-    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_F16) {
-      float f = (float)ii_as_float(&value);
-      uint32_t b;
-      memcpy(&b, &f, (size_t)4);
-      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
-    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_BF16) {
-      float f = (float)ii_as_float(&value);
-      uint32_t b;
-      memcpy(&b, &f, (size_t)4);
-      raw = (unsigned long long)mettle_f32bits_to_bf16bits(b);
-    } else if (size == 2) {
-      float f = (float)ii_as_float(&value);
-      uint32_t b;
-      memcpy(&b, &f, (size_t)4);
-      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
-    } else {
-      raw = (unsigned long long)ii_as_int(&value);
-    }
-    if (!value.is_float && !insn->is_float) {
-      raw = (unsigned long long)value.i;
-    }
-  } else {
-    raw = (unsigned long long)value.i;
-  }
+  unsigned long long raw = ii_store_raw(insn, &value, size);
   if (!ii_mem_write(machine, addr, (int)size, raw)) {
     return 0;
   }

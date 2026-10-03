@@ -681,6 +681,60 @@ typedef struct {
   char *numerics_contract;
 } ParsedDecorators;
 
+static int parser_parse_numerics_decorator(Parser *parser,
+                                           ParsedDecorators *out) {
+  if (out->numerics_contract) {
+    parser_set_error(parser, "Duplicate '@numerics' decorator");
+    return 0;
+  }
+  parser_advance(parser);
+  if (!parser_expect(parser, TOKEN_LPAREN)) {
+    parser_set_error(parser, "Expected '(contract)' after '@numerics'");
+    return 0;
+  }
+  if (!parser_is_identifier_like(parser->current_token.type)) {
+    parser_set_error(parser,
+                     "'@numerics' names a contract: a const of type Numerics");
+    return 0;
+  }
+  out->numerics_contract = strdup(parser->current_token.value);
+  parser_advance(parser);
+  if (!parser_expect(parser, TOKEN_RPAREN)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int parser_parse_unroll_decorator(Parser *parser,
+                                         ParsedDecorators *out) {
+  if (out->unroll_factor) {
+    parser_set_error(parser, "Duplicate '@unroll' decorator");
+    return 0;
+  }
+  parser_advance(parser);
+  if (!parser_expect(parser, TOKEN_LPAREN)) {
+    parser_set_error(parser, "Expected '(factor)' after '@unroll'");
+    return 0;
+  }
+  if (parser->current_token.type != TOKEN_NUMBER ||
+      strchr(parser->current_token.value, '.')) {
+    parser_set_error(parser,
+                     "Expected an integer unroll factor in '@unroll(n)'");
+    return 0;
+  }
+  long long factor = strtoll(parser->current_token.value, NULL, 0);
+  if (factor < 2 || factor > 16) {
+    parser_set_error(parser, "'@unroll' factor must be between 2 and 16");
+    return 0;
+  }
+  out->unroll_factor = (int)factor;
+  parser_advance(parser);
+  if (!parser_expect(parser, TOKEN_RPAREN)) {
+    return 0;
+  }
+  return 1;
+}
+
 static int parser_parse_one_decorator(Parser *parser,
                                       ParsedDecorators *out) {
   parser_advance(parser);
@@ -792,23 +846,7 @@ static int parser_parse_one_decorator(Parser *parser,
       parser_advance(parser);
     }
   } else if (strcmp(name, "numerics") == 0) {
-    if (out->numerics_contract) {
-      parser_set_error(parser, "Duplicate '@numerics' decorator");
-      return 0;
-    }
-    parser_advance(parser);
-    if (!parser_expect(parser, TOKEN_LPAREN)) {
-      parser_set_error(parser, "Expected '(contract)' after '@numerics'");
-      return 0;
-    }
-    if (!parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser,
-                       "'@numerics' names a contract: a const of type Numerics");
-      return 0;
-    }
-    out->numerics_contract = strdup(parser->current_token.value);
-    parser_advance(parser);
-    if (!parser_expect(parser, TOKEN_RPAREN)) {
+    if (!parser_parse_numerics_decorator(parser, out)) {
       return 0;
     }
   } else if (strcmp(name, "parallel") == 0) {
@@ -819,29 +857,7 @@ static int parser_parse_one_decorator(Parser *parser,
     parser_advance(parser);
     out->parallel_mode = 1;
   } else if (strcmp(name, "unroll") == 0) {
-    if (out->unroll_factor) {
-      parser_set_error(parser, "Duplicate '@unroll' decorator");
-      return 0;
-    }
-    parser_advance(parser);
-    if (!parser_expect(parser, TOKEN_LPAREN)) {
-      parser_set_error(parser, "Expected '(factor)' after '@unroll'");
-      return 0;
-    }
-    if (parser->current_token.type != TOKEN_NUMBER ||
-        strchr(parser->current_token.value, '.')) {
-      parser_set_error(parser,
-                       "Expected an integer unroll factor in '@unroll(n)'");
-      return 0;
-    }
-    long long factor = strtoll(parser->current_token.value, NULL, 0);
-    if (factor < 2 || factor > 16) {
-      parser_set_error(parser, "'@unroll' factor must be between 2 and 16");
-      return 0;
-    }
-    out->unroll_factor = (int)factor;
-    parser_advance(parser);
-    if (!parser_expect(parser, TOKEN_RPAREN)) {
+    if (!parser_parse_unroll_decorator(parser, out)) {
       return 0;
     }
   } else {

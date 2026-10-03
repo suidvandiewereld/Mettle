@@ -1676,68 +1676,12 @@ static int type_checker_tensor_scope_option(TypeChecker *checker,
   return 1;
 }
 
-static int type_checker_tensor_scale_option(TypeChecker *checker,
+static int type_checker_tensor_layout_option(TypeChecker *checker,
                                       CallExpression *call, size_t i,
                                       MtlcTensorMmaDesc *desc,
                                       const char *option,
                                       const char *identifier, ASTNode *value) {
-  if (!strcmp(option, "a_scale_mode") ||
-             !strcmp(option, "b_scale_mode")) {
-    MtlcTensorScaleMode mode = MTLC_TENSOR_SCALE_NONE;
-    if (identifier && !strcmp(identifier, "none"))
-      mode = MTLC_TENSOR_SCALE_NONE;
-    else if (identifier && !strcmp(identifier, "per_tensor"))
-      mode = MTLC_TENSOR_SCALE_PER_TENSOR;
-    else if (identifier && !strcmp(identifier, "block16"))
-      mode = MTLC_TENSOR_SCALE_BLOCK_16;
-    else if (identifier && !strcmp(identifier, "block32"))
-      mode = MTLC_TENSOR_SCALE_BLOCK_32;
-    else {
-      type_checker_set_error_at_location(checker, value->location,
-                                         "Unknown tensor scale mode");
-      return 0;
-    }
-    if (option[0] == 'a') desc->a_scale_mode = mode;
-    else desc->b_scale_mode = mode;
-  } else if (!strcmp(option, "c_scale_mode")) {
-    if (identifier && !strcmp(identifier, "none"))
-      desc->c_scale_mode = MTLC_TENSOR_SCALE_NONE;
-    else if (identifier && !strcmp(identifier, "per_row"))
-      desc->c_scale_mode = MTLC_TENSOR_SCALE_PER_ROW;
-    else {
-      type_checker_set_error_at_location(
-          checker, value->location,
-          "Tensor C scale mode must be none or per_row");
-      return 0;
-    }
-  } else if (!strcmp(option, "a_scale_type") ||
-             !strcmp(option, "b_scale_type")) {
-    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
-    if (element != MTLC_TENSOR_ELEMENT_SCALE_UE8M0 &&
-        element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3 &&
-        element != MTLC_TENSOR_ELEMENT_FLOAT32 &&
-        element != MTLC_TENSOR_ELEMENT_FLOAT16) {
-      type_checker_set_error_at_location(
-          checker, value->location,
-          "Tensor scale type must be ue8m0, ue4m3, f32 or f16");
-      return 0;
-    }
-    if (option[0] == 'a') desc->a_scale_element = element;
-    else desc->b_scale_element = element;
-  } else if (!strcmp(option, "a_scale_values") ||
-             !strcmp(option, "b_scale_values")) {
-    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
-    if (element != MTLC_TENSOR_ELEMENT_FLOAT16 &&
-        element != MTLC_TENSOR_ELEMENT_BFLOAT16) {
-      type_checker_set_error_at_location(
-          checker, value->location,
-          "Tensor scale values must be f16 or bf16 (exact values of that "
-          "format, stored as the scale type)");
-      return 0;
-    }
-    if (option[0] == 'a') desc->a_scale_values = element;
-    else desc->b_scale_values = element;
-  } else if (!strcmp(option, "a_packing") ||
+  if (!strcmp(option, "a_packing") ||
              !strcmp(option, "b_packing")) {
     MtlcTensorPacking packing;
     if (identifier && (!strcmp(identifier, "logical") ||
@@ -1799,6 +1743,74 @@ static int type_checker_tensor_scale_option(TypeChecker *checker,
   } else {
     return type_checker_tensor_scope_option(checker, call, i, desc, option,
                                             identifier, value);
+  }
+  return 1;
+}
+
+static int type_checker_tensor_scale_option(TypeChecker *checker,
+                                      CallExpression *call, size_t i,
+                                      MtlcTensorMmaDesc *desc,
+                                      const char *option,
+                                      const char *identifier, ASTNode *value) {
+  if (!strcmp(option, "a_scale_mode") ||
+             !strcmp(option, "b_scale_mode")) {
+    MtlcTensorScaleMode mode = MTLC_TENSOR_SCALE_NONE;
+    if (identifier && !strcmp(identifier, "none"))
+      mode = MTLC_TENSOR_SCALE_NONE;
+    else if (identifier && !strcmp(identifier, "per_tensor"))
+      mode = MTLC_TENSOR_SCALE_PER_TENSOR;
+    else if (identifier && !strcmp(identifier, "block16"))
+      mode = MTLC_TENSOR_SCALE_BLOCK_16;
+    else if (identifier && !strcmp(identifier, "block32"))
+      mode = MTLC_TENSOR_SCALE_BLOCK_32;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor scale mode");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_scale_mode = mode;
+    else desc->b_scale_mode = mode;
+  } else if (!strcmp(option, "c_scale_mode")) {
+    if (identifier && !strcmp(identifier, "none"))
+      desc->c_scale_mode = MTLC_TENSOR_SCALE_NONE;
+    else if (identifier && !strcmp(identifier, "per_row"))
+      desc->c_scale_mode = MTLC_TENSOR_SCALE_PER_ROW;
+    else {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor C scale mode must be none or per_row");
+      return 0;
+    }
+  } else if (!strcmp(option, "a_scale_type") ||
+             !strcmp(option, "b_scale_type")) {
+    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
+    if (element != MTLC_TENSOR_ELEMENT_SCALE_UE8M0 &&
+        element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3 &&
+        element != MTLC_TENSOR_ELEMENT_FLOAT32 &&
+        element != MTLC_TENSOR_ELEMENT_FLOAT16) {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor scale type must be ue8m0, ue4m3, f32 or f16");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_scale_element = element;
+    else desc->b_scale_element = element;
+  } else if (!strcmp(option, "a_scale_values") ||
+             !strcmp(option, "b_scale_values")) {
+    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
+    if (element != MTLC_TENSOR_ELEMENT_FLOAT16 &&
+        element != MTLC_TENSOR_ELEMENT_BFLOAT16) {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor scale values must be f16 or bf16 (exact values of that "
+          "format, stored as the scale type)");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_scale_values = element;
+    else desc->b_scale_values = element;
+  } else {
+    return type_checker_tensor_layout_option(checker, call, i, desc, option,
+                                             identifier, value);
   }
   return 1;
 }
@@ -2385,6 +2397,16 @@ static Type *type_checker_infer_literal(TypeChecker *checker,
   return NULL;
 }
 
+static int type_checker_identifier_is_kernel_constant(TypeChecker *checker,
+                                                      Symbol *symbol) {
+  return checker->current_function && checker->current_function->is_kernel &&
+         symbol->kind == SYMBOL_VARIABLE && symbol->is_immutable &&
+         symbol->has_constant_value && !symbol->constant_is_float &&
+         !symbol->is_address_space_binding && symbol->type &&
+         type_checker_is_integer_type(symbol->type) && symbol->scope &&
+         symbol->scope->type != SCOPE_GLOBAL;
+}
+
 static Type *type_checker_infer_identifier(TypeChecker *checker,
                                   ASTNode *expression,
                                   int *handled) {
@@ -2449,12 +2471,7 @@ static Type *type_checker_infer_identifier(TypeChecker *checker,
     if (type_is_comptime_only(symbol->type)) {
       return symbol->type;
     }
-    if (checker->current_function && checker->current_function->is_kernel &&
-        symbol->kind == SYMBOL_VARIABLE && symbol->is_immutable &&
-        symbol->has_constant_value && !symbol->constant_is_float &&
-        !symbol->is_address_space_binding && symbol->type &&
-        type_checker_is_integer_type(symbol->type) && symbol->scope &&
-        symbol->scope->type != SCOPE_GLOBAL) {
+    if (type_checker_identifier_is_kernel_constant(checker, symbol)) {
       if (!ast_fold_member_access_to_int(expression,
                                          symbol->constant_integer_value)) {
         type_checker_set_error_at_location(checker, expression->location,
@@ -2694,6 +2711,84 @@ static Type *type_checker_infer_closure(TypeChecker *checker,
   return NULL;
 }
 
+static Type *type_checker_infer_address_of(TypeChecker *checker,
+                                           ASTNode *expression,
+                                           UnaryExpression *unop) {
+  if (unop->operand->type == AST_IDENTIFIER) {
+    Identifier *id = (Identifier *)unop->operand->data;
+    if (id && id->name) {
+      Symbol *sym = type_checker_resolve_identifier(checker, id);
+      if (sym && sym->kind == SYMBOL_FUNCTION) {
+        Type **param_types = sym->data.function.parameter_types;
+        size_t param_count = sym->data.function.parameter_count;
+        Type *return_type = sym->data.function.return_type;
+        if (!return_type) {
+          return_type = checker->builtin_void;
+        }
+        Type *fp_type = type_create_function_pointer(
+            param_types, param_count, return_type);
+        if (!fp_type) {
+          type_checker_set_error_at_location(
+              checker, expression->location,
+              "Failed to create function pointer type");
+          return NULL;
+        }
+        return fp_type;
+      }
+    }
+  }
+
+  if (!type_checker_is_lvalue_expression(unop->operand)) {
+    type_checker_set_error_at_location(
+        checker, unop->operand->location,
+        "Address-of operator requires an assignable expression");
+    return NULL;
+  }
+
+  Type *operand_type = type_checker_infer_type(checker, unop->operand);
+  if (!operand_type) {
+    return NULL;
+  }
+  if (type_checker_reject_comptime_escape(checker, unop->operand->location,
+                                          operand_type)) {
+    return NULL;
+  }
+  if (type_checker_is_tile(operand_type)) {
+    return type_checker_tile_unary(checker, "&", operand_type,
+                                   expression->location);
+  }
+
+  const char *operand_name = operand_type->name ? operand_type->name : "unknown";
+  unsigned char operand_space = DEVICE_SPACE_NONE;
+  const char *space_word = "";
+  size_t pointer_name_len;
+  char *pointer_name;
+  operand_space = type_checker_lvalue_device_space(checker, unop->operand);
+  space_word = type_checker_device_space_word(operand_space);
+  pointer_name_len = strlen(operand_name) + strlen(space_word) + 2;
+  pointer_name = malloc(pointer_name_len);
+  if (!pointer_name) {
+    type_checker_set_error_at_location(checker, expression->location,
+                                       "Memory allocation failed");
+    return NULL;
+  }
+  snprintf(pointer_name, pointer_name_len, "%s%s*", operand_name, space_word);
+
+  Type *pointer_type = type_checker_get_type_by_name(checker, pointer_name);
+  free(pointer_name);
+  if (!pointer_type) {
+    pointer_type = type_checker_device_pointer_to(
+        checker, operand_type, operand_space, 0, space_word);
+  }
+  if (!pointer_type) {
+    type_checker_set_error_at_location(checker, expression->location,
+                                       "Failed to resolve pointer type");
+    return NULL;
+  }
+
+  return pointer_type;
+}
+
 static Type *type_checker_infer_unary(TypeChecker *checker,
                                   ASTNode *expression,
                                   int *handled) {
@@ -2708,81 +2803,7 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
     }
 
     if (strcmp(unop->operator, "&") == 0) {
-      if (unop->operand->type == AST_IDENTIFIER) {
-        Identifier *id = (Identifier *)unop->operand->data;
-        if (id && id->name) {
-          Symbol *sym = type_checker_resolve_identifier(checker, id);
-          if (sym && sym->kind == SYMBOL_FUNCTION) {
-            Type **param_types = sym->data.function.parameter_types;
-            size_t param_count = sym->data.function.parameter_count;
-            Type *return_type = sym->data.function.return_type;
-            if (!return_type) {
-              return_type = checker->builtin_void;
-            }
-            Type *fp_type = type_create_function_pointer(
-                param_types, param_count, return_type);
-            if (!fp_type) {
-              type_checker_set_error_at_location(
-                  checker, expression->location,
-                  "Failed to create function pointer type");
-              return NULL;
-            }
-            return fp_type;
-          }
-        }
-      }
-
-      if (!type_checker_is_lvalue_expression(unop->operand)) {
-        type_checker_set_error_at_location(
-            checker, unop->operand->location,
-            "Address-of operator requires an assignable expression");
-        return NULL;
-      }
-
-      Type *operand_type = type_checker_infer_type(checker, unop->operand);
-      if (!operand_type) {
-        return NULL;
-      }
-      if (type_checker_reject_comptime_escape(checker, unop->operand->location,
-                                              operand_type)) {
-        return NULL;
-      }
-      if (type_checker_is_tile(operand_type)) {
-        return type_checker_tile_unary(checker, "&", operand_type,
-                                       expression->location);
-      }
-
-      const char *operand_name =
-          operand_type->name ? operand_type->name : "unknown";
-      unsigned char operand_space = DEVICE_SPACE_NONE;
-      const char *space_word = "";
-      size_t pointer_name_len;
-      char *pointer_name;
-      operand_space = type_checker_lvalue_device_space(checker, unop->operand);
-      space_word = type_checker_device_space_word(operand_space);
-      pointer_name_len = strlen(operand_name) + strlen(space_word) + 2;
-      pointer_name = malloc(pointer_name_len);
-      if (!pointer_name) {
-        type_checker_set_error_at_location(checker, expression->location,
-                                           "Memory allocation failed");
-        return NULL;
-      }
-      snprintf(pointer_name, pointer_name_len, "%s%s*", operand_name,
-               space_word);
-
-      Type *pointer_type = type_checker_get_type_by_name(checker, pointer_name);
-      free(pointer_name);
-      if (!pointer_type) {
-        pointer_type = type_checker_device_pointer_to(
-            checker, operand_type, operand_space, 0, space_word);
-      }
-      if (!pointer_type) {
-        type_checker_set_error_at_location(checker, expression->location,
-                                           "Failed to resolve pointer type");
-        return NULL;
-      }
-
-      return pointer_type;
+      return type_checker_infer_address_of(checker, expression, unop);
     }
 
     if (strcmp(unop->operator, "*") == 0) {

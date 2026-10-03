@@ -134,10 +134,8 @@ static const char *asm_first_operand_end(const char *from, const char *to) {
   return to;
 }
 
-static void asm_classify_statement(AsmBindingList *list, const char *from,
-                                   const char *to, int *has_label,
-                                   int *has_branch) {
-  const char *at = from;
+static const char *asm_skip_statement_prefix(const char *at, const char *to,
+                                             int *has_label) {
   for (;;) {
     while (at < to && asm_space(*at)) {
       at++;
@@ -167,6 +165,13 @@ static void asm_classify_statement(AsmBindingList *list, const char *from,
     }
     break;
   }
+  return at;
+}
+
+static void asm_classify_statement(AsmBindingList *list, const char *from,
+                                   const char *to, int *has_label,
+                                   int *has_branch) {
+  const char *at = asm_skip_statement_prefix(from, to, has_label);
   if (at >= to) {
     return;
   }

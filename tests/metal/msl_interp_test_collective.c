@@ -16,7 +16,7 @@ static float add_float(float a, float b) {
 }
 
 static const char barrier_body[] =
-  "  threadgroup alignas(16) uint tile[64];\n"
+  "  alignas(16) threadgroup uint tile[64];\n"
   "  threadgroup uchar* tp = (threadgroup uchar*)tile;\n"
   "  uint i = tid.x;\n"
   "  *(threadgroup uint*)(tp + (long)(i * 4u)) = i * 3u;\n"
@@ -32,7 +32,7 @@ static void prepare_barrier(uint32_t *input, uint32_t *expect) {
 }
 
 static const char reduction_body[] =
-  "  threadgroup alignas(16) uint sums[64];\n"
+  "  alignas(16) threadgroup uint sums[64];\n"
   "  threadgroup uchar* sp = (threadgroup uchar*)sums;\n"
   "  uint i = tid.x;\n"
   "  *(threadgroup uint*)(sp + (long)(i * 4u)) = i;\n"
@@ -260,7 +260,7 @@ static void prepare_attributes(uint32_t *input, uint32_t *expect) {
 static const char mixed_body[] =
   "  uint i = tid.x;\n"
   "  uint s = simd_sum(i);\n"
-  "  threadgroup alignas(16) uint parts[2];\n"
+  "  alignas(16) threadgroup uint parts[2];\n"
   "  threadgroup uchar* pp = (threadgroup uchar*)parts;\n"
   "  if (lane == 0u) {\n"
   "    *(threadgroup uint*)(pp + (long)((i / 32u) * 4u)) = s;\n"
@@ -313,7 +313,7 @@ static const char atomics_body[] =
   "  atomic_fetch_xor_explicit(c + 6, i + 1u, memory_order_seq_cst);\n"
   "  uint prev = atomic_exchange_explicit(c + 7, i, memory_order_relaxed);\n"
   "  atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n"
-  "  threadgroup alignas(16) uint counter[1];\n"
+  "  alignas(16) threadgroup uint counter[1];\n"
   "  threadgroup atomic_uint* tc = (threadgroup atomic_uint*)((threadgroup uchar*)counter);\n"
   "  if (i == 0u) {\n"
   "    atomic_store_explicit(tc, 0u, memory_order_relaxed);\n"

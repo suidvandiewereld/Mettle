@@ -68,6 +68,27 @@ typedef struct {
   double margin;
 } TuneArgs;
 
+typedef struct {
+  TuneArgs args;
+  const char *self_path;
+  TuneTable *space;
+  TuneRecord *records;
+  char tune_path[TUNE_PATH + 32];
+  char import_path[TUNE_PATH];
+  char temp_directory[TUNE_PATH];
+  char keys[TUNE_MAX_KEYS][256];
+  int key_rows[TUNE_MAX_KEYS][TUNE_MAX_ROWS];
+  int key_counts[TUNE_MAX_KEYS];
+  int shipped[TUNE_MAX_KEYS];
+  int chosen[TUNE_MAX_KEYS];
+  int key_count;
+  int sets[TUNE_MAX_SETS][TUNE_MAX_KEYS];
+  int set_count;
+  int built_sets[TUNE_MAX_SETS][TUNE_MAX_KEYS];
+  char artifacts[TUNE_MAX_SETS][TUNE_PATH + 64];
+  int built_count;
+} TuneSession;
+
 enum { TUNE_END, TUNE_IDENT, TUNE_NUMBER, TUNE_STRING, TUNE_PUNCT };
 
 static char *tune_read_file(const char *path) {
@@ -166,31 +187,34 @@ static void tune_directory_of(const char *path, char *out, size_t size) {
   snprintf(out, size, "%.*s", (int)(slash - path), path);
 }
 
-static void tune_next(TuneLexer *lexer) {
-  const char *text = lexer->text;
-  size_t at = lexer->at;
-  size_t used = 0;
+static size_t tune_skip_space(const char *text, size_t at, size_t length) {
   for (;;) {
-    while (at < lexer->length && isspace((unsigned char)text[at])) {
+    while (at < length && isspace((unsigned char)text[at])) {
       at++;
     }
-    if (at + 1 < lexer->length && text[at] == '/' && text[at + 1] == '/') {
-      while (at < lexer->length && text[at] != '\n') {
+    if (at + 1 < length && text[at] == '/' && text[at + 1] == '/') {
+      while (at < length && text[at] != '\n') {
         at++;
       }
       continue;
     }
-    if (at + 1 < lexer->length && text[at] == '/' && text[at + 1] == '*') {
+    if (at + 1 < length && text[at] == '/' && text[at + 1] == '*') {
       at += 2;
-      while (at + 1 < lexer->length &&
-             !(text[at] == '*' && text[at + 1] == '/')) {
+      while (at + 1 < length && !(text[at] == '*' && text[at + 1] == '/')) {
         at++;
       }
-      at = at + 2 <= lexer->length ? at + 2 : lexer->length;
+      at = at + 2 <= length ? at + 2 : length;
       continue;
     }
     break;
   }
+  return at;
+}
+
+static void tune_next(TuneLexer *lexer) {
+  const char *text = lexer->text;
+  size_t at = tune_skip_space(text, lexer->at, lexer->length);
+  size_t used = 0;
   lexer->token[0] = '\0';
   if (at >= lexer->length) {
     lexer->kind = TUNE_END;
@@ -852,53 +876,26 @@ static char *tune_replace(const char *text, const char *needle,
   return out;
 }
 
-int mettle_tune_main(int argc, char **argv, const char *self_path) {
-  static TuneTable space;
-  static TuneTable current;
-  static TuneRecord records[TUNE_MAX_ROWS];
+static int tune_locate_space(const TuneArgs *args, TuneTable *space) {
   static char files[TUNE_MAX_FILES][TUNE_PATH];
-  TuneArgs args;
-  char tune_path[TUNE_PATH + 32];
-  char module_directory[TUNE_PATH];
-  char space_directory[TUNE_PATH];
-  char import_path[TUNE_PATH];
-  char temp_directory[TUNE_PATH];
-  char keys[TUNE_MAX_KEYS][256];
-  int key_rows[TUNE_MAX_KEYS][TUNE_MAX_ROWS];
-  int key_counts[TUNE_MAX_KEYS];
-  int shipped[TUNE_MAX_KEYS];
-  int chosen[TUNE_MAX_KEYS];
-  int sets[TUNE_MAX_SETS][TUNE_MAX_KEYS];
-  char artifacts[TUNE_MAX_SETS][TUNE_PATH + 64];
-  int set_count = 0;
-  int key_count = 0;
   int file_count = 1;
   int found = 0;
-  int failed = 0;
-  char *original;
-  const char *temp_env;
-
-  if (!tune_parse_args(argc, argv, &args)) {
-    tune_usage();
-    return 1;
-  }
-  memset(records, 0, sizeof(records));
-  snprintf(files[0], TUNE_PATH, "%s", args.module);
+  snprintf(files[0], TUNE_PATH, "%s", args->module);
   for (int i = 0; i < file_count && !found; i++) {
     char *text = tune_read_file(files[i]);
     int result;
     if (!text) {
       fprintf(stderr, "error: cannot read '%s'\n", files[i]);
-      return 1;
+      return 0;
     }
-    result = tune_find_table(files[i], text, args.space, &space);
+    result = tune_find_table(files[i], text, args->space, space);
     if (result < 0) {
       fprintf(stderr,
               "error: '%s' in '%s' is not a table of rows this tuner can "
               "read: write it as a const array literal of struct rows\n",
-              args.space, files[i]);
+              args->space, files[i]);
       free(text);
-      return 1;
+      return 0;
     }
     found = result > 0;
     if (!found) {
@@ -906,32 +903,39 @@ int mettle_tune_main(int argc, char **argv, const char *self_path) {
     }
     free(text);
   }
-  if (!found || space.count == 0) {
+  if (!found || space->count == 0) {
     fprintf(stderr,
             "error: no table named '%s' in '%s' or the modules it imports\n",
-            args.space, args.module);
-    return 1;
+            args->space, args->module);
+    return 0;
   }
+  return 1;
+}
 
-  tune_directory_of(args.module, module_directory, sizeof(module_directory));
-  tune_directory_of(space.path, space_directory, sizeof(space_directory));
+static int tune_resolve_paths(TuneSession *session) {
+  const TuneArgs *args = &session->args;
+  const TuneTable *space = session->space;
+  char module_directory[TUNE_PATH];
+  char space_directory[TUNE_PATH];
+  tune_directory_of(args->module, module_directory, sizeof(module_directory));
+  tune_directory_of(space->path, space_directory, sizeof(space_directory));
   {
-    size_t length = strlen(args.module);
-    if (length > 7 && strcmp(args.module + length - 7, ".mettle") == 0) {
+    size_t length = strlen(args->module);
+    if (length > 7 && strcmp(args->module + length - 7, ".mettle") == 0) {
       length -= 7;
     }
-    snprintf(tune_path, sizeof(tune_path), "%.*s.tune.mettle", (int)length,
-             args.module);
+    snprintf(session->tune_path, sizeof(session->tune_path), "%.*s.tune.mettle",
+             (int)length, args->module);
   }
   if (strcmp(module_directory, space_directory) != 0) {
     fprintf(stderr,
             "error: '%s' is declared in '%s'; the tuner writes its import "
             "into '%s', so declare the table beside the module\n",
-            args.space, space.path, tune_path);
-    return 1;
+            args->space, space->path, session->tune_path);
+    return 0;
   }
   {
-    const char *base = space.path + strlen(space_directory);
+    const char *base = space->path + strlen(space_directory);
     size_t length;
     if (*base == '/' || *base == '\\') {
       base++;
@@ -940,321 +944,364 @@ int mettle_tune_main(int argc, char **argv, const char *self_path) {
     if (length > 7 && strcmp(base + length - 7, ".mettle") == 0) {
       length -= 7;
     }
-    snprintf(import_path, sizeof(import_path), "%.*s", (int)length, base);
+    snprintf(session->import_path, sizeof(session->import_path), "%.*s",
+             (int)length, base);
   }
+  return 1;
+}
 
-  for (int r = 0; r < space.count; r++) {
-    const char *key = tune_cell(&space.rows[r], args.key);
+static int tune_group_keys(TuneSession *session) {
+  const TuneArgs *args = &session->args;
+  const TuneTable *space = session->space;
+  for (int r = 0; r < space->count; r++) {
+    const char *key = tune_cell(&space->rows[r], args->key);
     char name[256];
     int k;
     if (!key) {
       fprintf(stderr, "error: row %d of '%s' has no column '%s'\n", r,
-              args.space, args.key);
-      return 1;
+              args->space, args->key);
+      return 0;
     }
-    tune_row_name(&space.rows[r], args.name_column, name, sizeof(name));
+    tune_row_name(&space->rows[r], args->name_column, name, sizeof(name));
     if (!name[0]) {
       fprintf(stderr,
               "error: row %d of '%s' has no column '%s'; the tuner names a "
               "row's kernels by it\n",
-              r, args.space, args.name_column);
-      return 1;
+              r, args->space, args->name_column);
+      return 0;
     }
-    for (k = 0; k < key_count; k++) {
-      if (strcmp(keys[k], key) == 0) {
+    for (k = 0; k < session->key_count; k++) {
+      if (strcmp(session->keys[k], key) == 0) {
         break;
       }
     }
-    if (k == key_count) {
-      if (key_count >= TUNE_MAX_KEYS) {
-        fprintf(stderr, "error: '%s' has more than %d keys\n", args.space,
+    if (k == session->key_count) {
+      if (session->key_count >= TUNE_MAX_KEYS) {
+        fprintf(stderr, "error: '%s' has more than %d keys\n", args->space,
                 TUNE_MAX_KEYS);
-        return 1;
+        return 0;
       }
-      snprintf(keys[k], sizeof(keys[k]), "%s", key);
-      key_counts[k] = 0;
-      shipped[k] = r;
-      key_count++;
+      snprintf(session->keys[k], sizeof(session->keys[k]), "%s", key);
+      session->key_counts[k] = 0;
+      session->shipped[k] = r;
+      session->key_count++;
     }
-    key_rows[k][key_counts[k]++] = r;
+    session->key_rows[k][session->key_counts[k]++] = r;
   }
+  return 1;
+}
 
-  original = tune_read_file(tune_path);
-  if (original) {
-    char tuned_name[300];
-    snprintf(tuned_name, sizeof(tuned_name), "%s_TUNED", args.space);
-    if (tune_find_table(tune_path, original, tuned_name, &current) > 0) {
-      for (int c = 0; c < current.count; c++) {
-        for (int r = 0; r < space.count; r++) {
-          const char *key = tune_cell(&space.rows[r], args.key);
-          if (tune_rows_equal(&current.rows[c], &space.rows[r])) {
-            for (int k = 0; k < key_count; k++) {
-              if (strcmp(keys[k], key) == 0) {
-                shipped[k] = r;
-              }
-            }
+static void tune_find_shipped(TuneSession *session, const char *original) {
+  static TuneTable current;
+  const TuneTable *space = session->space;
+  char tuned_name[300];
+  int result;
+  snprintf(tuned_name, sizeof(tuned_name), "%s_TUNED", session->args.space);
+  result = tune_find_table(session->tune_path, original, tuned_name, &current);
+  if (result <= 0) {
+    return;
+  }
+  for (int c = 0; c < current.count; c++) {
+    for (int r = 0; r < space->count; r++) {
+      const char *key = tune_cell(&space->rows[r], session->args.key);
+      if (tune_rows_equal(&current.rows[c], &space->rows[r])) {
+        for (int k = 0; k < session->key_count; k++) {
+          if (strcmp(session->keys[k], key) == 0) {
+            session->shipped[k] = r;
           }
         }
       }
     }
   }
+}
 
-  temp_env = getenv("TEMP");
+static void tune_temp_directory(char *out, size_t size) {
+  const char *temp_env = getenv("TEMP");
   if (!temp_env) {
     temp_env = getenv("TMPDIR");
   }
-  snprintf(temp_directory, sizeof(temp_directory), "%s",
-           temp_env ? temp_env : ".");
+  snprintf(out, size, "%s", temp_env ? temp_env : ".");
+}
 
-  {
-    int most = 0;
-    for (int k = 0; k < key_count; k++) {
-      if (key_counts[k] > most) {
-        most = key_counts[k];
-      }
+static void tune_plan_sets(TuneSession *session) {
+  int most = 0;
+  for (int k = 0; k < session->key_count; k++) {
+    if (session->key_counts[k] > most) {
+      most = session->key_counts[k];
     }
-    for (int i = 0; i < most && i < TUNE_MAX_SETS; i++) {
-      for (int k = 0; k < key_count; k++) {
-        sets[i][k] = i < key_counts[k] ? key_rows[k][i] : shipped[k];
-      }
-    }
-    set_count = most < TUNE_MAX_SETS ? most : TUNE_MAX_SETS;
   }
+  for (int i = 0; i < most && i < TUNE_MAX_SETS; i++) {
+    for (int k = 0; k < session->key_count; k++) {
+      session->sets[i][k] = i < session->key_counts[k]
+                                ? session->key_rows[k][i]
+                                : session->shipped[k];
+    }
+  }
+  session->set_count = most < TUNE_MAX_SETS ? most : TUNE_MAX_SETS;
+}
 
-  printf("tune: %s, %d rows over %d values of '%s'; writing %s\n",
-         args.space, space.count, key_count, args.key, tune_path);
+static int tune_refuse_check_errors(TuneSession *session, int s,
+                                    const char *output) {
+  const TuneArgs *args = &session->args;
+  TuneRecord *records = session->records;
+  int *set = session->sets[s];
+  char message[400];
+  int refused = 0;
+  tune_first_error(output, message, sizeof(message));
+  for (int k = 0; k < session->key_count; k++) {
+    char name[256];
+    int r = set[k];
+    tune_row_name(&session->space->rows[r], args->name_column, name,
+                  sizeof(name));
+    if (strstr(message, "error[C0") && tune_text_names(message, name)) {
+      if (r == session->shipped[k]) {
+        fprintf(stderr,
+                "error: the shipped row %d for %s=%s is refused: %s\n", r,
+                args->key, session->keys[k], message);
+        return -1;
+      }
+      snprintf(records[r].verdict, sizeof(records[r].verdict), "refused: %s",
+               message);
+      printf("tune: row %d refused, never timed: %s\n", r, message);
+      set[k] = session->shipped[k];
+      refused = 1;
+    }
+  }
+  if (!refused) {
+    fprintf(stderr, "error: the module does not build:\n%s\n", output);
+    return -1;
+  }
+  return 1;
+}
+
+static int tune_refuse_unproven(TuneSession *session, int s,
+                                const char *output) {
+  const TuneArgs *args = &session->args;
+  TuneRecord *records = session->records;
+  int *set = session->sets[s];
+  int refused = 0;
+  for (int k = 0; k < session->key_count; k++) {
+    char name[256];
+    int r = set[k];
+    tune_row_name(&session->space->rows[r], args->name_column, name,
+                  sizeof(name));
+    if (!tune_proven(output, name)) {
+      if (r == session->shipped[k]) {
+        fprintf(stderr,
+                "error: no numerics contract proves the kernels of %s's "
+                "row %d, so tuning would choose between different "
+                "results; put them under a contract\n",
+                args->space, r);
+        return -1;
+      }
+      snprintf(records[r].verdict, sizeof(records[r].verdict),
+               "refused: no numerics contract proves its kernels");
+      printf("tune: row %d refused, never timed: no numerics contract "
+             "proves its kernels\n",
+             r);
+      set[k] = session->shipped[k];
+      refused = 1;
+    }
+  }
+  return refused;
+}
+
+static int tune_prove_attempt(TuneSession *session, int s) {
+  const TuneArgs *args = &session->args;
+  char *text = tune_render(args, session->space, session->import_path,
+                           session->sets[s], session->key_count,
+                           session->records, 0);
+  char command[8192];
+  char check_ptx[TUNE_PATH + 64];
+  char *output;
+  int status = 0;
+  int verdict;
+  if (!text || !tune_write_text(session->tune_path, text)) {
+    fprintf(stderr, "error: cannot write '%s'\n", session->tune_path);
+    free(text);
+    return -1;
+  }
+  free(text);
+  snprintf(check_ptx, sizeof(check_ptx), "%s/mettle_tune_check.ptx",
+           session->temp_directory);
+  snprintf(command, sizeof(command),
+           "\"%s\" --emit-ptx --report-gpu-types %s \"%s\" -o \"%s\"",
+           session->self_path, args->check, args->module, check_ptx);
+  printf("tune: proving build %d:", s + 1);
+  for (int k = 0; k < session->key_count; k++) {
+    printf(" %s=row %d", session->keys[k], session->sets[s][k]);
+  }
+  printf("\n");
   fflush(stdout);
+  output = tune_run(command, &status);
+  if (!output) {
+    fprintf(stderr, "error: cannot run the check: %s\n", command);
+    return -1;
+  }
+  if (status != 0) {
+    verdict = tune_refuse_check_errors(session, s, output);
+  } else {
+    verdict = tune_refuse_unproven(session, s, output);
+  }
+  free(output);
+  return verdict;
+}
 
-  int built_count = 0;
-  int built_sets[TUNE_MAX_SETS][TUNE_MAX_KEYS];
-  for (int s = 0; s < set_count && !failed; s++) {
+static int tune_prove_set(TuneSession *session, int s) {
+  int verdict;
+  do {
+    verdict = tune_prove_attempt(session, s);
+  } while (verdict > 0);
+  return verdict == 0;
+}
+
+static int tune_build_set(TuneSession *session, int s) {
+  const TuneArgs *args = &session->args;
+  TuneRecord *records = session->records;
+  int *set = session->sets[s];
+  int built_count = session->built_count;
+  int status = 0;
+  char *output;
+  printf("tune: building %d\n", built_count + 1);
+  fflush(stdout);
+  output = tune_run(args->build, &status);
+  if (!output || status != 0) {
+    fprintf(stderr, "error: the build step failed:\n%s\n",
+            output ? output : "");
+    free(output);
+    return 0;
+  }
+  free(output);
+  {
+    char artifact_directory[TUNE_PATH];
+    tune_directory_of(args->artifact, artifact_directory,
+                      sizeof(artifact_directory));
+    snprintf(session->artifacts[built_count],
+             sizeof(session->artifacts[built_count]), "%s/mettle_tune_%d_%s",
+             artifact_directory, built_count + 1,
+             strrchr(args->artifact, '/') ? strrchr(args->artifact, '/') + 1
+             : strrchr(args->artifact, '\\')
+                 ? strrchr(args->artifact, '\\') + 1
+                 : args->artifact);
+  }
+  if (!tune_copy_file(args->artifact, session->artifacts[built_count])) {
+    fprintf(stderr, "error: the build step left no '%s'\n", args->artifact);
+    return 0;
+  }
+  memcpy(session->built_sets[built_count], set,
+         sizeof(int) * (size_t)session->key_count);
+  for (int k = 0; k < session->key_count; k++) {
+    records[set[k]].built = 1;
+    if (!records[set[k]].verdict[0]) {
+      snprintf(records[set[k]].verdict, sizeof(records[set[k]].verdict),
+               "proven");
+    }
+  }
+  session->built_count++;
+  return 1;
+}
+
+static int tune_build_sets(TuneSession *session) {
+  for (int s = 0; s < session->set_count; s++) {
     int duplicate = 0;
-    for (;;) {
-      char *text = tune_render(&args, &space, import_path, sets[s], key_count,
-                               records, 0);
-      char command[8192];
-      char check_ptx[TUNE_PATH + 64];
-      char *output;
-      int status = 0;
-      int refused = 0;
-      if (!text || !tune_write_text(tune_path, text)) {
-        fprintf(stderr, "error: cannot write '%s'\n", tune_path);
-        free(text);
-        failed = 1;
-        break;
-      }
-      free(text);
-      snprintf(check_ptx, sizeof(check_ptx), "%s/mettle_tune_check.ptx",
-               temp_directory);
-      snprintf(command, sizeof(command),
-               "\"%s\" --emit-ptx --report-gpu-types %s \"%s\" -o \"%s\"",
-               self_path, args.check, args.module, check_ptx);
-      printf("tune: proving build %d:", s + 1);
-      for (int k = 0; k < key_count; k++) {
-        printf(" %s=row %d", keys[k], sets[s][k]);
-      }
-      printf("\n");
-      fflush(stdout);
-      output = tune_run(command, &status);
-      if (!output) {
-        fprintf(stderr, "error: cannot run the check: %s\n", command);
-        failed = 1;
-        break;
-      }
-      if (status != 0) {
-        char message[400];
-        tune_first_error(output, message, sizeof(message));
-        for (int k = 0; k < key_count; k++) {
-          char name[256];
-          int r = sets[s][k];
-          tune_row_name(&space.rows[r], args.name_column, name, sizeof(name));
-          if (strstr(message, "error[C0") && tune_text_names(message, name)) {
-            if (r == shipped[k]) {
-              fprintf(stderr,
-                      "error: the shipped row %d for %s=%s is refused: %s\n",
-                      r, args.key, keys[k], message);
-              failed = 1;
-              break;
-            }
-            snprintf(records[r].verdict, sizeof(records[r].verdict),
-                     "refused: %s", message);
-            printf("tune: row %d refused, never timed: %s\n", r, message);
-            sets[s][k] = shipped[k];
-            refused = 1;
-          }
-        }
-        if (!refused && !failed) {
-          fprintf(stderr, "error: the module does not build:\n%s\n", output);
-          failed = 1;
-        }
-        free(output);
-        if (failed) {
-          break;
-        }
-        continue;
-      }
-      for (int k = 0; k < key_count; k++) {
-        char name[256];
-        int r = sets[s][k];
-        tune_row_name(&space.rows[r], args.name_column, name, sizeof(name));
-        if (!tune_proven(output, name)) {
-          if (r == shipped[k]) {
-            fprintf(stderr,
-                    "error: no numerics contract proves the kernels of %s's "
-                    "row %d, so tuning would choose between different "
-                    "results; put them under a contract\n",
-                    args.space, r);
-            failed = 1;
-            break;
-          }
-          snprintf(records[r].verdict, sizeof(records[r].verdict),
-                   "refused: no numerics contract proves its kernels");
-          printf("tune: row %d refused, never timed: no numerics contract "
-                 "proves its kernels\n",
-                 r);
-          sets[s][k] = shipped[k];
-          refused = 1;
-        }
-      }
-      free(output);
-      if (failed) {
-        break;
-      }
-      if (refused) {
-        continue;
-      }
-      break;
+    if (!tune_prove_set(session, s)) {
+      return 0;
     }
-    if (failed) {
-      break;
-    }
-    for (int b = 0; b < built_count; b++) {
-      if (memcmp(built_sets[b], sets[s], sizeof(int) * (size_t)key_count) ==
-          0) {
+    for (int b = 0; b < session->built_count; b++) {
+      if (memcmp(session->built_sets[b], session->sets[s],
+                 sizeof(int) * (size_t)session->key_count) == 0) {
         duplicate = 1;
       }
     }
     if (duplicate) {
       continue;
     }
-    {
-      int status = 0;
-      char *output;
-      printf("tune: building %d\n", built_count + 1);
-      fflush(stdout);
-      output = tune_run(args.build, &status);
-      if (!output || status != 0) {
-        fprintf(stderr, "error: the build step failed:\n%s\n",
-                output ? output : "");
-        free(output);
-        failed = 1;
-        break;
-      }
-      free(output);
-      {
-        char artifact_directory[TUNE_PATH];
-        tune_directory_of(args.artifact, artifact_directory,
-                          sizeof(artifact_directory));
-        snprintf(artifacts[built_count], sizeof(artifacts[built_count]),
-                 "%s/mettle_tune_%d_%s", artifact_directory, built_count + 1,
-                 strrchr(args.artifact, '/') ? strrchr(args.artifact, '/') + 1
-                 : strrchr(args.artifact, '\\')
-                     ? strrchr(args.artifact, '\\') + 1
-                     : args.artifact);
-      }
-      if (!tune_copy_file(args.artifact, artifacts[built_count])) {
-        fprintf(stderr, "error: the build step left no '%s'\n",
-                args.artifact);
-        failed = 1;
-        break;
-      }
-      memcpy(built_sets[built_count], sets[s],
-             sizeof(int) * (size_t)key_count);
-      for (int k = 0; k < key_count; k++) {
-        records[sets[s][k]].built = 1;
-        if (!records[sets[s][k]].verdict[0]) {
-          snprintf(records[sets[s][k]].verdict,
-                   sizeof(records[sets[s][k]].verdict), "proven");
-        }
-      }
-      built_count++;
+    if (!tune_build_set(session, s)) {
+      return 0;
     }
   }
+  return 1;
+}
 
-  for (int round = 0; round < args.rounds && !failed; round++) {
-    printf("tune: timing round %d of %d\n", round + 1, args.rounds);
-    fflush(stdout);
-    for (int b = 0; b < built_count && !failed; b++) {
-      char *command = tune_replace(args.run, "{artifact}", artifacts[b]);
-      char *output;
-      int status = 0;
-      int lines = 0;
-      const char *at;
-      if (!command) {
-        failed = 1;
-        break;
-      }
-      output = tune_run(command, &status);
-      free(command);
-      if (!output || status != 0) {
-        fprintf(stderr,
-                "error: the run step failed; tuning runs on the device:\n%s\n",
-                output ? output : "");
-        free(output);
-        failed = 1;
-        break;
-      }
-      at = output;
-      while (at && *at) {
-        const char *end = strchr(at, '\n');
-        char line[512];
-        char kernel[256], label[96];
-        double value = 0.0;
-        if (!end) {
-          end = at + strlen(at);
+static int tune_record_times(TuneSession *session, int b, const char *output) {
+  const TuneArgs *args = &session->args;
+  int lines = 0;
+  const char *at = output;
+  while (at && *at) {
+    const char *end = strchr(at, '\n');
+    char line[512];
+    char kernel[256], label[96];
+    double value = 0.0;
+    if (!end) {
+      end = at + strlen(at);
+    }
+    snprintf(line, sizeof(line), "%.*s", (int)(end - at), at);
+    if (tune_parse_time(line, kernel, sizeof(kernel), label, sizeof(label),
+                        &value)) {
+      for (int k = 0; k < session->key_count; k++) {
+        char name[256];
+        int r = session->built_sets[b][k];
+        tune_row_name(&session->space->rows[r], args->name_column, name,
+                      sizeof(name));
+        if (tune_kernel_matches(kernel, strlen(kernel), name)) {
+          tune_add_time(&session->records[r], label, value);
+          lines++;
         }
-        snprintf(line, sizeof(line), "%.*s", (int)(end - at), at);
-        if (tune_parse_time(line, kernel, sizeof(kernel), label, sizeof(label),
-                            &value)) {
-          for (int k = 0; k < key_count; k++) {
-            char name[256];
-            int r = built_sets[b][k];
-            tune_row_name(&space.rows[r], args.name_column, name,
-                          sizeof(name));
-            if (tune_kernel_matches(kernel, strlen(kernel), name)) {
-              tune_add_time(&records[r], label, value);
-              lines++;
-            }
-          }
-        }
-        at = *end ? end + 1 : end;
       }
-      if (lines == 0) {
-        fprintf(stderr,
-                "error: the run step printed no 'tune <kernel> <case> "
-                "<microseconds>' lines for these rows; it printed:\n%.4000s\n",
-                output);
-        failed = 1;
-      }
-      free(output);
+    }
+    at = *end ? end + 1 : end;
+  }
+  return lines;
+}
+
+static int tune_time_build(TuneSession *session, int b) {
+  char *command =
+      tune_replace(session->args.run, "{artifact}", session->artifacts[b]);
+  char *output;
+  int status = 0;
+  if (!command) {
+    return 0;
+  }
+  output = tune_run(command, &status);
+  free(command);
+  if (!output || status != 0) {
+    fprintf(stderr,
+            "error: the run step failed; tuning runs on the device:\n%s\n",
+            output ? output : "");
+    free(output);
+    return 0;
+  }
+  if (tune_record_times(session, b, output) == 0) {
+    fprintf(stderr,
+            "error: the run step printed no 'tune <kernel> <case> "
+            "<microseconds>' lines for these rows; it printed:\n%.4000s\n",
+            output);
+    free(output);
+    return 0;
+  }
+  free(output);
+  return 1;
+}
+
+static int tune_time_round(TuneSession *session, int round) {
+  printf("tune: timing round %d of %d\n", round + 1, session->args.rounds);
+  fflush(stdout);
+  for (int b = 0; b < session->built_count; b++) {
+    if (!tune_time_build(session, b)) {
+      return 0;
     }
   }
+  return 1;
+}
 
-  if (failed) {
-    tune_restore(tune_path, original);
-    for (int b = 0; b < built_count; b++) {
-      remove(artifacts[b]);
-    }
-    free(original);
-    return 1;
-  }
-
-  for (int k = 0; k < key_count; k++) {
-    int best = shipped[k];
-    double shipped_total = tune_total(&records[shipped[k]]);
+static void tune_choose_rows(TuneSession *session) {
+  const TuneRecord *records = session->records;
+  for (int k = 0; k < session->key_count; k++) {
+    int best = session->shipped[k];
+    double shipped_total = tune_total(&records[session->shipped[k]]);
     double best_total = shipped_total;
-    for (int i = 0; i < key_counts[k]; i++) {
-      int r = key_rows[k][i];
+    for (int i = 0; i < session->key_counts[k]; i++) {
+      int r = session->key_rows[k][i];
       double total;
       if (!records[r].built || records[r].case_count == 0 ||
           strcmp(records[r].verdict, "proven") != 0) {
@@ -1266,40 +1313,30 @@ int mettle_tune_main(int argc, char **argv, const char *self_path) {
         best = r;
       }
     }
-    if (best != shipped[k] &&
-        best_total > shipped_total * (1.0 - args.margin / 100.0)) {
-      best = shipped[k];
+    if (best != session->shipped[k] &&
+        best_total > shipped_total * (1.0 - session->args.margin / 100.0)) {
+      best = session->shipped[k];
     }
-    chosen[k] = best;
+    session->chosen[k] = best;
   }
+}
 
-  {
-    char *text = tune_render(&args, &space, import_path, chosen, key_count,
-                             records, 1);
-    if (!text || !tune_write_text(tune_path, text)) {
-      fprintf(stderr, "error: cannot write '%s'\n", tune_path);
-      tune_restore(tune_path, original);
-      free(text);
-      free(original);
-      return 1;
-    }
-    free(text);
-  }
-
-  for (int k = 0; k < key_count; k++) {
-    double shipped_total = tune_total(&records[shipped[k]]);
-    printf("%s = %s\n", args.key, keys[k]);
-    for (int i = 0; i < key_counts[k]; i++) {
-      int r = key_rows[k][i];
+static void tune_print_summary(const TuneSession *session) {
+  const TuneRecord *records = session->records;
+  for (int k = 0; k < session->key_count; k++) {
+    double shipped_total = tune_total(&records[session->shipped[k]]);
+    printf("%s = %s\n", session->args.key, session->keys[k]);
+    for (int i = 0; i < session->key_counts[k]; i++) {
+      int r = session->key_rows[k][i];
       char row[2048];
-      tune_row_text(&space.rows[r], row, sizeof(row));
+      tune_row_text(&session->space->rows[r], row, sizeof(row));
       if (records[r].case_count) {
         double total = tune_total(&records[r]);
         printf("  row %2d %9.2f us  %+6.1f%%  %s%s%s\n", r, total,
                shipped_total > 0.0 ? (total / shipped_total - 1.0) * 100.0
                                    : 0.0,
-               row, r == shipped[k] ? "  (shipped)" : "",
-               r == chosen[k] ? "  <- chosen" : "");
+               row, r == session->shipped[k] ? "  (shipped)" : "",
+               r == session->chosen[k] ? "  <- chosen" : "");
       } else {
         printf("  row %2d   %s  %s\n", r,
                records[r].verdict[0] ? records[r].verdict : "not measured",
@@ -1307,9 +1344,82 @@ int mettle_tune_main(int argc, char **argv, const char *self_path) {
       }
     }
   }
-  printf("tune: wrote %s; rebuild to use it\n", tune_path);
-  for (int b = 0; b < built_count; b++) {
-    remove(artifacts[b]);
+}
+
+int mettle_tune_main(int argc, char **argv, const char *self_path) {
+  static TuneTable space;
+  static TuneRecord records[TUNE_MAX_ROWS];
+  TuneSession session;
+  int failed = 0;
+  char *original;
+
+  if (!tune_parse_args(argc, argv, &session.args)) {
+    tune_usage();
+    return 1;
+  }
+  memset(records, 0, sizeof(records));
+  session.self_path = self_path;
+  session.space = &space;
+  session.records = records;
+  session.key_count = 0;
+  session.set_count = 0;
+  session.built_count = 0;
+  if (!tune_locate_space(&session.args, &space)) {
+    return 1;
+  }
+  if (!tune_resolve_paths(&session)) {
+    return 1;
+  }
+  if (!tune_group_keys(&session)) {
+    return 1;
+  }
+
+  original = tune_read_file(session.tune_path);
+  if (original) {
+    tune_find_shipped(&session, original);
+  }
+
+  tune_temp_directory(session.temp_directory, sizeof(session.temp_directory));
+  tune_plan_sets(&session);
+
+  printf("tune: %s, %d rows over %d values of '%s'; writing %s\n",
+         session.args.space, space.count, session.key_count, session.args.key,
+         session.tune_path);
+  fflush(stdout);
+
+  failed = !tune_build_sets(&session);
+  for (int round = 0; round < session.args.rounds && !failed; round++) {
+    failed = !tune_time_round(&session, round);
+  }
+
+  if (failed) {
+    tune_restore(session.tune_path, original);
+    for (int b = 0; b < session.built_count; b++) {
+      remove(session.artifacts[b]);
+    }
+    free(original);
+    return 1;
+  }
+
+  tune_choose_rows(&session);
+
+  {
+    char *text = tune_render(&session.args, &space, session.import_path,
+                             session.chosen, session.key_count, records, 1);
+    if (!text || !tune_write_text(session.tune_path, text)) {
+      fprintf(stderr, "error: cannot write '%s'\n", session.tune_path);
+      tune_restore(session.tune_path, original);
+      free(text);
+      free(original);
+      return 1;
+    }
+    free(text);
+  }
+
+  tune_print_summary(&session);
+  printf("tune: wrote %s; rebuild to use it\n", session.tune_path);
+  for (int b = 0; b < session.built_count; b++) {
+    remove(session.artifacts[b]);
   }
   free(original);
   return 0;

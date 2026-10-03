@@ -394,7 +394,7 @@ static const char records_source[] =
   "  *(device R*)(a.out + 2) = r1;\n"
   "  R r3 = *(device R*)(a.in);\n"
   "  *(a.out + 4) = as_type<uint>(total(r3));\n"
-  "  thread alignas(16) R arr[3];\n"
+  "  alignas(16) thread R arr[3];\n"
   "  thread uchar* ap = (thread uchar*)arr;\n"
   "  *(thread R*)(ap + 8l) = make(4.0f, 0.5f);\n"
   "  *(a.out + 5) = as_type<uint>(total(*(thread R*)(ap + 8l)));\n"

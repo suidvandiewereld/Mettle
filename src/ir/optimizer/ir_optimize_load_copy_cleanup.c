@@ -504,31 +504,43 @@ static int ir_lbase_temp_read_in(const IRFunction *function, size_t lo,
   return 0;
 }
 
-int ir_hoist_load_bases_pass(IRFunction *function, int *changed) {
-  static int g_load_base_counter;
-  if (!function) {
-    return 0;
-  }
+static int ir_lbase_is_eight_byte_load(const IRInstruction *load) {
+  return load->op == IR_OP_LOAD && load->rhs.kind == IR_OPERAND_INT &&
+         load->rhs.int_value == 8;
+}
+
+static size_t *ir_lbase_collect_candidates(const IRFunction *function,
+                                           size_t *out_count) {
   size_t cand_count = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *load = &function->instructions[i];
-    if (load->op == IR_OP_LOAD && load->rhs.kind == IR_OPERAND_INT &&
-        load->rhs.int_value == 8) {
+    if (ir_lbase_is_eight_byte_load(&function->instructions[i])) {
       cand_count++;
     }
   }
   size_t *cand = (size_t *)malloc((cand_count ? cand_count : 1) *
                                   sizeof(size_t));
   if (!cand) {
-    return 0;
+    return NULL;
   }
   cand_count = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *load = &function->instructions[i];
-    if (load->op == IR_OP_LOAD && load->rhs.kind == IR_OPERAND_INT &&
-        load->rhs.int_value == 8) {
+    if (ir_lbase_is_eight_byte_load(&function->instructions[i])) {
       cand[cand_count++] = i;
     }
+  }
+  *out_count = cand_count;
+  return cand;
+}
+
+int ir_hoist_load_bases_pass(IRFunction *function, int *changed) {
+  static int g_load_base_counter;
+  if (!function) {
+    return 0;
+  }
+  size_t cand_count = 0;
+  size_t *cand = ir_lbase_collect_candidates(function, &cand_count);
+  if (!cand) {
+    return 0;
   }
   for (size_t header = 0; header < function->instruction_count; header++) {
     char loop_label[128];

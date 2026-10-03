@@ -783,175 +783,211 @@ static MtlcTypeKind cast_kind(const IRInstruction *in) {
   return type_kind(in->value_type, in->text);
 }
 
+typedef struct {
+  MslClass cls;
+  MslSpace space;
+  MtlcTypeKind elem;
+  const MtlcType *rec;
+} MslFacts;
+
+static void infer_binary(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  const char *t = in->text ? in->text : "+";
+  MslClass a = operand_class(fn, &in->lhs);
+  MslClass b = operand_class(fn, &in->rhs);
+  if (is_compare(t)) {
+    r->cls = MC_U32;
+  } else if (in->is_float) {
+    r->cls = in->float_bits == 64 ? MC_F64 : MC_F32;
+  } else if (a == MC_PTR && b == MC_PTR) {
+    r->cls = MC_I64;
+  } else if (a == MC_PTR || b == MC_PTR) {
+    MslVar *pointer = operand_var(fn, a == MC_PTR ? &in->lhs : &in->rhs);
+    r->cls = MC_PTR;
+    if (pointer) {
+      r->space = pointer->space;
+      r->elem = pointer->elem;
+    }
+  } else if (a == MC_F32 || b == MC_F32 || a == MC_F64 || b == MC_F64) {
+    r->cls = (a == MC_F64 || b == MC_F64) ? MC_F64 : MC_F32;
+  } else {
+    int wide = class_is_64(a) || class_is_64(b);
+    int uns = in->is_unsigned || class_is_unsigned(a) || class_is_unsigned(b);
+    r->cls = wide ? (uns ? MC_U64 : MC_I64) : (uns ? MC_U32 : MC_I32);
+  }
+}
+
+static void infer_unary(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  MslClass a = operand_class(fn, &in->lhs);
+  const char *t = in->text ? in->text : "";
+  if (!strcmp(t, "!")) {
+    r->cls = MC_U32;
+  } else if (in->is_float) {
+    r->cls = in->float_bits == 64 ? MC_F64 : MC_F32;
+  } else {
+    r->cls = class_is_int(a) ? a : MC_I32;
+  }
+}
+
+static void infer_load(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  MtlcTypeKind kind = access_kind(fn, &in->lhs, in);
+  MslVar *pointer = operand_var(fn, &in->lhs);
+  if (pointer && pointer->cls == MC_PTR && pointer->elem == MTLC_TYPE_POINTER &&
+      in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 8) {
+    r->cls = MC_PTR;
+    r->space = MS_DEVICE;
+  } else {
+    r->cls = class_of_kind(kind);
+  }
+}
+
+static void infer_assign(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  MslVar *source = operand_var(fn, &in->lhs);
+  if (source) {
+    r->cls = source->cls;
+    r->space = source->space;
+    r->elem = source->elem;
+    r->rec = source->rec;
+  } else {
+    r->cls = literal_class(&in->lhs);
+  }
+}
+
+static void infer_cast(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  MtlcTypeKind kind = cast_kind(in);
+  r->cls = class_of_kind(kind);
+  if (r->cls == MC_PTR) {
+    MslVar *source = operand_var(fn, &in->lhs);
+    MslSpace declared = MS_NONE;
+    r->elem = pointee_kind(in->value_type, in->text);
+    if (in->value_type && in->value_type->kind == MTLC_TYPE_POINTER) {
+      declared = space_of_mtlc(in->value_type->address_space);
+    }
+    r->space = declared != MS_NONE ? declared
+               : (source && source->cls == MC_PTR) ? source->space
+                                                   : MS_DEVICE;
+    if (r->elem == MTLC_TYPE_VOID && source && source->cls == MC_PTR) {
+      r->elem = source->elem;
+    }
+  } else if (r->cls == MC_REC) {
+    r->rec = in->value_type;
+  } else if (r->cls == MC_NONE) {
+    r->cls = MC_I32;
+  }
+}
+
+static void infer_select(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  MslVar *source = operand_var(fn, &in->rhs);
+  if (source) {
+    r->cls = source->cls;
+    r->space = source->space;
+    r->elem = source->elem;
+  } else {
+    source = in->argument_count > 0 ? operand_var(fn, &in->arguments[0])
+                                    : NULL;
+    r->cls = source ? source->cls : literal_class(&in->rhs);
+    if (source) {
+      r->space = source->space;
+      r->elem = source->elem;
+    }
+  }
+  if (in->argument_count > 0) {
+    MslSpace other = operand_space(fn, &in->arguments[0]);
+    if (r->cls == MC_PTR && other != MS_NONE && r->space == MS_NONE) {
+      r->space = other;
+    }
+  }
+}
+
+static void infer_address_of(MslFn *fn, const IRInstruction *in,
+                             MslFacts *r) {
+  MslVar *home = operand_var(fn, &in->lhs);
+  r->cls = MC_PTR;
+  r->space = MS_THREAD;
+  if (home && home->cls != MC_REC && home->cls != MC_PTR) {
+    r->elem = home->storage != MTLC_TYPE_VOID ? home->storage
+                                              : natural_kind(home->cls);
+  } else if (home && home->cls == MC_PTR) {
+    r->elem = MTLC_TYPE_POINTER;
+  }
+}
+
+static int infer_call(MslFn *fn, const IRInstruction *in, MslFacts *r) {
+  if (in->intrinsic != MTLC_INTRINSIC_NONE) {
+    r->cls = intrinsic_class(in->intrinsic);
+    if (r->cls == MC_NONE) {
+      return 0;
+    }
+  } else {
+    size_t index = 0;
+    IRFunction *callee = lookup_function(fn->m, in->text, &index);
+    const MtlcType *type;
+    if (!callee || returns_void_of(fn->m, callee)) {
+      return 0;
+    }
+    type = return_type_of(fn->m, callee);
+    if (type_is_record(type)) {
+      r->cls = MC_REC;
+      r->rec = type;
+    } else {
+      r->cls = class_of_kind(type_kind(type, callee->return_type_name));
+      if (r->cls == MC_PTR) {
+        r->space = MS_DEVICE;
+        r->elem = pointee_kind(type, callee->return_type_name);
+        if (fn->spec && fn->spec->call_spec &&
+            (size_t)(in - fn->func->instructions) <
+                fn->spec->instruction_count) {
+          size_t target =
+              fn->spec->call_spec[(size_t)(in - fn->func->instructions)];
+          MslSpec *callee_spec = spec_of_index(fn->m, target);
+          if (callee_spec && callee_spec->ret_space != MS_NONE) {
+            r->space = callee_spec->ret_space;
+          }
+        }
+      }
+    }
+  }
+  return 1;
+}
+
 static void infer_instruction(MslFn *fn, const IRInstruction *in,
                               int *changed) {
   MslVar *dest;
-  MslClass cls = MC_NONE;
-  MslSpace space = MS_NONE;
-  MtlcTypeKind elem = MTLC_TYPE_VOID;
-  const MtlcType *rec = NULL;
+  MslFacts r;
+  r.cls = MC_NONE;
+  r.space = MS_NONE;
+  r.elem = MTLC_TYPE_VOID;
+  r.rec = NULL;
   if (!in->dest.name ||
       (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL)) {
     return;
   }
   switch (in->op) {
-  case IR_OP_BINARY: {
-    const char *t = in->text ? in->text : "+";
-    MslClass a = operand_class(fn, &in->lhs);
-    MslClass b = operand_class(fn, &in->rhs);
-    if (is_compare(t)) {
-      cls = MC_U32;
-    } else if (in->is_float) {
-      cls = in->float_bits == 64 ? MC_F64 : MC_F32;
-    } else if (a == MC_PTR && b == MC_PTR) {
-      cls = MC_I64;
-    } else if (a == MC_PTR || b == MC_PTR) {
-      MslVar *pointer = operand_var(fn, a == MC_PTR ? &in->lhs : &in->rhs);
-      cls = MC_PTR;
-      if (pointer) {
-        space = pointer->space;
-        elem = pointer->elem;
-      }
-    } else if (a == MC_F32 || b == MC_F32 || a == MC_F64 || b == MC_F64) {
-      cls = (a == MC_F64 || b == MC_F64) ? MC_F64 : MC_F32;
-    } else {
-      int wide = class_is_64(a) || class_is_64(b);
-      int uns = in->is_unsigned || class_is_unsigned(a) || class_is_unsigned(b);
-      cls = wide ? (uns ? MC_U64 : MC_I64) : (uns ? MC_U32 : MC_I32);
+  case IR_OP_BINARY:
+    infer_binary(fn, in, &r);
+    break;
+  case IR_OP_UNARY:
+    infer_unary(fn, in, &r);
+    break;
+  case IR_OP_LOAD:
+    infer_load(fn, in, &r);
+    break;
+  case IR_OP_ASSIGN:
+    infer_assign(fn, in, &r);
+    break;
+  case IR_OP_CAST:
+    infer_cast(fn, in, &r);
+    break;
+  case IR_OP_SELECT:
+    infer_select(fn, in, &r);
+    break;
+  case IR_OP_ADDRESS_OF:
+    infer_address_of(fn, in, &r);
+    break;
+  case IR_OP_CALL:
+    if (!infer_call(fn, in, &r)) {
+      return;
     }
     break;
-  }
-  case IR_OP_UNARY: {
-    MslClass a = operand_class(fn, &in->lhs);
-    const char *t = in->text ? in->text : "";
-    if (!strcmp(t, "!")) {
-      cls = MC_U32;
-    } else if (in->is_float) {
-      cls = in->float_bits == 64 ? MC_F64 : MC_F32;
-    } else {
-      cls = class_is_int(a) ? a : MC_I32;
-    }
-    break;
-  }
-  case IR_OP_LOAD: {
-    MtlcTypeKind kind = access_kind(fn, &in->lhs, in);
-    MslVar *pointer = operand_var(fn, &in->lhs);
-    if (pointer && pointer->cls == MC_PTR && pointer->elem == MTLC_TYPE_POINTER &&
-        in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 8) {
-      cls = MC_PTR;
-      space = MS_DEVICE;
-    } else {
-      cls = class_of_kind(kind);
-    }
-    break;
-  }
-  case IR_OP_ASSIGN: {
-    MslVar *source = operand_var(fn, &in->lhs);
-    if (source) {
-      cls = source->cls;
-      space = source->space;
-      elem = source->elem;
-      rec = source->rec;
-    } else {
-      cls = literal_class(&in->lhs);
-    }
-    break;
-  }
-  case IR_OP_CAST: {
-    MtlcTypeKind kind = cast_kind(in);
-    cls = class_of_kind(kind);
-    if (cls == MC_PTR) {
-      MslVar *source = operand_var(fn, &in->lhs);
-      MslSpace declared = MS_NONE;
-      elem = pointee_kind(in->value_type, in->text);
-      if (in->value_type && in->value_type->kind == MTLC_TYPE_POINTER) {
-        declared = space_of_mtlc(in->value_type->address_space);
-      }
-      space = declared != MS_NONE ? declared
-              : (source && source->cls == MC_PTR) ? source->space
-                                                  : MS_DEVICE;
-      if (elem == MTLC_TYPE_VOID && source && source->cls == MC_PTR) {
-        elem = source->elem;
-      }
-    } else if (cls == MC_REC) {
-      rec = in->value_type;
-    } else if (cls == MC_NONE) {
-      cls = MC_I32;
-    }
-    break;
-  }
-  case IR_OP_SELECT: {
-    MslVar *source = operand_var(fn, &in->rhs);
-    if (source) {
-      cls = source->cls;
-      space = source->space;
-      elem = source->elem;
-    } else {
-      source = in->argument_count > 0 ? operand_var(fn, &in->arguments[0])
-                                      : NULL;
-      cls = source ? source->cls : literal_class(&in->rhs);
-      if (source) {
-        space = source->space;
-        elem = source->elem;
-      }
-    }
-    if (in->argument_count > 0) {
-      MslSpace other = operand_space(fn, &in->arguments[0]);
-      if (cls == MC_PTR && other != MS_NONE && space == MS_NONE) {
-        space = other;
-      }
-    }
-    break;
-  }
-  case IR_OP_ADDRESS_OF: {
-    MslVar *home = operand_var(fn, &in->lhs);
-    cls = MC_PTR;
-    space = MS_THREAD;
-    if (home && home->cls != MC_REC && home->cls != MC_PTR) {
-      elem = home->storage != MTLC_TYPE_VOID ? home->storage
-                                             : natural_kind(home->cls);
-    } else if (home && home->cls == MC_PTR) {
-      elem = MTLC_TYPE_POINTER;
-    }
-    break;
-  }
-  case IR_OP_CALL: {
-    if (in->intrinsic != MTLC_INTRINSIC_NONE) {
-      cls = intrinsic_class(in->intrinsic);
-      if (cls == MC_NONE) {
-        return;
-      }
-    } else {
-      size_t index = 0;
-      IRFunction *callee = lookup_function(fn->m, in->text, &index);
-      const MtlcType *type;
-      if (!callee || returns_void_of(fn->m, callee)) {
-        return;
-      }
-      type = return_type_of(fn->m, callee);
-      if (type_is_record(type)) {
-        cls = MC_REC;
-        rec = type;
-      } else {
-        cls = class_of_kind(type_kind(type, callee->return_type_name));
-        if (cls == MC_PTR) {
-          space = MS_DEVICE;
-          elem = pointee_kind(type, callee->return_type_name);
-          if (fn->spec && fn->spec->call_spec &&
-              (size_t)(in - fn->func->instructions) <
-                  fn->spec->instruction_count) {
-            size_t target =
-                fn->spec->call_spec[(size_t)(in - fn->func->instructions)];
-            MslSpec *callee_spec = spec_of_index(fn->m, target);
-            if (callee_spec && callee_spec->ret_space != MS_NONE) {
-              space = callee_spec->ret_space;
-            }
-          }
-        }
-      }
-    }
-    break;
-  }
   default:
     return;
   }
@@ -960,19 +996,19 @@ static void infer_instruction(MslFn *fn, const IRInstruction *in,
     return;
   }
   if (!dest->fixed) {
-    if (dest->cls == MC_NONE && cls != MC_NONE) {
-      dest->cls = cls;
-      dest->rec = rec;
+    if (dest->cls == MC_NONE && r.cls != MC_NONE) {
+      dest->cls = r.cls;
+      dest->rec = r.rec;
       *changed = 1;
     }
     if (dest->cls == MC_PTR && dest->elem == MTLC_TYPE_VOID &&
-        elem != MTLC_TYPE_VOID) {
-      dest->elem = elem;
+        r.elem != MTLC_TYPE_VOID) {
+      dest->elem = r.elem;
       *changed = 1;
     }
   }
-  if (dest->cls == MC_PTR && cls == MC_PTR) {
-    join_space(dest, space, changed);
+  if (dest->cls == MC_PTR && r.cls == MC_PTR) {
+    join_space(dest, r.space, changed);
   }
 }
 
@@ -1968,185 +2004,223 @@ static int check_f64(MslFn *fn, MslClass cls) {
   return 1;
 }
 
+static int emit_binary_f64(MslFn *fn, const IRInstruction *in, const char *t,
+                           MslClass a, MslClass b, MslVar *dest) {
+  if (is_compare(t) && strcmp(t, "&&") != 0 && strcmp(t, "||") != 0 &&
+      a != MC_F64 && b != MC_F64 &&
+      (a == MC_F32 || in->lhs.kind == IR_OPERAND_FLOAT ||
+       in->lhs.kind == IR_OPERAND_INT) &&
+      (b == MC_F32 || in->rhs.kind == IR_OPERAND_FLOAT ||
+       in->rhs.kind == IR_OPERAND_INT)) {
+    emit_f64_compare(fn, in, t);
+    return 1;
+  }
+  if (!(is_arith(t) && dest->cls == MC_F32 && dest->demoted &&
+        f32_exact_operand(fn, &in->lhs) &&
+        f32_exact_operand(fn, &in->rhs))) {
+    float64_refusal(fn, in);
+    return 1;
+  }
+  return 0;
+}
+
+static void emit_binary_float(MslFn *fn, const IRInstruction *in,
+                              const char *t, MslClass a, MslClass b) {
+  char x[2048], y[2048], expr[4600];
+  if (a == MC_F64 || b == MC_F64) {
+    float64_refusal(fn, in);
+    return;
+  }
+  materialize(fn, &in->lhs, MC_F32, x, sizeof(x));
+  materialize(fn, &in->rhs, MC_F32, y, sizeof(y));
+  if (is_compare(t)) {
+    if (!strcmp(t, "&&") || !strcmp(t, "||")) {
+      snprintf(expr, sizeof(expr), "(uint)((%s != 0.0f) %s (%s != 0.0f))",
+               x, t, y);
+    } else {
+      snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
+    }
+    store_dest(fn, in, expr, MC_U32);
+    return;
+  }
+  if (!strcmp(t, "%")) {
+    snprintf(expr, sizeof(expr), "fmod(%s, %s)", x, y);
+  } else if (!strcmp(t, "+") || !strcmp(t, "-") || !strcmp(t, "*") ||
+             !strcmp(t, "/")) {
+    snprintf(expr, sizeof(expr), "%s %s %s", x, t, y);
+  } else {
+    mod_error(fn->m, "Metal: unsupported float operator '%s' in '%s'", t,
+              fn_name(fn));
+    return;
+  }
+  store_dest(fn, in, expr, MC_F32);
+}
+
+static void emit_binary_two_pointers(MslFn *fn, const IRInstruction *in,
+                                     const char *t) {
+  char x[2048], y[2048], expr[4600];
+  materialize(fn, &in->lhs, MC_PTR, x, sizeof(x));
+  materialize(fn, &in->rhs, MC_PTR, y, sizeof(y));
+  if (!strcmp(t, "-")) {
+    snprintf(expr, sizeof(expr), "(long)(%s - %s)", x, y);
+    store_dest(fn, in, expr, MC_I64);
+  } else if (is_compare(t)) {
+    snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
+    store_dest(fn, in, expr, MC_U32);
+  } else {
+    mod_error(fn->m, "Metal: '%s' applies '%s' to two pointers",
+              fn_name(fn), t);
+  }
+}
+
+static void emit_binary_pointer(MslFn *fn, const IRInstruction *in,
+                                const char *t, MslClass a, MslClass b,
+                                MslVar *dest) {
+  char x[2048], y[2048], expr[4600];
+  if (a == MC_PTR && b == MC_PTR) {
+    emit_binary_two_pointers(fn, in, t);
+    return;
+  }
+  if (is_compare(t)) {
+    materialize(fn, &in->lhs, a == MC_PTR ? MC_PTR : MC_U64, x, sizeof(x));
+    materialize(fn, &in->rhs, b == MC_PTR ? MC_PTR : MC_U64, y, sizeof(y));
+    if (in->lhs.kind == IR_OPERAND_INT && in->lhs.int_value == 0) {
+      snprintf(x, sizeof(x), "nullptr");
+    }
+    if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0) {
+      snprintf(y, sizeof(y), "nullptr");
+    }
+    snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
+    store_dest(fn, in, expr, MC_U32);
+    return;
+  }
+  if (strcmp(t, "+") != 0 && strcmp(t, "-") != 0) {
+    mod_error(fn->m,
+              "Metal: '%s' applies '%s' to a pointer; only + and - move "
+              "a pointer",
+              fn_name(fn), t);
+    return;
+  }
+  if (a == MC_PTR) {
+    materialize(fn, &in->lhs, MC_PTR, x, sizeof(x));
+    materialize(fn, &in->rhs, MC_I64, y, sizeof(y));
+  } else {
+    materialize(fn, &in->rhs, MC_PTR, x, sizeof(x));
+    materialize(fn, &in->lhs, MC_I64, y, sizeof(y));
+  }
+  snprintf(expr, sizeof(expr), "%s %s %s", x, t, y);
+  if (dest->cls == MC_PTR) {
+    line(fn, "%s = %s;", dest->ident, expr);
+  } else {
+    char wrapped[4700];
+    snprintf(wrapped, sizeof(wrapped), "(%s)", expr);
+    store_dest(fn, in, wrapped, MC_PTR);
+  }
+}
+
+static void emit_binary_shift(MslFn *fn, const IRInstruction *in,
+                              const char *t, int wide, const char *x,
+                              const char *y, const char *sx) {
+  MslClass op_cls = wide ? MC_U64 : MC_U32;
+  MslClass signed_cls = wide ? MC_I64 : MC_I32;
+  const char *mask = wide ? "63ul" : "31u";
+  int uns = in->is_unsigned;
+  char expr[4600], count[2100];
+  if (in->rhs.kind == IR_OPERAND_INT) {
+    snprintf(count, sizeof(count), "%lluu",
+             (unsigned long long)in->rhs.int_value & (wide ? 63ull : 31ull));
+  } else {
+    snprintf(count, sizeof(count), "(%s & %s)", y, mask);
+  }
+  if (!strcmp(t, "<<")) {
+    snprintf(expr, sizeof(expr), "%s << %s", x, count);
+    store_dest(fn, in, expr, op_cls);
+  } else if (uns) {
+    snprintf(expr, sizeof(expr), "%s >> %s", x, count);
+    store_dest(fn, in, expr, op_cls);
+  } else {
+    snprintf(expr, sizeof(expr), "%s >> %s", sx, count);
+    store_dest(fn, in, expr, signed_cls);
+  }
+}
+
+static void emit_binary_int(MslFn *fn, const IRInstruction *in, const char *t,
+                            MslClass a, MslClass b) {
+  int wide = class_is_64(a) || class_is_64(b);
+  MslClass op_cls = wide ? MC_U64 : MC_U32;
+  MslClass signed_cls = wide ? MC_I64 : MC_I32;
+  const char *ut = unsigned_type(op_cls);
+  const char *st = signed_type(op_cls);
+  int uns = in->is_unsigned;
+  char x[2048], y[2048], expr[4600];
+  char sx[2048], sy[2048];
+  materialize(fn, &in->lhs, op_cls, x, sizeof(x));
+  materialize(fn, &in->rhs, op_cls, y, sizeof(y));
+  materialize(fn, &in->lhs, signed_cls, sx, sizeof(sx));
+  materialize(fn, &in->rhs, signed_cls, sy, sizeof(sy));
+  if (!strcmp(t, "+") || !strcmp(t, "-") || !strcmp(t, "*") ||
+      !strcmp(t, "&") || !strcmp(t, "|") || !strcmp(t, "^")) {
+    snprintf(expr, sizeof(expr), "%s %s %s", x, t, y);
+    store_dest(fn, in, expr, op_cls);
+  } else if (!strcmp(t, "<<") || !strcmp(t, ">>")) {
+    emit_binary_shift(fn, in, t, wide, x, y, sx);
+  } else if (!strcmp(t, "/")) {
+    if (uns) {
+      snprintf(expr, sizeof(expr), "%s / %s", x, y);
+      store_dest(fn, in, expr, op_cls);
+    } else {
+      snprintf(expr, sizeof(expr),
+               "(%s == (%s)(-1)) ? (%s)((%s)0 - %s) : (%s)(%s / %s)", sy,
+               st, ut, ut, x, ut, sx, sy);
+      store_dest(fn, in, expr, op_cls);
+    }
+  } else if (!strcmp(t, "%")) {
+    if (uns) {
+      snprintf(expr, sizeof(expr), "%s %% %s", x, y);
+      store_dest(fn, in, expr, op_cls);
+    } else {
+      snprintf(expr, sizeof(expr),
+               "(%s == (%s)(-1)) ? (%s)0 : (%s - (%s)(%s / %s) * %s)", sy,
+               st, ut, x, ut, sx, sy, y);
+      store_dest(fn, in, expr, op_cls);
+    }
+  } else if (!strcmp(t, "&&") || !strcmp(t, "||")) {
+    snprintf(expr, sizeof(expr), "(uint)((%s != 0) %s (%s != 0))", x, t, y);
+    store_dest(fn, in, expr, MC_U32);
+  } else if (is_compare(t)) {
+    if (uns || !strcmp(t, "==") || !strcmp(t, "!=")) {
+      snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
+    } else {
+      snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", sx, t, sy);
+    }
+    store_dest(fn, in, expr, MC_U32);
+  } else {
+    mod_error(fn->m, "Metal: unsupported operator '%s' in '%s'", t,
+              fn_name(fn));
+  }
+}
+
 static void emit_binary(MslFn *fn, const IRInstruction *in) {
   const char *t = in->text ? in->text : "+";
   MslClass a = operand_class(fn, &in->lhs);
   MslClass b = operand_class(fn, &in->rhs);
-  char x[2048], y[2048], expr[4600];
   MslVar *dest = dest_var(fn, in);
   if (!dest) {
     return;
   }
-  if (in->is_float && in->float_bits == 64) {
-    if (is_compare(t) && strcmp(t, "&&") != 0 && strcmp(t, "||") != 0 &&
-        a != MC_F64 && b != MC_F64 &&
-        (a == MC_F32 || in->lhs.kind == IR_OPERAND_FLOAT ||
-         in->lhs.kind == IR_OPERAND_INT) &&
-        (b == MC_F32 || in->rhs.kind == IR_OPERAND_FLOAT ||
-         in->rhs.kind == IR_OPERAND_INT)) {
-      emit_f64_compare(fn, in, t);
-      return;
-    }
-    if (!(is_arith(t) && dest->cls == MC_F32 && dest->demoted &&
-          f32_exact_operand(fn, &in->lhs) &&
-          f32_exact_operand(fn, &in->rhs))) {
-      float64_refusal(fn, in);
-      return;
-    }
+  if (in->is_float && in->float_bits == 64 &&
+      emit_binary_f64(fn, in, t, a, b, dest)) {
+    return;
   }
   if (in->is_float || a == MC_F32 || b == MC_F32) {
-    if (a == MC_F64 || b == MC_F64) {
-      float64_refusal(fn, in);
-      return;
-    }
-    materialize(fn, &in->lhs, MC_F32, x, sizeof(x));
-    materialize(fn, &in->rhs, MC_F32, y, sizeof(y));
-    if (is_compare(t)) {
-      if (!strcmp(t, "&&") || !strcmp(t, "||")) {
-        snprintf(expr, sizeof(expr), "(uint)((%s != 0.0f) %s (%s != 0.0f))",
-                 x, t, y);
-      } else {
-        snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
-      }
-      store_dest(fn, in, expr, MC_U32);
-      return;
-    }
-    if (!strcmp(t, "%")) {
-      snprintf(expr, sizeof(expr), "fmod(%s, %s)", x, y);
-    } else if (!strcmp(t, "+") || !strcmp(t, "-") || !strcmp(t, "*") ||
-               !strcmp(t, "/")) {
-      snprintf(expr, sizeof(expr), "%s %s %s", x, t, y);
-    } else {
-      mod_error(fn->m, "Metal: unsupported float operator '%s' in '%s'", t,
-                fn_name(fn));
-      return;
-    }
-    store_dest(fn, in, expr, MC_F32);
+    emit_binary_float(fn, in, t, a, b);
     return;
   }
   if (a == MC_PTR || b == MC_PTR) {
-    if (a == MC_PTR && b == MC_PTR) {
-      materialize(fn, &in->lhs, MC_PTR, x, sizeof(x));
-      materialize(fn, &in->rhs, MC_PTR, y, sizeof(y));
-      if (!strcmp(t, "-")) {
-        snprintf(expr, sizeof(expr), "(long)(%s - %s)", x, y);
-        store_dest(fn, in, expr, MC_I64);
-      } else if (is_compare(t)) {
-        snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
-        store_dest(fn, in, expr, MC_U32);
-      } else {
-        mod_error(fn->m, "Metal: '%s' applies '%s' to two pointers",
-                  fn_name(fn), t);
-      }
-      return;
-    }
-    if (is_compare(t)) {
-      materialize(fn, &in->lhs, a == MC_PTR ? MC_PTR : MC_U64, x, sizeof(x));
-      materialize(fn, &in->rhs, b == MC_PTR ? MC_PTR : MC_U64, y, sizeof(y));
-      if (in->lhs.kind == IR_OPERAND_INT && in->lhs.int_value == 0) {
-        snprintf(x, sizeof(x), "nullptr");
-      }
-      if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0) {
-        snprintf(y, sizeof(y), "nullptr");
-      }
-      snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
-      store_dest(fn, in, expr, MC_U32);
-      return;
-    }
-    if (strcmp(t, "+") != 0 && strcmp(t, "-") != 0) {
-      mod_error(fn->m,
-                "Metal: '%s' applies '%s' to a pointer; only + and - move "
-                "a pointer",
-                fn_name(fn), t);
-      return;
-    }
-    if (a == MC_PTR) {
-      materialize(fn, &in->lhs, MC_PTR, x, sizeof(x));
-      materialize(fn, &in->rhs, MC_I64, y, sizeof(y));
-    } else {
-      materialize(fn, &in->rhs, MC_PTR, x, sizeof(x));
-      materialize(fn, &in->lhs, MC_I64, y, sizeof(y));
-    }
-    snprintf(expr, sizeof(expr), "%s %s %s", x, t, y);
-    if (dest->cls == MC_PTR) {
-      line(fn, "%s = %s;", dest->ident, expr);
-    } else {
-      char wrapped[4700];
-      snprintf(wrapped, sizeof(wrapped), "(%s)", expr);
-      store_dest(fn, in, wrapped, MC_PTR);
-    }
+    emit_binary_pointer(fn, in, t, a, b, dest);
     return;
   }
-  {
-    int wide = class_is_64(a) || class_is_64(b);
-    MslClass op_cls = wide ? MC_U64 : MC_U32;
-    MslClass signed_cls = wide ? MC_I64 : MC_I32;
-    const char *ut = unsigned_type(op_cls);
-    const char *st = signed_type(op_cls);
-    const char *mask = wide ? "63ul" : "31u";
-    int uns = in->is_unsigned;
-    char sx[2048], sy[2048];
-    materialize(fn, &in->lhs, op_cls, x, sizeof(x));
-    materialize(fn, &in->rhs, op_cls, y, sizeof(y));
-    materialize(fn, &in->lhs, signed_cls, sx, sizeof(sx));
-    materialize(fn, &in->rhs, signed_cls, sy, sizeof(sy));
-    if (!strcmp(t, "+") || !strcmp(t, "-") || !strcmp(t, "*") ||
-        !strcmp(t, "&") || !strcmp(t, "|") || !strcmp(t, "^")) {
-      snprintf(expr, sizeof(expr), "%s %s %s", x, t, y);
-      store_dest(fn, in, expr, op_cls);
-    } else if (!strcmp(t, "<<") || !strcmp(t, ">>")) {
-      char count[2100];
-      if (in->rhs.kind == IR_OPERAND_INT) {
-        snprintf(count, sizeof(count), "%lluu",
-                 (unsigned long long)in->rhs.int_value & (wide ? 63ull : 31ull));
-      } else {
-        snprintf(count, sizeof(count), "(%s & %s)", y, mask);
-      }
-      if (!strcmp(t, "<<")) {
-        snprintf(expr, sizeof(expr), "%s << %s", x, count);
-        store_dest(fn, in, expr, op_cls);
-      } else if (uns) {
-        snprintf(expr, sizeof(expr), "%s >> %s", x, count);
-        store_dest(fn, in, expr, op_cls);
-      } else {
-        snprintf(expr, sizeof(expr), "%s >> %s", sx, count);
-        store_dest(fn, in, expr, signed_cls);
-      }
-    } else if (!strcmp(t, "/")) {
-      if (uns) {
-        snprintf(expr, sizeof(expr), "%s / %s", x, y);
-        store_dest(fn, in, expr, op_cls);
-      } else {
-        snprintf(expr, sizeof(expr),
-                 "(%s == (%s)(-1)) ? (%s)((%s)0 - %s) : (%s)(%s / %s)", sy,
-                 st, ut, ut, x, ut, sx, sy);
-        store_dest(fn, in, expr, op_cls);
-      }
-    } else if (!strcmp(t, "%")) {
-      if (uns) {
-        snprintf(expr, sizeof(expr), "%s %% %s", x, y);
-        store_dest(fn, in, expr, op_cls);
-      } else {
-        snprintf(expr, sizeof(expr),
-                 "(%s == (%s)(-1)) ? (%s)0 : (%s - (%s)(%s / %s) * %s)", sy,
-                 st, ut, x, ut, sx, sy, y);
-        store_dest(fn, in, expr, op_cls);
-      }
-    } else if (!strcmp(t, "&&") || !strcmp(t, "||")) {
-      snprintf(expr, sizeof(expr), "(uint)((%s != 0) %s (%s != 0))", x, t, y);
-      store_dest(fn, in, expr, MC_U32);
-    } else if (is_compare(t)) {
-      if (uns || !strcmp(t, "==") || !strcmp(t, "!=")) {
-        snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", x, t, y);
-      } else {
-        snprintf(expr, sizeof(expr), "(uint)(%s %s %s)", sx, t, sy);
-      }
-      store_dest(fn, in, expr, MC_U32);
-    } else {
-      mod_error(fn->m, "Metal: unsupported operator '%s' in '%s'", t,
-                fn_name(fn));
-    }
-  }
+  emit_binary_int(fn, in, t, a, b);
 }
 
 static void emit_unary(MslFn *fn, const IRInstruction *in) {
@@ -2310,67 +2384,48 @@ static void emit_store(MslFn *fn, const IRInstruction *in) {
        access_type(kind), p, access_type(kind), value);
 }
 
-static void emit_cast(MslFn *fn, const IRInstruction *in) {
-  MtlcTypeKind target = cast_kind(in);
-  MslClass source_cls = operand_class(fn, &in->lhs);
-  MslVar *dest = dest_var(fn, in);
+static void emit_cast_to_pointer(MslFn *fn, const IRInstruction *in,
+                                 MslVar *dest) {
   char x[2048], expr[2600];
-  if (!dest) {
-    return;
-  }
-  if (target == MTLC_TYPE_FLOAT64 && dest->demoted) {
-    target = MTLC_TYPE_FLOAT32;
-  }
-  if (target == MTLC_TYPE_FLOAT64 || source_cls == MC_F64) {
-    float64_refusal(fn, in);
-    return;
-  }
-  if (class_of_kind(target) == MC_PTR) {
-    MslVar *source = operand_var(fn, &in->lhs);
-    if (source && source->cls == MC_PTR) {
-      if (dest->cls == MC_PTR && dest->space != source->space &&
-          source->space != MS_NONE && dest->space != MS_NONE) {
-        mod_error(fn->m,
-                  "Metal: '%s' casts %s pointer '%s' to %s pointer; Metal "
-                  "cannot convert between address spaces",
-                  fn_name(fn), space_name(source->space),
-                  source_name(source->name), space_name(dest->space));
-        return;
-      }
-      materialize(fn, &in->lhs, MC_PTR, x, sizeof(x));
-      store_dest(fn, in, x, MC_PTR);
+  MslVar *source = operand_var(fn, &in->lhs);
+  if (source && source->cls == MC_PTR) {
+    if (dest->cls == MC_PTR && dest->space != source->space &&
+        source->space != MS_NONE && dest->space != MS_NONE) {
+      mod_error(fn->m,
+                "Metal: '%s' casts %s pointer '%s' to %s pointer; Metal "
+                "cannot convert between address spaces",
+                fn_name(fn), space_name(source->space),
+                source_name(source->name), space_name(dest->space));
       return;
     }
-    if (in->lhs.kind == IR_OPERAND_INT && in->lhs.int_value == 0) {
-      store_dest(fn, in, "nullptr", MC_PTR);
-      return;
-    }
-    materialize(fn, &in->lhs, MC_U64, x, sizeof(x));
-    snprintf(expr, sizeof(expr), "reinterpret_cast<%s uchar*>(%s)",
-             space_qual(fn->m, dest->space), x);
-    line(fn, "%s = %s;", dest->ident, expr);
-    return;
-  }
-  if (class_of_kind(target) == MC_REC) {
-    materialize(fn, &in->lhs, MC_REC, x, sizeof(x));
-    line(fn, "%s = %s;", dest->ident, x);
-    return;
-  }
-  if (!check_f64(fn, class_of_kind(target))) {
-    return;
-  }
-  if (source_cls == MC_F64 && !check_f64(fn, MC_F64)) {
-    return;
-  }
-  if (source_cls == MC_PTR) {
     materialize(fn, &in->lhs, MC_PTR, x, sizeof(x));
+    store_dest(fn, in, x, MC_PTR);
+    return;
+  }
+  if (in->lhs.kind == IR_OPERAND_INT && in->lhs.int_value == 0) {
+    store_dest(fn, in, "nullptr", MC_PTR);
+    return;
+  }
+  materialize(fn, &in->lhs, MC_U64, x, sizeof(x));
+  snprintf(expr, sizeof(expr), "reinterpret_cast<%s uchar*>(%s)",
+           space_qual(fn->m, dest->space), x);
+  line(fn, "%s = %s;", dest->ident, expr);
+}
+
+static MslClass cast_source(MslFn *fn, const IRInstruction *in,
+                            MslClass source_cls, char *x, size_t size) {
+  char expr[2600];
+  if (source_cls == MC_PTR) {
+    materialize(fn, &in->lhs, MC_PTR, x, size);
     snprintf(expr, sizeof(expr), "reinterpret_cast<ulong>(%s)", x);
-    snprintf(x, sizeof(x), "%s", expr);
-    source_cls = MC_U64;
-  } else if (source_cls == MC_F32 || in->is_float) {
-    materialize(fn, &in->lhs, MC_F32, x, sizeof(x));
-    source_cls = MC_F32;
-  } else {
+    snprintf(x, size, "%s", expr);
+    return MC_U64;
+  }
+  if (source_cls == MC_F32 || in->is_float) {
+    materialize(fn, &in->lhs, MC_F32, x, size);
+    return MC_F32;
+  }
+  {
     MslClass as = class_is_64(source_cls)
                       ? (in->is_unsigned ? MC_U64 : MC_I64)
                       : (in->is_unsigned ? MC_U32 : MC_I32);
@@ -2380,9 +2435,15 @@ static void emit_cast(MslFn *fn, const IRInstruction *in) {
     if (source_cls == MC_U64 && !in->is_unsigned) {
       as = MC_U64;
     }
-    materialize(fn, &in->lhs, as, x, sizeof(x));
-    source_cls = as;
+    materialize(fn, &in->lhs, as, x, size);
+    return as;
   }
+}
+
+static void emit_cast_store(MslFn *fn, const IRInstruction *in,
+                            MtlcTypeKind target, MslClass source_cls,
+                            const char *x) {
+  char expr[2600];
   switch (target) {
   case MTLC_TYPE_FLOAT32:
     snprintf(expr, sizeof(expr), "(float)(%s)", x);
@@ -2459,6 +2520,40 @@ static void emit_cast(MslFn *fn, const IRInstruction *in) {
               fn_name(fn), in->text ? in->text : "?");
     return;
   }
+}
+
+static void emit_cast(MslFn *fn, const IRInstruction *in) {
+  MtlcTypeKind target = cast_kind(in);
+  MslClass source_cls = operand_class(fn, &in->lhs);
+  MslVar *dest = dest_var(fn, in);
+  char x[2048];
+  if (!dest) {
+    return;
+  }
+  if (target == MTLC_TYPE_FLOAT64 && dest->demoted) {
+    target = MTLC_TYPE_FLOAT32;
+  }
+  if (target == MTLC_TYPE_FLOAT64 || source_cls == MC_F64) {
+    float64_refusal(fn, in);
+    return;
+  }
+  if (class_of_kind(target) == MC_PTR) {
+    emit_cast_to_pointer(fn, in, dest);
+    return;
+  }
+  if (class_of_kind(target) == MC_REC) {
+    materialize(fn, &in->lhs, MC_REC, x, sizeof(x));
+    line(fn, "%s = %s;", dest->ident, x);
+    return;
+  }
+  if (!check_f64(fn, class_of_kind(target))) {
+    return;
+  }
+  if (source_cls == MC_F64 && !check_f64(fn, MC_F64)) {
+    return;
+  }
+  source_cls = cast_source(fn, in, source_cls, x, sizeof(x));
+  emit_cast_store(fn, in, target, source_cls, x);
 }
 
 static void emit_select(MslFn *fn, const IRInstruction *in) {
@@ -4321,7 +4416,7 @@ static void declare_locals(MslFn *fn) {
                   fn_name(fn), source_name(var->name));
         return;
       }
-      line(fn, "%s alignas(16) %s mtl_s_%s[%lld];", space_word(var->alloc_space),
+      line(fn, "alignas(16) %s %s mtl_s_%s[%lld];", space_word(var->alloc_space),
            type, var->ident, var->alloc_count > 0 ? var->alloc_count : 1);
       line(fn, "%s uchar* %s = (%s uchar*)mtl_s_%s;",
            space_word(var->alloc_space), var->ident,

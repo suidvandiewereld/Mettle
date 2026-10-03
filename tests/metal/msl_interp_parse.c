@@ -829,9 +829,15 @@ static void compile_declaration(MslCompiler *c) {
   int local;
   char tn[160];
   if ((space == MSL_SP_THREADGROUP || space == MSL_SP_THREAD) && mslc_tok_is(mslc_ahead(c, 1), "alignas")) {
-    size_t align;
+    mslc_fail(c, line, "alignas must come before the address space; Metal rejects it after '%s'", msl_space_name(space));
+  }
+  if (mslc_tok_is(mslc_cur(c), "alignas")) {
+    size_t align = parse_alignas(c, line);
+    space = mslc_space_keyword(mslc_cur(c));
+    if (space != MSL_SP_THREADGROUP && space != MSL_SP_THREAD) {
+      mslc_fail(c, line, "alignas declares only threadgroup or thread arrays in this dialect");
+    }
     c->pos++;
-    align = parse_alignas(c, line);
     spec = mslc_parse_type(c);
     if (spec.space != MSL_SP_NONE || spec.vote || spec.type->kind == MSL_K_POINTER) {
       mslc_fail(c, line, "malformed array declaration");
@@ -956,6 +962,9 @@ static void compile_simple(MslCompiler *c, const char *terminator) {
 
 static int starts_declaration(MslCompiler *c) {
   const MslToken *tok = mslc_cur(c);
+  if (mslc_tok_is(tok, "alignas")) {
+    return 1;
+  }
   if (!mslc_starts_type(c, 0)) {
     return 0;
   }

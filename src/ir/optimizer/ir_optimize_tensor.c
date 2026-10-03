@@ -388,6 +388,63 @@ static int tensor_region_control_valid(const IRFunction *function,
   return 1;
 }
 
+static size_t tensor_region_scan_updates(const IRProgram *program,
+                                         const IRFunction *function,
+                                         const IRInstruction *first,
+                                         size_t first_index,
+                                         const IROperand *output,
+                                         size_t *limit,
+                                         size_t *update_count) {
+  size_t last_update_index = SIZE_MAX;
+  for (size_t i = first_index + 1; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    if (instruction->op == IR_OP_TENSOR_MMA &&
+        instruction->tensor_residency_role == IR_TENSOR_RESIDENCY_NONE &&
+        instruction->tensor_residency_scope ==
+            IR_TENSOR_RESIDENCY_SCOPE_NONE &&
+        tensor_instruction_can_join(first, instruction) &&
+        ir_tensor_region_update_operands_clean(instruction, output)) {
+      last_update_index = i;
+      (*update_count)++;
+      continue;
+    }
+    if (!ir_tensor_region_instruction_allowed(program, function, instruction,
+                                              output)) {
+      *limit = i;
+      break;
+    }
+  }
+  return last_update_index;
+}
+
+static int tensor_region_transfer_targets(const IRFunction *function,
+                                          size_t **out_targets) {
+  size_t *targets = malloc(function->instruction_count * sizeof(*targets));
+  if (!targets) return -1;
+  for (size_t j = 0; j < function->instruction_count; j++) {
+    const IRInstruction *instruction = &function->instructions[j];
+    targets[j] = SIZE_MAX;
+    if (!tensor_control_transfer(instruction)) continue;
+    size_t target = SIZE_MAX;
+    for (size_t k = 0; instruction->text && k < function->instruction_count;
+         k++) {
+      const IRInstruction *label = &function->instructions[k];
+      if (label->op == IR_OP_LABEL && label->text &&
+          strcmp(label->text, instruction->text) == 0) {
+        target = k;
+        break;
+      }
+    }
+    if (target == SIZE_MAX) {
+      free(targets);
+      return 0;
+    }
+    targets[j] = target;
+  }
+  *out_targets = targets;
+  return 1;
+}
+
 // The general form: one start, any number of connected updates anywhere
 // in a single-entry, single-exit stretch of code -- loops, branches,
 // barriers, asynchronous copies, and loads and stores that provably do not
@@ -412,50 +469,14 @@ static int tensor_try_form_region_residency(IRFunction *function,
 
   const IROperand *output = &first->arguments[3];
   size_t limit = function->instruction_count;
-  size_t last_update_index = SIZE_MAX;
   size_t update_count = 0;
-  for (size_t i = first_index + 1; i < function->instruction_count; i++) {
-    const IRInstruction *instruction = &function->instructions[i];
-    if (instruction->op == IR_OP_TENSOR_MMA &&
-        instruction->tensor_residency_role == IR_TENSOR_RESIDENCY_NONE &&
-        instruction->tensor_residency_scope ==
-            IR_TENSOR_RESIDENCY_SCOPE_NONE &&
-        tensor_instruction_can_join(first, instruction) &&
-        ir_tensor_region_update_operands_clean(instruction, output)) {
-      last_update_index = i;
-      update_count++;
-      continue;
-    }
-    if (!ir_tensor_region_instruction_allowed(program, function, instruction,
-                                              output)) {
-      limit = i;
-      break;
-    }
-  }
+  size_t last_update_index = tensor_region_scan_updates(
+      program, function, first, first_index, output, &limit, &update_count);
   if (last_update_index == SIZE_MAX) return 0;
 
-  size_t *targets = malloc(function->instruction_count * sizeof(*targets));
-  if (!targets) return -1;
-  for (size_t j = 0; j < function->instruction_count; j++) {
-    const IRInstruction *instruction = &function->instructions[j];
-    targets[j] = SIZE_MAX;
-    if (!tensor_control_transfer(instruction)) continue;
-    size_t target = SIZE_MAX;
-    for (size_t k = 0; instruction->text && k < function->instruction_count;
-         k++) {
-      const IRInstruction *label = &function->instructions[k];
-      if (label->op == IR_OP_LABEL && label->text &&
-          strcmp(label->text, instruction->text) == 0) {
-        target = k;
-        break;
-      }
-    }
-    if (target == SIZE_MAX) {
-      free(targets);
-      return 0;
-    }
-    targets[j] = target;
-  }
+  size_t *targets = NULL;
+  int targets_ready = tensor_region_transfer_targets(function, &targets);
+  if (targets_ready <= 0) return targets_ready;
   size_t end = SIZE_MAX;
   int needs_label = 0;
   for (size_t candidate = limit; candidate > last_update_index; candidate--) {

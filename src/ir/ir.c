@@ -2788,6 +2788,85 @@ static int ir_format_call_line(const IRInstruction *instruction,
   return written;
 }
 
+static int ir_format_tensor_mma_line(const IRInstruction *instruction,
+                                     char *buffer, size_t buffer_size) {
+  char residency[96] = {0};
+  const char *scope =
+      instruction->tensor_residency_scope ==
+              IR_TENSOR_RESIDENCY_SCOPE_PIPELINE
+          ? "pipeline."
+          : instruction->tensor_residency_scope ==
+                    IR_TENSOR_RESIDENCY_SCOPE_LOOP
+                ? "loop."
+                : instruction->tensor_residency_scope ==
+                          IR_TENSOR_RESIDENCY_SCOPE_REGION
+                      ? "region."
+                      : "";
+  if (instruction->tensor_residency_role == IR_TENSOR_RESIDENCY_START) {
+    snprintf(residency, sizeof(residency), " residency.%sstart#%u", scope,
+             instruction->tensor_residency_id);
+  } else if (instruction->tensor_residency_role ==
+             IR_TENSOR_RESIDENCY_UPDATE) {
+    snprintf(residency, sizeof(residency), " residency.%supdate#%u", scope,
+             instruction->tensor_residency_id);
+  }
+  if (IR_TENSOR_MMA(instruction).a_zero_point ||
+      IR_TENSOR_MMA(instruction).b_zero_point) {
+    size_t used = strlen(residency);
+    snprintf(residency + used, sizeof(residency) - used, " zp(%u,%u)",
+             (unsigned)IR_TENSOR_MMA(instruction).a_zero_point,
+             (unsigned)IR_TENSOR_MMA(instruction).b_zero_point);
+  }
+  if (IR_TENSOR_MMA(instruction).c_scale_mode ==
+      MTLC_TENSOR_SCALE_PER_ROW) {
+    size_t used = strlen(residency);
+    snprintf(residency + used, sizeof(residency) - used, " cscale(row)");
+  }
+  if (IR_TENSOR_MMA(instruction).a_scale_values ||
+      IR_TENSOR_MMA(instruction).b_scale_values) {
+    size_t used = strlen(residency);
+    snprintf(residency + used, sizeof(residency) - used, " scalevals(%d,%d)",
+             (int)IR_TENSOR_MMA(instruction).a_scale_values,
+             (int)IR_TENSOR_MMA(instruction).b_scale_values);
+  }
+  if (IR_TENSOR_MMA(instruction).a_swizzle ||
+      IR_TENSOR_MMA(instruction).b_swizzle) {
+    size_t used = strlen(residency);
+    snprintf(residency + used, sizeof(residency) - used, " swizzle(%u,%u)",
+             (unsigned)IR_TENSOR_MMA(instruction).a_swizzle,
+             (unsigned)IR_TENSOR_MMA(instruction).b_swizzle);
+  }
+  return snprintf(
+      buffer, buffer_size,
+      "tensor_mma x%llu%s m%un%uk%u fmt(%d,%d,%d,%d) layout(%d,%d,%d,%d) ld(%u,%u,%u,%u) packing(%d,%d) sparsity(%d) scale(%d:%d:%u,%d:%d:%u)",
+      (unsigned long long)ir_tensor_mma_instruction_count(instruction),
+      residency,
+      (unsigned)IR_TENSOR_MMA(instruction).m,
+      (unsigned)IR_TENSOR_MMA(instruction).n,
+      (unsigned)IR_TENSOR_MMA(instruction).k,
+      (int)IR_TENSOR_MMA(instruction).a_element,
+      (int)IR_TENSOR_MMA(instruction).b_element,
+      (int)IR_TENSOR_MMA(instruction).accumulator_element,
+      (int)IR_TENSOR_MMA(instruction).result_element,
+      (int)IR_TENSOR_MMA(instruction).a_layout,
+      (int)IR_TENSOR_MMA(instruction).b_layout,
+      (int)IR_TENSOR_MMA(instruction).c_layout,
+      (int)IR_TENSOR_MMA(instruction).d_layout,
+      (unsigned)IR_TENSOR_MMA(instruction).a_leading_dimension,
+      (unsigned)IR_TENSOR_MMA(instruction).b_leading_dimension,
+      (unsigned)IR_TENSOR_MMA(instruction).c_leading_dimension,
+      (unsigned)IR_TENSOR_MMA(instruction).d_leading_dimension,
+      (int)IR_TENSOR_MMA(instruction).a_packing,
+      (int)IR_TENSOR_MMA(instruction).b_packing,
+      (int)IR_TENSOR_MMA(instruction).sparsity,
+      (int)IR_TENSOR_MMA(instruction).a_scale_mode,
+      (int)IR_TENSOR_MMA(instruction).a_scale_element,
+      (unsigned)IR_TENSOR_MMA(instruction).a_scale_leading_dimension,
+      (int)IR_TENSOR_MMA(instruction).b_scale_mode,
+      (int)IR_TENSOR_MMA(instruction).b_scale_element,
+      (unsigned)IR_TENSOR_MMA(instruction).b_scale_leading_dimension);
+}
+
 static int ir_format_gpu_line(const IRInstruction *instruction,
                              const char *dest, const char *lhs,
                              const char *rhs, char *buffer,
@@ -2899,84 +2978,8 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
     break;
   }
   case IR_OP_TENSOR_MMA:
-    {
-    char residency[96] = {0};
-    const char *scope =
-        instruction->tensor_residency_scope ==
-                IR_TENSOR_RESIDENCY_SCOPE_PIPELINE
-            ? "pipeline."
-            : instruction->tensor_residency_scope ==
-                      IR_TENSOR_RESIDENCY_SCOPE_LOOP
-                  ? "loop."
-                  : instruction->tensor_residency_scope ==
-                            IR_TENSOR_RESIDENCY_SCOPE_REGION
-                        ? "region."
-                        : "";
-    if (instruction->tensor_residency_role == IR_TENSOR_RESIDENCY_START) {
-      snprintf(residency, sizeof(residency), " residency.%sstart#%u", scope,
-               instruction->tensor_residency_id);
-    } else if (instruction->tensor_residency_role ==
-               IR_TENSOR_RESIDENCY_UPDATE) {
-      snprintf(residency, sizeof(residency), " residency.%supdate#%u", scope,
-               instruction->tensor_residency_id);
-    }
-    if (IR_TENSOR_MMA(instruction).a_zero_point ||
-        IR_TENSOR_MMA(instruction).b_zero_point) {
-      size_t used = strlen(residency);
-      snprintf(residency + used, sizeof(residency) - used, " zp(%u,%u)",
-               (unsigned)IR_TENSOR_MMA(instruction).a_zero_point,
-               (unsigned)IR_TENSOR_MMA(instruction).b_zero_point);
-    }
-    if (IR_TENSOR_MMA(instruction).c_scale_mode ==
-        MTLC_TENSOR_SCALE_PER_ROW) {
-      size_t used = strlen(residency);
-      snprintf(residency + used, sizeof(residency) - used, " cscale(row)");
-    }
-    if (IR_TENSOR_MMA(instruction).a_scale_values ||
-        IR_TENSOR_MMA(instruction).b_scale_values) {
-      size_t used = strlen(residency);
-      snprintf(residency + used, sizeof(residency) - used, " scalevals(%d,%d)",
-               (int)IR_TENSOR_MMA(instruction).a_scale_values,
-               (int)IR_TENSOR_MMA(instruction).b_scale_values);
-    }
-    if (IR_TENSOR_MMA(instruction).a_swizzle ||
-        IR_TENSOR_MMA(instruction).b_swizzle) {
-      size_t used = strlen(residency);
-      snprintf(residency + used, sizeof(residency) - used, " swizzle(%u,%u)",
-               (unsigned)IR_TENSOR_MMA(instruction).a_swizzle,
-               (unsigned)IR_TENSOR_MMA(instruction).b_swizzle);
-    }
-    written = snprintf(
-        buffer, buffer_size,
-        "tensor_mma x%llu%s m%un%uk%u fmt(%d,%d,%d,%d) layout(%d,%d,%d,%d) ld(%u,%u,%u,%u) packing(%d,%d) sparsity(%d) scale(%d:%d:%u,%d:%d:%u)",
-        (unsigned long long)ir_tensor_mma_instruction_count(instruction),
-        residency,
-        (unsigned)IR_TENSOR_MMA(instruction).m,
-        (unsigned)IR_TENSOR_MMA(instruction).n,
-        (unsigned)IR_TENSOR_MMA(instruction).k,
-        (int)IR_TENSOR_MMA(instruction).a_element,
-        (int)IR_TENSOR_MMA(instruction).b_element,
-        (int)IR_TENSOR_MMA(instruction).accumulator_element,
-        (int)IR_TENSOR_MMA(instruction).result_element,
-        (int)IR_TENSOR_MMA(instruction).a_layout,
-        (int)IR_TENSOR_MMA(instruction).b_layout,
-        (int)IR_TENSOR_MMA(instruction).c_layout,
-        (int)IR_TENSOR_MMA(instruction).d_layout,
-        (unsigned)IR_TENSOR_MMA(instruction).a_leading_dimension,
-        (unsigned)IR_TENSOR_MMA(instruction).b_leading_dimension,
-        (unsigned)IR_TENSOR_MMA(instruction).c_leading_dimension,
-        (unsigned)IR_TENSOR_MMA(instruction).d_leading_dimension,
-        (int)IR_TENSOR_MMA(instruction).a_packing,
-        (int)IR_TENSOR_MMA(instruction).b_packing,
-        (int)IR_TENSOR_MMA(instruction).sparsity,
-        (int)IR_TENSOR_MMA(instruction).a_scale_mode,
-        (int)IR_TENSOR_MMA(instruction).a_scale_element,
-        (unsigned)IR_TENSOR_MMA(instruction).a_scale_leading_dimension,
-        (int)IR_TENSOR_MMA(instruction).b_scale_mode,
-        (int)IR_TENSOR_MMA(instruction).b_scale_element,
-        (unsigned)IR_TENSOR_MMA(instruction).b_scale_leading_dimension);
+    written = ir_format_tensor_mma_line(instruction, buffer, buffer_size);
     break;
-    }
   case IR_OP_TENSOR_MATMUL:
     written = snprintf(
         buffer, buffer_size,
@@ -3678,6 +3681,109 @@ static int ir_gpu_launch_append_local(IRFunction *out, const char *name,
   return ok;
 }
 
+static int ir_gpu_launch_append_arg_slot(IRFunction *out,
+                                         const IRInstruction *launch,
+                                         size_t launch_id, size_t i,
+                                         const char *params_base_name) {
+  char arg_name[80];
+  char arg_addr_name[80];
+  char slot_name[80];
+  IRInstruction arg_addr = {0};
+  IRInstruction slot = {0};
+  IRInstruction store = {0};
+  snprintf(arg_name, sizeof(arg_name), ".__mtlc_gpu%zu_arg%zu",
+           launch_id, i);
+  snprintf(arg_addr_name, sizeof(arg_addr_name),
+           ".__mtlc_gpu%zu_arg%zu_addr", launch_id, i);
+  snprintf(slot_name, sizeof(slot_name), ".__mtlc_gpu%zu_slot%zu",
+           launch_id, i);
+
+  arg_addr.op = IR_OP_ADDRESS_OF;
+  arg_addr.location = launch->location;
+  arg_addr.dest = ir_operand_temp(arg_addr_name);
+  arg_addr.lhs = ir_operand_symbol(arg_name);
+  if (!arg_addr.dest.name || !arg_addr.lhs.name ||
+      !ir_function_append_instruction(out, &arg_addr)) {
+    ir_operand_destroy(&arg_addr.dest);
+    ir_operand_destroy(&arg_addr.lhs);
+    return 0;
+  }
+  ir_operand_destroy(&arg_addr.dest);
+  ir_operand_destroy(&arg_addr.lhs);
+
+  slot.op = IR_OP_BINARY;
+  slot.location = launch->location;
+  slot.dest = ir_operand_temp(slot_name);
+  slot.lhs = ir_operand_temp(params_base_name);
+  slot.rhs = ir_operand_int((long long)(i * 8u));
+  slot.text = "+";
+  if (!slot.dest.name || !slot.lhs.name ||
+      !ir_function_append_instruction(out, &slot)) {
+    ir_operand_destroy(&slot.dest);
+    ir_operand_destroy(&slot.lhs);
+    return 0;
+  }
+  ir_operand_destroy(&slot.dest);
+  ir_operand_destroy(&slot.lhs);
+
+  store.op = IR_OP_STORE;
+  store.location = launch->location;
+  store.dest = ir_operand_temp(slot_name);
+  store.lhs = ir_operand_temp(arg_addr_name);
+  store.rhs = ir_operand_int(8);
+  if (!store.dest.name || !store.lhs.name ||
+      !ir_function_append_instruction(out, &store)) {
+    ir_operand_destroy(&store.dest);
+    ir_operand_destroy(&store.lhs);
+    return 0;
+  }
+  ir_operand_destroy(&store.dest);
+  ir_operand_destroy(&store.lhs);
+  return 1;
+}
+
+static int ir_gpu_launch_append_layout_slot(IRFunction *out,
+                                            const IRInstruction *launch,
+                                            size_t launch_id, size_t i,
+                                            size_t nargs,
+                                            const char *params_base_name) {
+  const MtlcType *type =
+      launch->argument_types[IR_GPU_LAUNCH_CONTROL_ARGS + i];
+  size_t alignment = type->alignment ? type->alignment : 1;
+  char layout_slot_name[80];
+  IRInstruction slot = {0};
+  IRInstruction store = {0};
+  snprintf(layout_slot_name, sizeof(layout_slot_name),
+           ".__mtlc_gpu%zu_layout%zu", launch_id, i);
+
+  slot.op = IR_OP_BINARY;
+  slot.location = launch->location;
+  slot.dest = ir_operand_temp(layout_slot_name);
+  slot.lhs = ir_operand_temp(params_base_name);
+  slot.rhs = ir_operand_int((long long)((nargs + i) * 8u));
+  slot.text = "+";
+  if (!slot.dest.name || !slot.lhs.name ||
+      !ir_function_append_instruction(out, &slot)) {
+    ir_operand_destroy(&slot.dest);
+    ir_operand_destroy(&slot.lhs);
+    return 0;
+  }
+  ir_operand_destroy(&slot.dest);
+  ir_operand_destroy(&slot.lhs);
+
+  store.op = IR_OP_STORE;
+  store.location = launch->location;
+  store.dest = ir_operand_temp(layout_slot_name);
+  store.lhs = ir_operand_int((long long)((alignment << 24) | type->size));
+  store.rhs = ir_operand_int(8);
+  if (!store.dest.name || !ir_function_append_instruction(out, &store)) {
+    ir_operand_destroy(&store.dest);
+    return 0;
+  }
+  ir_operand_destroy(&store.dest);
+  return 1;
+}
+
 static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
                                           const IRInstruction *launch,
                                           size_t launch_id) {
@@ -3754,96 +3860,17 @@ static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
     ir_operand_destroy(&params_base.lhs);
 
     for (size_t i = 0; i < nargs; i++) {
-      char arg_name[80];
-      char arg_addr_name[80];
-      char slot_name[80];
-      IRInstruction arg_addr = {0};
-      IRInstruction slot = {0};
-      IRInstruction store = {0};
-      snprintf(arg_name, sizeof(arg_name), ".__mtlc_gpu%zu_arg%zu",
-               launch_id, i);
-      snprintf(arg_addr_name, sizeof(arg_addr_name),
-               ".__mtlc_gpu%zu_arg%zu_addr", launch_id, i);
-      snprintf(slot_name, sizeof(slot_name), ".__mtlc_gpu%zu_slot%zu",
-               launch_id, i);
-
-      arg_addr.op = IR_OP_ADDRESS_OF;
-      arg_addr.location = launch->location;
-      arg_addr.dest = ir_operand_temp(arg_addr_name);
-      arg_addr.lhs = ir_operand_symbol(arg_name);
-      if (!arg_addr.dest.name || !arg_addr.lhs.name ||
-          !ir_function_append_instruction(out, &arg_addr)) {
-        ir_operand_destroy(&arg_addr.dest);
-        ir_operand_destroy(&arg_addr.lhs);
+      if (!ir_gpu_launch_append_arg_slot(out, launch, launch_id, i,
+                                         params_base_name)) {
         return 0;
       }
-      ir_operand_destroy(&arg_addr.dest);
-      ir_operand_destroy(&arg_addr.lhs);
-
-      slot.op = IR_OP_BINARY;
-      slot.location = launch->location;
-      slot.dest = ir_operand_temp(slot_name);
-      slot.lhs = ir_operand_temp(params_base_name);
-      slot.rhs = ir_operand_int((long long)(i * 8u));
-      slot.text = "+";
-      if (!slot.dest.name || !slot.lhs.name ||
-          !ir_function_append_instruction(out, &slot)) {
-        ir_operand_destroy(&slot.dest);
-        ir_operand_destroy(&slot.lhs);
-        return 0;
-      }
-      ir_operand_destroy(&slot.dest);
-      ir_operand_destroy(&slot.lhs);
-
-      store.op = IR_OP_STORE;
-      store.location = launch->location;
-      store.dest = ir_operand_temp(slot_name);
-      store.lhs = ir_operand_temp(arg_addr_name);
-      store.rhs = ir_operand_int(8);
-      if (!store.dest.name || !store.lhs.name ||
-          !ir_function_append_instruction(out, &store)) {
-        ir_operand_destroy(&store.dest);
-        ir_operand_destroy(&store.lhs);
-        return 0;
-      }
-      ir_operand_destroy(&store.dest);
-      ir_operand_destroy(&store.lhs);
     }
 
     for (size_t i = 0; i < nargs; i++) {
-      const MtlcType *type = launch->argument_types[controls + i];
-      size_t alignment = type->alignment ? type->alignment : 1;
-      char layout_slot_name[80];
-      IRInstruction slot = {0};
-      IRInstruction store = {0};
-      snprintf(layout_slot_name, sizeof(layout_slot_name),
-               ".__mtlc_gpu%zu_layout%zu", launch_id, i);
-
-      slot.op = IR_OP_BINARY;
-      slot.location = launch->location;
-      slot.dest = ir_operand_temp(layout_slot_name);
-      slot.lhs = ir_operand_temp(params_base_name);
-      slot.rhs = ir_operand_int((long long)((nargs + i) * 8u));
-      slot.text = "+";
-      if (!slot.dest.name || !slot.lhs.name ||
-          !ir_function_append_instruction(out, &slot)) {
-        ir_operand_destroy(&slot.dest);
-        ir_operand_destroy(&slot.lhs);
+      if (!ir_gpu_launch_append_layout_slot(out, launch, launch_id, i, nargs,
+                                            params_base_name)) {
         return 0;
       }
-      ir_operand_destroy(&slot.dest);
-      ir_operand_destroy(&slot.lhs);
-
-      store.op = IR_OP_STORE;
-      store.location = launch->location;
-      store.dest = ir_operand_temp(layout_slot_name);
-      store.lhs = ir_operand_int((long long)((alignment << 24) | type->size));
-      store.rhs = ir_operand_int(8);
-      if (!store.dest.name || !ir_function_append_instruction(out, &store)) {
-        ir_operand_destroy(&store.dest);
-        return 0;
-      }
-      ir_operand_destroy(&store.dest);
     }
   }
 
@@ -4162,6 +4189,44 @@ static int ir_gpu_roots_add(IRGpuRoots *roots, const char *name) {
 static int ir_gpu_operand_parameter_roots(const IRProgram *program,
                                           const IRFunction *function,
                                           const IROperand *operand,
+                                          unsigned depth, IRGpuRoots *out);
+
+static int ir_gpu_offset_parameter_roots(const IRProgram *program,
+                                         const IRFunction *function,
+                                         const IRInstruction *producer,
+                                         const IROperand *operand,
+                                         unsigned depth, IRGpuRoots *out) {
+  int lhs_self = producer->lhs.name &&
+                 strcmp(producer->lhs.name, operand->name) == 0;
+  int rhs_self = producer->rhs.name &&
+                 strcmp(producer->rhs.name, operand->name) == 0;
+  if (lhs_self && rhs_self) return 0;
+  // Exactly one side is the pointer; the other, the offset, has no
+  // parameter root (p = p +/- offset keeps p's roots).
+  IRGpuRoots lhs = {{0}, 0}, rhs = {{0}, 0};
+  int lhs_known = !lhs_self &&
+                  ir_gpu_operand_parameter_roots(program, function,
+                                                 &producer->lhs,
+                                                 depth + 1, &lhs);
+  int rhs_known = !rhs_self &&
+                  ir_gpu_operand_parameter_roots(program, function,
+                                                 &producer->rhs,
+                                                 depth + 1, &rhs);
+  if (lhs_known && rhs_known) return 0;
+  if (lhs_self || rhs_self) {
+    if (lhs_known || rhs_known) return 0;
+    return -1;
+  }
+  if (!lhs_known && !rhs_known) return 0;
+  const IRGpuRoots *side = lhs_known ? &lhs : &rhs;
+  for (int r = 0; r < side->count; r++)
+    if (!ir_gpu_roots_add(out, side->names[r])) return 0;
+  return 1;
+}
+
+static int ir_gpu_operand_parameter_roots(const IRProgram *program,
+                                          const IRFunction *function,
+                                          const IROperand *operand,
                                           unsigned depth, IRGpuRoots *out) {
   if (!program || !function || !function->is_kernel || !operand ||
       depth > 16 ||
@@ -4204,31 +4269,10 @@ static int ir_gpu_operand_parameter_roots(const IRProgram *program,
     } else if (producer->op == IR_OP_BINARY && producer->text &&
                (strcmp(producer->text, "+") == 0 ||
                 strcmp(producer->text, "-") == 0)) {
-      int lhs_self = producer->lhs.name &&
-                     strcmp(producer->lhs.name, operand->name) == 0;
-      int rhs_self = producer->rhs.name &&
-                     strcmp(producer->rhs.name, operand->name) == 0;
-      if (lhs_self && rhs_self) return 0;
-      // Exactly one side is the pointer; the other, the offset, has no
-      // parameter root (p = p +/- offset keeps p's roots).
-      IRGpuRoots lhs = {{0}, 0}, rhs = {{0}, 0};
-      int lhs_known = !lhs_self &&
-                      ir_gpu_operand_parameter_roots(program, function,
-                                                     &producer->lhs,
-                                                     depth + 1, &lhs);
-      int rhs_known = !rhs_self &&
-                      ir_gpu_operand_parameter_roots(program, function,
-                                                     &producer->rhs,
-                                                     depth + 1, &rhs);
-      if (lhs_known && rhs_known) return 0;
-      if (lhs_self || rhs_self) {
-        if (lhs_known || rhs_known) return 0;
-        continue;
-      }
-      if (!lhs_known && !rhs_known) return 0;
-      const IRGpuRoots *side = lhs_known ? &lhs : &rhs;
-      for (int r = 0; r < side->count; r++)
-        if (!ir_gpu_roots_add(out, side->names[r])) return 0;
+      int offset_roots = ir_gpu_offset_parameter_roots(
+          program, function, producer, operand, depth, out);
+      if (offset_roots == 0) return 0;
+      if (offset_roots < 0) continue;
     } else {
       return 0;
     }
@@ -4318,6 +4362,39 @@ static int ir_tensor_region_tensor_op_disjoint(const IRProgram *program,
   return 1;
 }
 
+static int ir_tensor_region_call_allowed(const IRProgram *program,
+                                         const IRFunction *function,
+                                         const IRInstruction *instruction,
+                                         const IROperand *output) {
+  if (instruction->intrinsic == MTLC_INTRINSIC_NONE ||
+      ir_intrinsic_is_atomic(instruction->intrinsic))
+    return 0;
+  if (instruction->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
+      instruction->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32 ||
+      instruction->intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
+      instruction->intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32)
+    return instruction->argument_count >= 2 &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[0], output, 1) &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[1], output, 1);
+  // A tile load writes its workgroup destination (and its barrier); the
+  // barrier operations write only the barrier object.
+  if (instruction->intrinsic == MTLC_INTRINSIC_GPU_TMA_LOAD_2D)
+    return instruction->argument_count >= 5 &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[0], output, 1) &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[4], output, 1);
+  if (instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_INIT ||
+      instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_ARRIVE_EXPECT_TX ||
+      instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY)
+    return instruction->argument_count >= 1 &&
+           ir_tensor_region_access_disjoint(
+               program, function, &instruction->arguments[0], output, 1);
+  return 1;
+}
+
 // Whether `instruction` may sit between a region-resident accumulator's
 // start and commit: it neither names D nor reaches D's memory, and it
 // leaves control inside the function (no call, return or launch).
@@ -4368,33 +4445,8 @@ int ir_tensor_region_instruction_allowed(const IRProgram *program,
     return ir_tensor_region_tensor_op_disjoint(program, function,
                                                instruction, output);
   case IR_OP_CALL:
-    if (instruction->intrinsic == MTLC_INTRINSIC_NONE ||
-        ir_intrinsic_is_atomic(instruction->intrinsic))
-      return 0;
-    if (instruction->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
-        instruction->intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32 ||
-        instruction->intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
-        instruction->intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32)
-      return instruction->argument_count >= 2 &&
-             ir_tensor_region_access_disjoint(
-                 program, function, &instruction->arguments[0], output, 1) &&
-             ir_tensor_region_access_disjoint(
-                 program, function, &instruction->arguments[1], output, 1);
-    // A tile load writes its workgroup destination (and its barrier); the
-    // barrier operations write only the barrier object.
-    if (instruction->intrinsic == MTLC_INTRINSIC_GPU_TMA_LOAD_2D)
-      return instruction->argument_count >= 5 &&
-             ir_tensor_region_access_disjoint(
-                 program, function, &instruction->arguments[0], output, 1) &&
-             ir_tensor_region_access_disjoint(
-                 program, function, &instruction->arguments[4], output, 1);
-    if (instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_INIT ||
-        instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_ARRIVE_EXPECT_TX ||
-        instruction->intrinsic == MTLC_INTRINSIC_GPU_MBARRIER_WAIT_PARITY)
-      return instruction->argument_count >= 1 &&
-             ir_tensor_region_access_disjoint(
-                 program, function, &instruction->arguments[0], output, 1);
-    return 1;
+    return ir_tensor_region_call_allowed(program, function, instruction,
+                                         output);
   default:
     return 0;
   }

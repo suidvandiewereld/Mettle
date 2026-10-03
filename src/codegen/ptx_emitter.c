@@ -3798,61 +3798,106 @@ static void ptx_mma_swizzled_address(PtxFn *fn, const char *lane,
             key);
 }
 
-static void ptx_emit_mma_s8_scaled_tile(
+static int ptx_mma_reserve_registers(PtxFn *fn, PtxClass cls, int count) {
+  int base = fn->count[cls];
+  for (int i = 0; i < count; i++) new_reg(fn, cls);
+  return base;
+}
+
+static void ptx_mma_load_f32_accumulator_tile(
+    PtxFn *fn, const PtxMmaTileMemory *memory, MtlcTensorLayout layout,
+    int m_tiles, int n_tiles, const char *group, const char *thread,
+    int accumulator_base) {
+  for (int mt = 0; mt < m_tiles; mt++) {
+    for (int nt = 0; nt < n_tiles; nt++) {
+      int acc = accumulator_base + (mt * n_tiles + nt) * 4;
+      for (int e = 0; e < 4; e++) {
+        PtxMmaCoordinate row = {1, 0,
+                                (unsigned)mt * 16u + (e >= 2 ? 8u : 0u)};
+        PtxMmaCoordinate column = {0, 2,
+                                   (unsigned)nt * 8u + (unsigned)(e & 1)};
+        ptx_mma_load_c(fn, memory, layout, row, column, group, thread,
+                       acc + e);
+      }
+    }
+  }
+}
+
+static void ptx_mma_store_f32_accumulator_tile(
     PtxFn *fn, const IRInstruction *in, const PtxMmaProfile *profile,
     const PtxMmaTileMemory *memory, const char *group, const char *thread,
-    int accumulator_base, int load_accumulator, int store_accumulator) {
-  const MtlcTensorMmaDesc *desc = &IR_TENSOR_MMA(in);
+    int accumulator_base) {
   int m_tiles = profile->m_tiles, n_tiles = profile->n_tiles;
-  int k_blocks = desc->k / 32;
-  if (accumulator_base < 0) {
-    accumulator_base = fn->count[PC_F32];
-    for (int i = 0; i < m_tiles * n_tiles * 4; i++) new_reg(fn, PC_F32);
+  for (int mt = 0; mt < m_tiles; mt++) {
+    for (int nt = 0; nt < n_tiles; nt++) {
+      ptx_mma_store_f32_accumulator_subtile(
+          fn, in, profile, memory->bases[3], memory->spaces[3],
+          memory->strides[3], group, thread, (unsigned)mt * 16u,
+          (unsigned)nt * 8u, accumulator_base + (mt * n_tiles + nt) * 4);
+    }
   }
-  int fast_a = desc->a_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR &&
-               !desc->transpose_a;
-  int fast_b = desc->b_layout == MTLC_TENSOR_LAYOUT_COLUMN_MAJOR &&
-               !desc->transpose_b;
-  int ldsm_ok = fn->target_arch >= 75 && ptx_version_at_least(fn, 6, 5);
-  unsigned lda_static = desc->a_leading_dimension;
-  unsigned ldb_static = desc->b_leading_dimension;
-  int a_ldsm = ldsm_ok && fast_a && memory->spaces[0] &&
-               strcmp(memory->spaces[0], ".shared") == 0 && lda_static &&
-               lda_static % 16u == 0;
-  int b_ldsm = ldsm_ok && profile->b_halves && memory->spaces[1] &&
-               strcmp(memory->spaces[1], ".shared") == 0 && ldb_static &&
-               (ldb_static / 2u) % 16u == 0;
-  if ((desc->a_swizzle && !a_ldsm) || (desc->b_swizzle && !b_ldsm)) {
-    fn_error(fn, "PTX swizzled MMA operands are read from workgroup memory "
-                 "through ldmatrix (sm_75, PTX 6.5)");
-    return;
-  }
-  int x16 = profile->b_halves &&
-            (profile->b_signed4 || profile->b_zero_point == 8);
-  // -start, for the exact prefactor: f32 bits and hex text.
-  const char *start_bits = x16 ? "0x49400000" : "0x4B400000";
-  const char *start_float = x16 ? "0f49400000" : "0f4B400000";
-  const char *neg_start = x16 ? "0fC9400000" : "0fCB400000";
-  // Scales with at most 11 significant bits (f16, or f32 declared to hold
-  // f16 or bf16 values) make -start * scale exact.
-  int prefactor_b =
-      ir_tensor_block_scale_order(desc) == IR_BLOCK_SCALE_B_FIRST;
-  int prefactor_a =
-      ir_tensor_block_scale_order(desc) == IR_BLOCK_SCALE_A_FIRST;
+}
 
+// A ring of four dot tuples: each block dot's epilogue runs three MMAs
+// later, so the tensor pipe has the next products queued meanwhile (two
+// measured ~0.4% slower on the int8 TMA GEMM, four ~0.5%).
+enum { DOT_RING = 4, DOT_LAG = 3 };
+
+typedef struct {
+  PtxFn *fn;
+  const MtlcTensorMmaDesc *desc;
+  const PtxMmaProfile *profile;
+  const PtxMmaTileMemory *memory;
+  const char *group;
+  const char *thread;
+  int m_tiles;
+  int n_tiles;
+  int k_blocks;
+  int fast_a;
+  int fast_b;
+  int a_ldsm;
+  int b_ldsm;
+  int x16;
+  int prefactor_a;
+  int prefactor_b;
+  const char *start_float;
+  const char *neg_start;
   char lane_id[24];
-  reg_name(PC_B32, new_reg(fn, PC_B32), lane_id);
-  sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", lane_id, group,
-            thread);
+  PtxLanePointer a_lane;
+  PtxLanePointer b_lane;
+  PtxLanePointer nibble_lane;
+  PtxLanePointer nib32_lane;
+  PtxLanePointer sa_lane;
+  PtxLanePointer sb_lane;
+  char a_key[24];
+  char b_key[24];
+  char nib32_key[24];
+  int raw_per_kb;
+  int raw_base;
+  char bias[24];
+  int accumulator_base;
+  int dot_base;
+  int a_base;
+  int b_base;
+  int shift_base;
+  int sa_base;
+  int sb_base;
+  int pre_base;
+  int f_base;
+} PtxS8ScaledTile;
 
+static void ptx_s8_scaled_a_lane(PtxS8ScaledTile *tile) {
+  PtxFn *fn = tile->fn;
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
+  const char *lane_id = tile->lane_id;
   // A: per-lane pointers. The ldmatrix lane addresses row (l / 8 & 1) * 8
   // + l % 8, K bytes (l / 16) * 16; the plain path reads rows group (+8),
   // K bytes 4 * thread (+16).
-  PtxLanePointer a_lane;
   char lda_text[24];
   const char *lda = ptx_static_ld(desc->a_leading_dimension,
                                   memory->strides[0], lda_text);
-  if (a_ldsm) {
+  if (tile->a_ldsm) {
     char row[24], hi[24], r8[24];
     reg_name(PC_B32, new_reg(fn, PC_B32), row);
     reg_name(PC_B32, new_reg(fn, PC_B32), hi);
@@ -3862,128 +3907,147 @@ static void ptx_emit_mma_s8_scaled_tile(
     sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", row, r8, row);
     sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", hi, lane_id);
     ptx_lane_pointer(fn, memory->bases[0], memory->spaces[0], lda, 1, row, 1,
-                     hi, 16, &a_lane);
-  } else if (fast_a) {
-    ptx_lane_pointer(fn, memory->bases[0], memory->spaces[0], lda, 1, group,
-                     1, thread, 4, &a_lane);
+                     hi, 16, &tile->a_lane);
+  } else if (tile->fast_a) {
+    ptx_lane_pointer(fn, memory->bases[0], memory->spaces[0], lda, 1,
+                     tile->group, 1, tile->thread, 4, &tile->a_lane);
   }
-  char a_key[24] = {0};
   if (desc->a_swizzle)
-    ptx_mma_swizzle_key(fn, a_lane.reg, desc->a_swizzle, a_key);
+    ptx_mma_swizzle_key(fn, tile->a_lane.reg, desc->a_swizzle, tile->a_key);
+}
 
+static void ptx_s8_scaled_nibble_ld(PtxS8ScaledTile *tile, char out[24]) {
+  unsigned ldb_static = tile->desc->b_leading_dimension;
+  if (ldb_static) {
+    snprintf(out, 24, "%u", ldb_static / 2u);
+  } else {
+    reg_name(PC_B32, new_reg(tile->fn, PC_B32), out);
+    sb_printf(&tile->fn->body, "\tshr.u32 %s, %s, 1;\n", out,
+              tile->memory->strides[1]);
+  }
+}
+
+static void ptx_s8_scaled_b_lanes(PtxS8ScaledTile *tile) {
+  PtxFn *fn = tile->fn;
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
+  const char *lane_id = tile->lane_id;
   // B: per-lane pointers. Halves-packed column n is a run of 16-byte
   // groups at n * ldb / 2 bytes; the ldmatrix lane addresses column l % 8,
   // group l / 8 (K blocks 4j .. 4j + 3 per x4).
-  PtxLanePointer b_lane, nibble_lane;
-  char b_key[24] = {0};
   char ldb_text[24];
   const char *ldb = ptx_static_ld(desc->b_leading_dimension,
                                   memory->strides[1], ldb_text);
-  if (profile->b_halves) {
+  if (tile->profile->b_halves) {
     char ld_bytes[24];
-    if (ldb_static) {
-      snprintf(ld_bytes, sizeof(ld_bytes), "%u", ldb_static / 2u);
-    } else {
-      reg_name(PC_B32, new_reg(fn, PC_B32), ld_bytes);
-      sb_printf(&fn->body, "\tshr.u32 %s, %s, 1;\n", ld_bytes,
-                memory->strides[1]);
-    }
-    if (b_ldsm) {
+    ptx_s8_scaled_nibble_ld(tile, ld_bytes);
+    if (tile->b_ldsm) {
       char col[24], grp[24];
       reg_name(PC_B32, new_reg(fn, PC_B32), col);
       reg_name(PC_B32, new_reg(fn, PC_B32), grp);
       sb_printf(&fn->body, "\tand.b32 %s, %s, 7;\n", col, lane_id);
       sb_printf(&fn->body, "\tshr.u32 %s, %s, 3;\n", grp, lane_id);
       ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ld_bytes, 1,
-                       col, 1, grp, 16, &nibble_lane);
+                       col, 1, grp, 16, &tile->nibble_lane);
       if (desc->b_swizzle)
-        ptx_mma_swizzle_key(fn, nibble_lane.reg, desc->b_swizzle, b_key);
+        ptx_mma_swizzle_key(fn, tile->nibble_lane.reg, desc->b_swizzle,
+                            tile->b_key);
     } else {
       ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ld_bytes, 1,
-                       group, 1, thread, 4, &nibble_lane);
+                       tile->group, 1, tile->thread, 4, &tile->nibble_lane);
     }
-  } else if (fast_b) {
-    ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ldb, 1, group,
-                     1, thread, 4, &b_lane);
+  } else if (tile->fast_b) {
+    ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ldb, 1,
+                     tile->group, 1, tile->thread, 4, &tile->b_lane);
   }
+}
 
+static void ptx_s8_scaled_preload_nibbles(PtxS8ScaledTile *tile) {
+  PtxFn *fn = tile->fn;
+  const PtxLanePointer *nibble_lane = &tile->nibble_lane;
+  int n_tiles = tile->n_tiles, k_blocks = tile->k_blocks;
+  int raw_base = tile->raw_base;
+  char b_swizzled[8][24];  // per K step, shared by every column group
+  for (int nt = 0; nt < n_tiles; nt++) {
+    int kb = 0;
+    while (kb < k_blocks) {
+      char address[48];
+      if (tile->b_ldsm) {
+        int count = k_blocks - kb >= 4 ? 4 : (k_blocks - kb >= 2 ? 2 : 1);
+        char regs[4][24];
+        for (int i = 0; i < count; i++)
+          reg_name(PC_B32, raw_base + nt * k_blocks + kb + i, regs[i]);
+        if (tile->desc->b_swizzle) {
+          if (nt == 0)
+            ptx_mma_swizzled_address(fn, nibble_lane->reg, tile->b_key,
+                                     (unsigned)kb * 16u, b_swizzled[kb]);
+          snprintf(address, sizeof(address), "%s+%u", b_swizzled[kb],
+                   (unsigned)nt * 8u * nibble_lane->stride_bytes);
+        } else {
+          ptx_lane_address(fn, nibble_lane, (unsigned)nt * 8u,
+                           (unsigned)kb * 16u, address);
+        }
+        if (count == 4)
+          sb_printf(&fn->body,
+                    "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
+                    regs[0], regs[1], regs[2], regs[3], address);
+        else if (count == 2)
+          sb_printf(&fn->body,
+                    "\tldmatrix.sync.aligned.m8n8.x2.shared.b16 {%s, %s}, [%s];\n",
+                    regs[0], regs[1], address);
+        else
+          sb_printf(&fn->body,
+                    "\tldmatrix.sync.aligned.m8n8.x1.shared.b16 {%s}, [%s];\n",
+                    regs[0], address);
+        kb += count;
+      } else {
+        char word[24];
+        reg_name(PC_B32, raw_base + nt * k_blocks + kb, word);
+        ptx_lane_address(fn, nibble_lane, (unsigned)nt * 8u,
+                         (unsigned)kb * 16u, address);
+        sb_printf(&fn->body, "\tld%s.u32 %s, [%s];\n",
+                  tile->memory->spaces[1], word, address);
+        kb++;
+      }
+    }
+  }
+}
+
+static void ptx_s8_scaled_raw_nibbles(PtxS8ScaledTile *tile) {
+  PtxFn *fn = tile->fn;
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
   // Raw nibble words, [n_tile][block] -- or, with four column tiles on
   // ldmatrix, one K block's words at a time ([n_tile], reloaded every
   // block): an x4 load whose four matrices are the four tiles, the lane
   // addressing column l of the 32. Holding every block's words from the
   // start cost 3 * n_tiles registers more for the whole tile, and the int8
   // TMA GEMM ~2.5% (91.3 -> 93.6 TOPS at its widest shape).
-  int raw_base = -1;
-  int raw_per_kb = profile->b_halves && b_ldsm && n_tiles == 4 && k_blocks > 1;
-  PtxLanePointer nib32_lane;
-  char nib32_key[24] = {0};
-  if (raw_per_kb) {
+  tile->raw_base = -1;
+  tile->raw_per_kb = tile->profile->b_halves && tile->b_ldsm &&
+                     tile->n_tiles == 4 && tile->k_blocks > 1;
+  if (tile->raw_per_kb) {
     char ld_bytes32[24];
-    if (ldb_static) {
-      snprintf(ld_bytes32, sizeof(ld_bytes32), "%u", ldb_static / 2u);
-    } else {
-      reg_name(PC_B32, new_reg(fn, PC_B32), ld_bytes32);
-      sb_printf(&fn->body, "\tshr.u32 %s, %s, 1;\n", ld_bytes32,
-                memory->strides[1]);
-    }
+    ptx_s8_scaled_nibble_ld(tile, ld_bytes32);
     ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ld_bytes32, 1,
-                     lane_id, 1, NULL, 0, &nib32_lane);
+                     tile->lane_id, 1, NULL, 0, &tile->nib32_lane);
     if (desc->b_swizzle)
-      ptx_mma_swizzle_key(fn, nib32_lane.reg, desc->b_swizzle, nib32_key);
-    raw_base = fn->count[PC_B32];
-    for (int i = 0; i < n_tiles; i++) new_reg(fn, PC_B32);
-  } else if (profile->b_halves) {
-    raw_base = fn->count[PC_B32];
-    for (int i = 0; i < n_tiles * k_blocks; i++) new_reg(fn, PC_B32);
-    char b_swizzled[8][24];  // per K step, shared by every column group
-    for (int nt = 0; nt < n_tiles; nt++) {
-      int kb = 0;
-      while (kb < k_blocks) {
-        char address[48];
-        if (b_ldsm) {
-          int count = k_blocks - kb >= 4 ? 4 : (k_blocks - kb >= 2 ? 2 : 1);
-          char regs[4][24];
-          for (int i = 0; i < count; i++)
-            reg_name(PC_B32, raw_base + nt * k_blocks + kb + i, regs[i]);
-          if (desc->b_swizzle) {
-            if (nt == 0)
-              ptx_mma_swizzled_address(fn, nibble_lane.reg, b_key,
-                                       (unsigned)kb * 16u, b_swizzled[kb]);
-            snprintf(address, sizeof(address), "%s+%u", b_swizzled[kb],
-                     (unsigned)nt * 8u * nibble_lane.stride_bytes);
-          } else {
-            ptx_lane_address(fn, &nibble_lane, (unsigned)nt * 8u,
-                             (unsigned)kb * 16u, address);
-          }
-          if (count == 4)
-            sb_printf(&fn->body,
-                      "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
-                      regs[0], regs[1], regs[2], regs[3], address);
-          else if (count == 2)
-            sb_printf(&fn->body,
-                      "\tldmatrix.sync.aligned.m8n8.x2.shared.b16 {%s, %s}, [%s];\n",
-                      regs[0], regs[1], address);
-          else
-            sb_printf(&fn->body,
-                      "\tldmatrix.sync.aligned.m8n8.x1.shared.b16 {%s}, [%s];\n",
-                      regs[0], address);
-          kb += count;
-        } else {
-          char word[24];
-          reg_name(PC_B32, raw_base + nt * k_blocks + kb, word);
-          ptx_lane_address(fn, &nibble_lane, (unsigned)nt * 8u,
-                           (unsigned)kb * 16u, address);
-          sb_printf(&fn->body, "\tld%s.u32 %s, [%s];\n", memory->spaces[1],
-                    word, address);
-          kb++;
-        }
-      }
-    }
+      ptx_mma_swizzle_key(fn, tile->nib32_lane.reg, desc->b_swizzle,
+                          tile->nib32_key);
+    tile->raw_base = ptx_mma_reserve_registers(fn, PC_B32, tile->n_tiles);
+  } else if (tile->profile->b_halves) {
+    tile->raw_base = ptx_mma_reserve_registers(
+        fn, PC_B32, tile->n_tiles * tile->k_blocks);
+    ptx_s8_scaled_preload_nibbles(tile);
   }
+}
 
+static void ptx_s8_scaled_scale_lanes(PtxS8ScaledTile *tile) {
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
+  int k_blocks = tile->k_blocks;
   // Scales: A is row-major [M, blocks], B column-major [blocks, N]. The
   // lane's rows are group + const, its columns 2 * thread + const.
-  PtxLanePointer sa_lane, sb_lane;
   unsigned sa_bytes =
       desc->a_scale_element == MTLC_TENSOR_ELEMENT_FLOAT16 ? 2u : 4u;
   unsigned sb_bytes =
@@ -3997,287 +4061,371 @@ static void ptx_emit_mma_s8_scaled_tile(
       desc->b_scale_leading_dimension ? desc->b_scale_leading_dimension
                                       : (uint32_t)k_blocks,
       memory->scale_strides[1], lsb_text);
-  ptx_lane_pointer(fn, memory->bases[4], memory->spaces[4], lsa, sa_bytes,
-                   group, 1, NULL, 0, &sa_lane);
-  ptx_lane_pointer(fn, memory->bases[5], memory->spaces[5], lsb, sb_bytes,
-                   thread, 2, NULL, 0, &sb_lane);
+  ptx_lane_pointer(tile->fn, memory->bases[4], memory->spaces[4], lsa,
+                   sa_bytes, tile->group, 1, NULL, 0, &tile->sa_lane);
+  ptx_lane_pointer(tile->fn, memory->bases[5], memory->spaces[5], lsb,
+                   sb_bytes, tile->thread, 2, NULL, 0, &tile->sb_lane);
+}
 
-  if (load_accumulator) {
-    for (int mt = 0; mt < m_tiles; mt++) {
-      for (int nt = 0; nt < n_tiles; nt++) {
-        int acc = accumulator_base + (mt * n_tiles + nt) * 4;
-        for (int e = 0; e < 4; e++) {
-          PtxMmaCoordinate row = {1, 0,
-                                  (unsigned)mt * 16u + (e >= 2 ? 8u : 0u)};
-          PtxMmaCoordinate column = {0, 2,
-                                     (unsigned)nt * 8u + (unsigned)(e & 1)};
-          ptx_mma_load_c(fn, memory, desc->c_layout, row, column, group,
-                         thread, acc + e);
+static void ptx_s8_scaled_load_a(PtxS8ScaledTile *tile, unsigned k0) {
+  PtxFn *fn = tile->fn;
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
+  const PtxLanePointer *a_lane = &tile->a_lane;
+  int a_base = tile->a_base;
+  char a_swizzled[24];
+  if (desc->a_swizzle)
+    ptx_mma_swizzled_address(fn, a_lane->reg, tile->a_key, k0, a_swizzled);
+  // A fragments for this block: register r holds rows group + 8*(r&1),
+  // K k0 + 16*(r>>1) + 4*thread .. +3.
+  for (int mt = 0; mt < tile->m_tiles; mt++) {
+    if (tile->a_ldsm) {
+      char address[48], r0[24], r1[24], r2[24], r3[24];
+      reg_name(PC_B32, a_base + mt * 4, r0);
+      reg_name(PC_B32, a_base + mt * 4 + 1, r1);
+      reg_name(PC_B32, a_base + mt * 4 + 2, r2);
+      reg_name(PC_B32, a_base + mt * 4 + 3, r3);
+      if (desc->a_swizzle)
+        snprintf(address, sizeof(address), "%s+%u", a_swizzled,
+                 (unsigned)mt * 16u * a_lane->stride_bytes);
+      else
+        ptx_lane_address(fn, a_lane, (unsigned)mt * 16u, k0, address);
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
+                r0, r1, r2, r3, address);
+      continue;
+    }
+    for (int r = 0; r < 4; r++) {
+      unsigned row_off = (unsigned)mt * 16u + ((r & 1) ? 8u : 0u);
+      unsigned k_off = k0 + ((r >> 1) ? 16u : 0u);
+      if (tile->fast_a) {
+        char address[48], dst[24];
+        ptx_lane_address(fn, a_lane, row_off, k_off, address);
+        reg_name(PC_B32, a_base + mt * 4 + r, dst);
+        sb_printf(&fn->body, "\tld%s.u32 %s, [%s];\n", memory->spaces[0],
+                  dst, address);
+      } else {
+        PtxMmaCoordinate rows[4], columns[4];
+        for (int byte = 0; byte < 4; byte++) {
+          rows[byte] = (PtxMmaCoordinate){1, 0, row_off};
+          columns[byte] = (PtxMmaCoordinate){0, 4, k_off + (unsigned)byte};
         }
+        ptx_mma_load_narrow_containers(
+            fn, memory->bases[0], memory->strides[0], desc->a_layout,
+            desc->transpose_a, desc->a_packing, memory->spaces[0], rows,
+            columns, tile->group, tile->thread, 8, a_base + mt * 4 + r, 0);
       }
     }
   }
+}
 
-  char bias[24];
-  reg_name(PC_B32, new_reg(fn, PC_B32), bias);
-  sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", bias, start_bits);
-  // A ring of four dot tuples: each block dot's epilogue runs three MMAs
-  // later, so the tensor pipe has the next products queued meanwhile (two
-  // measured ~0.4% slower on the int8 TMA GEMM, four ~0.5%).
-  enum { DOT_RING = 4, DOT_LAG = 3 };
-  int dot_base = fn->count[PC_B32];
-  for (int i = 0; i < DOT_RING * 4; i++) new_reg(fn, PC_B32);
+static void ptx_s8_scaled_load_block_nibbles(PtxS8ScaledTile *tile, int kb) {
+  PtxFn *fn = tile->fn;
+  char regs[4][24], address[48];
+  for (int i = 0; i < 4; i++) reg_name(PC_B32, tile->raw_base + i, regs[i]);
+  if (tile->desc->b_swizzle) {
+    char sw[24];
+    ptx_mma_swizzled_address(fn, tile->nib32_lane.reg, tile->nib32_key,
+                             (unsigned)kb * 16u, sw);
+    snprintf(address, sizeof(address), "%s", sw);
+  } else {
+    ptx_lane_address(fn, &tile->nib32_lane, 0, (unsigned)kb * 16u, address);
+  }
+  sb_printf(&fn->body,
+            "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
+            regs[0], regs[1], regs[2], regs[3], address);
+}
+
+static void ptx_s8_scaled_unpack_nibbles(PtxS8ScaledTile *tile, int kb,
+                                         int nt, const char *lo,
+                                         const char *hi) {
+  PtxFn *fn = tile->fn;
+  const PtxMmaProfile *profile = tile->profile;
+  char word[24];
+  reg_name(PC_B32,
+           tile->raw_per_kb ? tile->raw_base + nt
+                            : tile->raw_base + nt * tile->k_blocks + kb,
+           word);
+  if (tile->x16) {
+    // High nibbles stay put, low ones move up a nibble; ^ 8 per
+    // nibble subtracts the zero point (signed nibbles need none).
+    const char *flip = profile->b_signed4 ? "0x00000000" : "0x88888888";
+    const char *flip_lo = profile->b_signed4 ? "0x00000000" : "0x80808080";
+    char shifted[24];
+    reg_name(PC_B32, tile->shift_base + nt, shifted);
+    sb_printf(&fn->body, "\tshl.b32 %s, %s, 4;\n", shifted, word);
+    sb_printf(&fn->body, "\tlop3.b32 %s, %s, %s, 0xF0F0F0F0, 0x28;\n", lo,
+              shifted, flip_lo);
+    sb_printf(&fn->body, "\tlop3.b32 %s, %s, %s, 0xF0F0F0F0, 0x28;\n", hi,
+              word, flip);
+  } else {
+    sb_printf(&fn->body, "\tand.b32 %s, %s, 0x0F0F0F0F;\n", lo, word);
+    sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", hi, word);
+    sb_printf(&fn->body, "\tand.b32 %s, %s, 0x0F0F0F0F;\n", hi, hi);
+    unsigned zero_point = profile->b_signed4 ? 8u : profile->b_zero_point;
+    const char *halves[2] = {lo, hi};
+    for (int h = 0; h < 2 && zero_point; h++) {
+      if (profile->b_signed4)
+        sb_printf(&fn->body, "\txor.b32 %s, %s, 0x08080808;\n", halves[h],
+                  halves[h]);
+      sb_printf(&fn->body, "\tadd.u32 %s, %s, 0x%08X;\n", halves[h],
+                halves[h], (0x80u - zero_point) * 0x01010101u);
+      sb_printf(&fn->body, "\txor.b32 %s, %s, 0x80808080;\n", halves[h],
+                halves[h]);
+    }
+  }
+}
+
+static void ptx_s8_scaled_load_b(PtxS8ScaledTile *tile, int kb, unsigned k0) {
+  PtxFn *fn = tile->fn;
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
+  int b_base = tile->b_base;
+  for (int nt = 0; nt < tile->n_tiles; nt++) {
+    char lo[24], hi[24];
+    reg_name(PC_B32, b_base + nt * 2, lo);
+    reg_name(PC_B32, b_base + nt * 2 + 1, hi);
+    if (tile->profile->b_halves) {
+      ptx_s8_scaled_unpack_nibbles(tile, kb, nt, lo, hi);
+      continue;
+    }
+    for (int r = 0; r < 2; r++) {
+      unsigned col_off = (unsigned)nt * 8u;
+      unsigned k_off = k0 + (r ? 16u : 0u);
+      int dst_reg = b_base + nt * 2 + r;
+      if (tile->fast_b) {
+        char address[48], dst[24];
+        ptx_lane_address(fn, &tile->b_lane, col_off, k_off, address);
+        reg_name(PC_B32, dst_reg, dst);
+        sb_printf(&fn->body, "\tld%s.u32 %s, [%s];\n", memory->spaces[1],
+                  dst, address);
+      } else {
+        PtxMmaCoordinate rows[4], columns[4];
+        for (int byte = 0; byte < 4; byte++) {
+          rows[byte] = (PtxMmaCoordinate){0, 4, k_off + (unsigned)byte};
+          columns[byte] = (PtxMmaCoordinate){1, 0, col_off};
+        }
+        ptx_mma_load_narrow_containers(
+            fn, memory->bases[1], memory->strides[1], desc->b_layout,
+            desc->transpose_b, desc->b_packing, memory->spaces[1], rows,
+            columns, tile->group, tile->thread, 8, dst_reg, 0);
+      }
+    }
+  }
+}
+
+static void ptx_s8_scaled_block_mma(PtxS8ScaledTile *tile, int mt, int nt,
+                                    int g) {
+  const char *bias = tile->bias;
+  char a[128], b[128], dots[128];
+  ptx_reg_tuple_at(PC_B32, tile->a_base + mt * 4, 4, a, sizeof(a));
+  ptx_reg_tuple_at(PC_B32, tile->b_base + nt * 2, 2, b, sizeof(b));
+  ptx_reg_tuple_at(PC_B32, tile->dot_base + (g % DOT_RING) * 4, 4, dots,
+                   sizeof(dots));
+  sb_printf(&tile->fn->body,
+            "\tmma.sync.aligned.m16n8k32.row.col.s32.%s.%s.s32 %s, %s, %s, {%s, %s, %s, %s};\n",
+            tile->profile->a_type, tile->profile->b_type, dots, a, b, bias,
+            bias, bias, bias);
+}
+
+static void ptx_s8_scaled_load_scales(PtxS8ScaledTile *tile, int dkb) {
+  PtxFn *fn = tile->fn;
+  const MtlcTensorMmaDesc *desc = tile->desc;
+  const PtxMmaTileMemory *memory = tile->memory;
+  // Block dkb's scales, and the exact prefactors -start * scale.
+  for (int mt = 0; mt < tile->m_tiles; mt++) {
+    for (int h = 0; h < 2; h++) {
+      ptx_lane_load_scale(fn, &tile->sa_lane, memory->spaces[4],
+                          desc->a_scale_element,
+                          (unsigned)mt * 16u + (h ? 8u : 0u), dkb,
+                          tile->sa_base + mt * 2 + h);
+      if (tile->prefactor_a) {
+        char pre[24], sa[24];
+        reg_name(PC_F32, tile->pre_base + mt * 2 + h, pre);
+        reg_name(PC_F32, tile->sa_base + mt * 2 + h, sa);
+        sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sa,
+                  tile->neg_start);
+      }
+    }
+  }
+  for (int nt = 0; nt < tile->n_tiles; nt++) {
+    for (int h = 0; h < 2; h++) {
+      ptx_lane_load_scale(fn, &tile->sb_lane, memory->spaces[5],
+                          desc->b_scale_element,
+                          (unsigned)nt * 8u + (unsigned)h, dkb,
+                          tile->sb_base + nt * 2 + h);
+      if (tile->prefactor_b) {
+        char pre[24], sb[24];
+        reg_name(PC_F32, tile->pre_base + nt * 2 + h, pre);
+        reg_name(PC_F32, tile->sb_base + nt * 2 + h, sb);
+        sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sb,
+                  tile->neg_start);
+      }
+    }
+  }
+}
+
+static void ptx_s8_scaled_epilogue(PtxS8ScaledTile *tile, int mt, int nt,
+                                   int done) {
+  PtxFn *fn = tile->fn;
+  int prefactor_a = tile->prefactor_a, prefactor_b = tile->prefactor_b;
+  int pre_base = tile->pre_base;
+  int acc = tile->accumulator_base + (mt * tile->n_tiles + nt) * 4;
+  for (int e = 0; e < 4; e++) {
+    char dot[24], f[24], sa[24], sb[24], accr[24];
+    reg_name(PC_B32, tile->dot_base + (done % DOT_RING) * 4 + e, dot);
+    reg_name(PC_F32, tile->f_base + e, f);
+    reg_name(PC_F32, tile->sa_base + mt * 2 + (e >= 2 ? 1 : 0), sa);
+    reg_name(PC_F32, tile->sb_base + nt * 2 + (e & 1), sb);
+    reg_name(PC_F32, acc + e, accr);
+    sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", f, dot);
+    if (prefactor_b || prefactor_a) {
+      char pre[24];
+      const char *first = prefactor_b ? sb : sa;
+      const char *second = prefactor_b ? sa : sb;
+      reg_name(PC_F32,
+               pre_base + (prefactor_b ? nt * 2 + (e & 1)
+                                       : mt * 2 + (e >= 2 ? 1 : 0)),
+               pre);
+      sb_printf(&fn->body, "\tfma.rn.f32 %s, %s, %s, %s;\n", f, f, first,
+                pre);
+      sb_printf(&fn->body, "\tfma.rn.f32 %s, %s, %s, %s;\n", accr, f,
+                second, accr);
+    } else {
+      char scale[24];
+      reg_name(PC_F32, new_reg(fn, PC_F32), scale);
+      sb_printf(&fn->body, "\tsub.rn.f32 %s, %s, %s;\n", f, f,
+                tile->start_float);
+      sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", scale, sa, sb);
+      sb_printf(&fn->body, "\tfma.rn.f32 %s, %s, %s, %s;\n", accr, f,
+                scale, accr);
+    }
+  }
+}
+
+static void ptx_s8_scaled_block_steps(PtxS8ScaledTile *tile, int kb) {
+  int n_tiles = tile->n_tiles;
+  // This block's dots, DOT_LAG MMAs ahead of their epilogues. The ring
+  // runs on across blocks: a block's scales are loaded where its first
+  // epilogue is due, after the previous block's last ones, so those sit
+  // among this block's first MMAs instead of draining the tensor pipe at
+  // every block boundary (~0.4% on the int8 TMA GEMM).
+  int pairs = tile->m_tiles * n_tiles;
+  int g0 = kb * pairs;
+  int steps = kb == tile->k_blocks - 1 ? pairs + DOT_LAG : pairs;
+  for (int step = 0; step < steps; step++) {
+    int g = g0 + step;
+    if (step < pairs)
+      ptx_s8_scaled_block_mma(tile, step / n_tiles, step % n_tiles, g);
+    int done = g - DOT_LAG;
+    if (done < 0) continue;
+    int dkb = done / pairs;
+    int dstep = done % pairs;
+    if (dstep == 0) ptx_s8_scaled_load_scales(tile, dkb);
+    ptx_s8_scaled_epilogue(tile, dstep / n_tiles, dstep % n_tiles, done);
+  }
+}
+
+static void ptx_s8_scaled_block(PtxS8ScaledTile *tile, int kb) {
+  unsigned k0 = (unsigned)kb * 32u;
+  ptx_s8_scaled_load_a(tile, k0);
+
+  // B fragments: register r holds column group, K k0 + 16*r + 4*thread
+  // .. +3.
+  if (tile->raw_per_kb) ptx_s8_scaled_load_block_nibbles(tile, kb);
+  ptx_s8_scaled_load_b(tile, kb, k0);
+
+  ptx_s8_scaled_block_steps(tile, kb);
+}
+
+static void ptx_emit_mma_s8_scaled_tile(
+    PtxFn *fn, const IRInstruction *in, const PtxMmaProfile *profile,
+    const PtxMmaTileMemory *memory, const char *group, const char *thread,
+    int accumulator_base, int load_accumulator, int store_accumulator) {
+  const MtlcTensorMmaDesc *desc = &IR_TENSOR_MMA(in);
+  PtxS8ScaledTile tile;
+  memset(&tile, 0, sizeof(tile));
+  tile.fn = fn;
+  tile.desc = desc;
+  tile.profile = profile;
+  tile.memory = memory;
+  tile.group = group;
+  tile.thread = thread;
+  int m_tiles = profile->m_tiles, n_tiles = profile->n_tiles;
+  tile.m_tiles = m_tiles;
+  tile.n_tiles = n_tiles;
+  tile.k_blocks = desc->k / 32;
+  if (accumulator_base < 0)
+    accumulator_base =
+        ptx_mma_reserve_registers(fn, PC_F32, m_tiles * n_tiles * 4);
+  tile.accumulator_base = accumulator_base;
+  tile.fast_a = desc->a_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR &&
+                !desc->transpose_a;
+  tile.fast_b = desc->b_layout == MTLC_TENSOR_LAYOUT_COLUMN_MAJOR &&
+                !desc->transpose_b;
+  int ldsm_ok = fn->target_arch >= 75 && ptx_version_at_least(fn, 6, 5);
+  unsigned lda_static = desc->a_leading_dimension;
+  unsigned ldb_static = desc->b_leading_dimension;
+  tile.a_ldsm = ldsm_ok && tile.fast_a && memory->spaces[0] &&
+                strcmp(memory->spaces[0], ".shared") == 0 && lda_static &&
+                lda_static % 16u == 0;
+  tile.b_ldsm = ldsm_ok && profile->b_halves && memory->spaces[1] &&
+                strcmp(memory->spaces[1], ".shared") == 0 && ldb_static &&
+                (ldb_static / 2u) % 16u == 0;
+  if ((desc->a_swizzle && !tile.a_ldsm) || (desc->b_swizzle && !tile.b_ldsm)) {
+    fn_error(fn, "PTX swizzled MMA operands are read from workgroup memory "
+                 "through ldmatrix (sm_75, PTX 6.5)");
+    return;
+  }
+  tile.x16 = profile->b_halves &&
+             (profile->b_signed4 || profile->b_zero_point == 8);
+  // -start, for the exact prefactor: f32 bits and hex text.
+  const char *start_bits = tile.x16 ? "0x49400000" : "0x4B400000";
+  tile.start_float = tile.x16 ? "0f49400000" : "0f4B400000";
+  tile.neg_start = tile.x16 ? "0fC9400000" : "0fCB400000";
+  // Scales with at most 11 significant bits (f16, or f32 declared to hold
+  // f16 or bf16 values) make -start * scale exact.
+  tile.prefactor_b =
+      ir_tensor_block_scale_order(desc) == IR_BLOCK_SCALE_B_FIRST;
+  tile.prefactor_a =
+      ir_tensor_block_scale_order(desc) == IR_BLOCK_SCALE_A_FIRST;
+
+  reg_name(PC_B32, new_reg(fn, PC_B32), tile.lane_id);
+  sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", tile.lane_id, group,
+            thread);
+
+  ptx_s8_scaled_a_lane(&tile);
+  ptx_s8_scaled_b_lanes(&tile);
+  ptx_s8_scaled_raw_nibbles(&tile);
+  ptx_s8_scaled_scale_lanes(&tile);
+
+  if (load_accumulator)
+    ptx_mma_load_f32_accumulator_tile(fn, memory, desc->c_layout, m_tiles,
+                                      n_tiles, group, thread,
+                                      accumulator_base);
+
+  reg_name(PC_B32, new_reg(fn, PC_B32), tile.bias);
+  sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", tile.bias, start_bits);
+  tile.dot_base = ptx_mma_reserve_registers(fn, PC_B32, DOT_RING * 4);
 
   // Fragment, scale and prefactor registers are named once and reused by
   // every block: the reuse keeps ptxas from hoisting all the blocks' loads
   // ahead of their MMAs (measured: ~40 more live registers and a register
   // shuffle per MMA when each block had fresh names).
-  int a_base = fn->count[PC_B32];
-  for (int i = 0; i < m_tiles * 4; i++) new_reg(fn, PC_B32);
-  int b_base = fn->count[PC_B32];
-  for (int i = 0; i < n_tiles * 2; i++) new_reg(fn, PC_B32);
-  int shift_base = fn->count[PC_B32];
-  for (int i = 0; i < n_tiles; i++) new_reg(fn, PC_B32);
-  int sa_base = fn->count[PC_F32];
-  for (int i = 0; i < m_tiles * 2; i++) new_reg(fn, PC_F32);
-  int sb_base = fn->count[PC_F32];
-  for (int i = 0; i < n_tiles * 2; i++) new_reg(fn, PC_F32);
-  int pre_base = fn->count[PC_F32];
-  int pre_count = prefactor_b ? n_tiles * 2 : (prefactor_a ? m_tiles * 2 : 0);
-  for (int i = 0; i < pre_count; i++) new_reg(fn, PC_F32);
-  int f_base = fn->count[PC_F32];
-  for (int i = 0; i < 4; i++) new_reg(fn, PC_F32);
-  for (int kb = 0; kb < k_blocks; kb++) {
-    unsigned k0 = (unsigned)kb * 32u;
-    char a_swizzled[24];
-    if (desc->a_swizzle)
-      ptx_mma_swizzled_address(fn, a_lane.reg, a_key, k0, a_swizzled);
-    // A fragments for this block: register r holds rows group + 8*(r&1),
-    // K k0 + 16*(r>>1) + 4*thread .. +3.
-    for (int mt = 0; mt < m_tiles; mt++) {
-      if (a_ldsm) {
-        char address[48], r0[24], r1[24], r2[24], r3[24];
-        reg_name(PC_B32, a_base + mt * 4, r0);
-        reg_name(PC_B32, a_base + mt * 4 + 1, r1);
-        reg_name(PC_B32, a_base + mt * 4 + 2, r2);
-        reg_name(PC_B32, a_base + mt * 4 + 3, r3);
-        if (desc->a_swizzle)
-          snprintf(address, sizeof(address), "%s+%u", a_swizzled,
-                   (unsigned)mt * 16u * a_lane.stride_bytes);
-        else
-          ptx_lane_address(fn, &a_lane, (unsigned)mt * 16u, k0, address);
-        sb_printf(&fn->body,
-                  "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
-                  r0, r1, r2, r3, address);
-        continue;
-      }
-      for (int r = 0; r < 4; r++) {
-        unsigned row_off = (unsigned)mt * 16u + ((r & 1) ? 8u : 0u);
-        unsigned k_off = k0 + ((r >> 1) ? 16u : 0u);
-        if (fast_a) {
-          char address[48], dst[24];
-          ptx_lane_address(fn, &a_lane, row_off, k_off, address);
-          reg_name(PC_B32, a_base + mt * 4 + r, dst);
-          sb_printf(&fn->body, "\tld%s.u32 %s, [%s];\n", memory->spaces[0],
-                    dst, address);
-        } else {
-          PtxMmaCoordinate rows[4], columns[4];
-          for (int byte = 0; byte < 4; byte++) {
-            rows[byte] = (PtxMmaCoordinate){1, 0, row_off};
-            columns[byte] = (PtxMmaCoordinate){0, 4, k_off + (unsigned)byte};
-          }
-          ptx_mma_load_narrow_containers(
-              fn, memory->bases[0], memory->strides[0], desc->a_layout,
-              desc->transpose_a, desc->a_packing, memory->spaces[0], rows,
-              columns, group, thread, 8, a_base + mt * 4 + r, 0);
-        }
-      }
-    }
+  tile.a_base = ptx_mma_reserve_registers(fn, PC_B32, m_tiles * 4);
+  tile.b_base = ptx_mma_reserve_registers(fn, PC_B32, n_tiles * 2);
+  tile.shift_base = ptx_mma_reserve_registers(fn, PC_B32, n_tiles);
+  tile.sa_base = ptx_mma_reserve_registers(fn, PC_F32, m_tiles * 2);
+  tile.sb_base = ptx_mma_reserve_registers(fn, PC_F32, n_tiles * 2);
+  int pre_count = tile.prefactor_b ? n_tiles * 2
+                                   : (tile.prefactor_a ? m_tiles * 2 : 0);
+  tile.pre_base = ptx_mma_reserve_registers(fn, PC_F32, pre_count);
+  tile.f_base = ptx_mma_reserve_registers(fn, PC_F32, 4);
+  for (int kb = 0; kb < tile.k_blocks; kb++) ptx_s8_scaled_block(&tile, kb);
 
-    // B fragments: register r holds column group, K k0 + 16*r + 4*thread
-    // .. +3.
-    if (raw_per_kb) {
-      char regs[4][24], address[48];
-      for (int i = 0; i < 4; i++) reg_name(PC_B32, raw_base + i, regs[i]);
-      if (desc->b_swizzle) {
-        char sw[24];
-        ptx_mma_swizzled_address(fn, nib32_lane.reg, nib32_key,
-                                 (unsigned)kb * 16u, sw);
-        snprintf(address, sizeof(address), "%s", sw);
-      } else {
-        ptx_lane_address(fn, &nib32_lane, 0, (unsigned)kb * 16u, address);
-      }
-      sb_printf(&fn->body,
-                "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s];\n",
-                regs[0], regs[1], regs[2], regs[3], address);
-    }
-    for (int nt = 0; nt < n_tiles; nt++) {
-      char lo[24], hi[24];
-      reg_name(PC_B32, b_base + nt * 2, lo);
-      reg_name(PC_B32, b_base + nt * 2 + 1, hi);
-      if (profile->b_halves) {
-        char word[24];
-        reg_name(PC_B32, raw_per_kb ? raw_base + nt : raw_base + nt * k_blocks + kb,
-                 word);
-        if (x16) {
-          // High nibbles stay put, low ones move up a nibble; ^ 8 per
-          // nibble subtracts the zero point (signed nibbles need none).
-          const char *flip = profile->b_signed4 ? "0x00000000" : "0x88888888";
-          const char *flip_lo = profile->b_signed4 ? "0x00000000" : "0x80808080";
-          char shifted[24];
-          reg_name(PC_B32, shift_base + nt, shifted);
-          sb_printf(&fn->body, "\tshl.b32 %s, %s, 4;\n", shifted, word);
-          sb_printf(&fn->body, "\tlop3.b32 %s, %s, %s, 0xF0F0F0F0, 0x28;\n",
-                    lo, shifted, flip_lo);
-          sb_printf(&fn->body, "\tlop3.b32 %s, %s, %s, 0xF0F0F0F0, 0x28;\n",
-                    hi, word, flip);
-        } else {
-          sb_printf(&fn->body, "\tand.b32 %s, %s, 0x0F0F0F0F;\n", lo, word);
-          sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", hi, word);
-          sb_printf(&fn->body, "\tand.b32 %s, %s, 0x0F0F0F0F;\n", hi, hi);
-          unsigned zero_point =
-              profile->b_signed4 ? 8u : profile->b_zero_point;
-          const char *halves[2] = {lo, hi};
-          for (int h = 0; h < 2 && zero_point; h++) {
-            if (profile->b_signed4)
-              sb_printf(&fn->body, "\txor.b32 %s, %s, 0x08080808;\n",
-                        halves[h], halves[h]);
-            sb_printf(&fn->body, "\tadd.u32 %s, %s, 0x%08X;\n", halves[h],
-                      halves[h], (0x80u - zero_point) * 0x01010101u);
-            sb_printf(&fn->body, "\txor.b32 %s, %s, 0x80808080;\n",
-                      halves[h], halves[h]);
-          }
-        }
-        continue;
-      }
-      for (int r = 0; r < 2; r++) {
-        unsigned col_off = (unsigned)nt * 8u;
-        unsigned k_off = k0 + (r ? 16u : 0u);
-        int dst_reg = b_base + nt * 2 + r;
-        if (fast_b) {
-          char address[48], dst[24];
-          ptx_lane_address(fn, &b_lane, col_off, k_off, address);
-          reg_name(PC_B32, dst_reg, dst);
-          sb_printf(&fn->body, "\tld%s.u32 %s, [%s];\n", memory->spaces[1],
-                    dst, address);
-        } else {
-          PtxMmaCoordinate rows[4], columns[4];
-          for (int byte = 0; byte < 4; byte++) {
-            rows[byte] = (PtxMmaCoordinate){0, 4, k_off + (unsigned)byte};
-            columns[byte] = (PtxMmaCoordinate){1, 0, col_off};
-          }
-          ptx_mma_load_narrow_containers(
-              fn, memory->bases[1], memory->strides[1], desc->b_layout,
-              desc->transpose_b, desc->b_packing, memory->spaces[1], rows,
-              columns, group, thread, 8, dst_reg, 0);
-        }
-      }
-    }
-
-    // This block's dots, DOT_LAG MMAs ahead of their epilogues. The ring
-    // runs on across blocks: a block's scales are loaded where its first
-    // epilogue is due, after the previous block's last ones, so those sit
-    // among this block's first MMAs instead of draining the tensor pipe at
-    // every block boundary (~0.4% on the int8 TMA GEMM).
-    int pairs = m_tiles * n_tiles;
-    int g0 = kb * pairs;
-    int steps = kb == k_blocks - 1 ? pairs + DOT_LAG : pairs;
-    for (int step = 0; step < steps; step++) {
-      int g = g0 + step;
-      if (step < pairs) {
-        int mt = step / n_tiles, nt = step % n_tiles;
-        char a[128], b[128], dots[128];
-        ptx_reg_tuple_at(PC_B32, a_base + mt * 4, 4, a, sizeof(a));
-        ptx_reg_tuple_at(PC_B32, b_base + nt * 2, 2, b, sizeof(b));
-        ptx_reg_tuple_at(PC_B32, dot_base + (g % DOT_RING) * 4, 4, dots,
-                         sizeof(dots));
-        sb_printf(&fn->body,
-                  "\tmma.sync.aligned.m16n8k32.row.col.s32.%s.%s.s32 %s, %s, %s, {%s, %s, %s, %s};\n",
-                  profile->a_type, profile->b_type, dots, a, b, bias, bias,
-                  bias, bias);
-      }
-      int done = g - DOT_LAG;
-      if (done < 0) continue;
-      int dkb = done / pairs;
-      int dstep = done % pairs;
-      if (dstep == 0) {
-        // Block dkb's scales, and the exact prefactors -start * scale.
-        for (int mt = 0; mt < m_tiles; mt++) {
-          for (int h = 0; h < 2; h++) {
-            ptx_lane_load_scale(fn, &sa_lane, memory->spaces[4],
-                                desc->a_scale_element,
-                                (unsigned)mt * 16u + (h ? 8u : 0u), dkb,
-                                sa_base + mt * 2 + h);
-            if (prefactor_a) {
-              char pre[24], sa[24];
-              reg_name(PC_F32, pre_base + mt * 2 + h, pre);
-              reg_name(PC_F32, sa_base + mt * 2 + h, sa);
-              sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sa,
-                        neg_start);
-            }
-          }
-        }
-        for (int nt = 0; nt < n_tiles; nt++) {
-          for (int h = 0; h < 2; h++) {
-            ptx_lane_load_scale(fn, &sb_lane, memory->spaces[5],
-                                desc->b_scale_element,
-                                (unsigned)nt * 8u + (unsigned)h, dkb,
-                                sb_base + nt * 2 + h);
-            if (prefactor_b) {
-              char pre[24], sb[24];
-              reg_name(PC_F32, pre_base + nt * 2 + h, pre);
-              reg_name(PC_F32, sb_base + nt * 2 + h, sb);
-              sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", pre, sb,
-                        neg_start);
-            }
-          }
-        }
-      }
-      int mt = dstep / n_tiles, nt = dstep % n_tiles;
-      int acc = accumulator_base + (mt * n_tiles + nt) * 4;
-      for (int e = 0; e < 4; e++) {
-        char dot[24], f[24], sa[24], sb[24], accr[24];
-        reg_name(PC_B32, dot_base + (done % DOT_RING) * 4 + e, dot);
-        reg_name(PC_F32, f_base + e, f);
-        reg_name(PC_F32, sa_base + mt * 2 + (e >= 2 ? 1 : 0), sa);
-        reg_name(PC_F32, sb_base + nt * 2 + (e & 1), sb);
-        reg_name(PC_F32, acc + e, accr);
-        sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", f, dot);
-        if (prefactor_b || prefactor_a) {
-          char pre[24];
-          const char *first = prefactor_b ? sb : sa;
-          const char *second = prefactor_b ? sa : sb;
-          reg_name(PC_F32,
-                   pre_base + (prefactor_b ? nt * 2 + (e & 1)
-                                           : mt * 2 + (e >= 2 ? 1 : 0)),
-                   pre);
-          sb_printf(&fn->body, "\tfma.rn.f32 %s, %s, %s, %s;\n", f, f, first,
-                    pre);
-          sb_printf(&fn->body, "\tfma.rn.f32 %s, %s, %s, %s;\n", accr, f,
-                    second, accr);
-        } else {
-          char scale[24];
-          reg_name(PC_F32, new_reg(fn, PC_F32), scale);
-          sb_printf(&fn->body, "\tsub.rn.f32 %s, %s, %s;\n", f, f,
-                    start_float);
-          sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", scale, sa, sb);
-          sb_printf(&fn->body, "\tfma.rn.f32 %s, %s, %s, %s;\n", accr, f,
-                    scale, accr);
-        }
-      }
-    }
-  }
-
-  if (store_accumulator) {
-    for (int mt = 0; mt < m_tiles; mt++) {
-      for (int nt = 0; nt < n_tiles; nt++) {
-        ptx_mma_store_f32_accumulator_subtile(
-            fn, in, profile, memory->bases[3], memory->spaces[3],
-            memory->strides[3], group, thread, (unsigned)mt * 16u,
-            (unsigned)nt * 8u, accumulator_base + (mt * n_tiles + nt) * 4);
-      }
-    }
-  }
+  if (store_accumulator)
+    ptx_mma_store_f32_accumulator_tile(fn, in, profile, memory, group, thread,
+                                       accumulator_base);
 }
 
 // f16/bf16 tile with a C row scale: mma.sync m16n8k16 with the documented
@@ -4314,6 +4462,243 @@ static void ptx_f16_load_pair(PtxFn *fn, const char *base,
   sb_printf(&fn->body, "\tmov.b32 %s, {%s, %s};\n", dst, lo, hi);
 }
 
+static void ptx_f16_tile_scale_rows(PtxFn *fn, const PtxMmaTileMemory *memory,
+                                    int m_tiles, int n_tiles,
+                                    const char *group,
+                                    int accumulator_base) {
+  PtxLanePointer scale_lane;
+  ptx_lane_pointer(fn, memory->c_scale_base, memory->c_scale_space, "1", 4,
+                   group, 1, NULL, 0, &scale_lane);
+  for (int mt = 0; mt < m_tiles; mt++) {
+    for (int h = 0; h < 2; h++) {
+      char address[48], scale[24];
+      ptx_lane_address(fn, &scale_lane, (unsigned)mt * 16u + 8u * (unsigned)h,
+                       0, address);
+      reg_name(PC_F32, new_reg(fn, PC_F32), scale);
+      sb_printf(&fn->body, "\tld%s.f32 %s, [%s];\n", memory->c_scale_space,
+                scale, address);
+      for (int nt = 0; nt < n_tiles; nt++) {
+        for (int e = 0; e < 2; e++) {
+          char acc[24];
+          reg_name(PC_F32, accumulator_base + (mt * n_tiles + nt) * 4 +
+                               h * 2 + e,
+                   acc);
+          sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", acc, acc,
+                    scale);
+        }
+      }
+    }
+  }
+}
+
+static void ptx_f16_tile_matrix_b_pointer(PtxFn *fn,
+                                          const PtxMmaTileMemory *memory,
+                                          const char *group,
+                                          const char *thread,
+                                          unsigned ldb_static,
+                                          char matrix_ptr[24]) {
+  // Lane l addresses row (l / 8 & 1) * 8 + l % 8 of the K step at column
+  // (l / 16) * 8 of the subtile pair: blocks (K 0-7, n8 0), (K 8-15,
+  // n8 0), (K 0-7, n8 1), (K 8-15, n8 1) -- b0/b1 of two subtiles.
+  char lane_id[24], quad[24], rowsel[24], offset[24], narrow[24];
+  reg_name(PC_B32, new_reg(fn, PC_B32), lane_id);
+  reg_name(PC_B32, new_reg(fn, PC_B32), quad);
+  reg_name(PC_B32, new_reg(fn, PC_B32), rowsel);
+  reg_name(PC_B32, new_reg(fn, PC_B32), offset);
+  reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
+  reg_name(PC_B32, new_reg(fn, PC_B32), matrix_ptr);
+  sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", lane_id, group,
+            thread);
+  sb_printf(&fn->body, "\tand.b32 %s, %s, 15;\n", rowsel, lane_id);
+  sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", quad, lane_id);
+  sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", offset, rowsel,
+            ldb_static * 2u);
+  sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", offset, quad,
+            offset);
+  sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
+            memory->bases[1]);
+  sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", matrix_ptr, narrow,
+            offset);
+}
+
+static void ptx_f16_tile_ldsm_pointers(PtxFn *fn,
+                                       const PtxMmaTileMemory *memory,
+                                       const char *group, const char *thread,
+                                       int a_ldsm, int b_ldsm,
+                                       unsigned lda_static,
+                                       unsigned ldb_static, char a_lm[24],
+                                       char b_lm[24]) {
+  char lid[24], lo[24], sel[24], hi[24], off[24], narrow[24];
+  reg_name(PC_B32, new_reg(fn, PC_B32), lid);
+  reg_name(PC_B32, new_reg(fn, PC_B32), lo);
+  reg_name(PC_B32, new_reg(fn, PC_B32), sel);
+  reg_name(PC_B32, new_reg(fn, PC_B32), hi);
+  sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", lid, group, thread);
+  sb_printf(&fn->body, "\tand.b32 %s, %s, 7;\n", lo, lid);
+  sb_printf(&fn->body, "\tbfe.u32 %s, %s, 3, 1;\n", sel, lid);
+  sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", hi, lid);
+  if (a_ldsm) {
+    reg_name(PC_B32, new_reg(fn, PC_B32), off);
+    reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
+    reg_name(PC_B32, new_reg(fn, PC_B32), a_lm);
+    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", off, sel, lo);
+    sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", off, off,
+              lda_static * 2u);
+    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", off, hi, off);
+    sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
+              memory->bases[0]);
+    sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", a_lm, narrow, off);
+  }
+  if (b_ldsm) {
+    reg_name(PC_B32, new_reg(fn, PC_B32), off);
+    reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
+    reg_name(PC_B32, new_reg(fn, PC_B32), b_lm);
+    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", off, hi, lo);
+    sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", off, off,
+              ldb_static * 2u);
+    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", off, sel, off);
+    sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
+              memory->bases[1]);
+    sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", b_lm, narrow, off);
+  }
+}
+
+static void ptx_f16_tile_ldmatrix_a(PtxFn *fn, const char *a_lm,
+                                    unsigned lda_static, int m_tiles, int ks,
+                                    int a_base) {
+  for (int mt = 0; mt < m_tiles; mt++) {
+    char r[4][24];
+    for (int i = 0; i < 4; i++) reg_name(PC_B32, a_base + mt * 4 + i, r[i]);
+    sb_printf(&fn->body,
+              "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
+              r[0], r[1], r[2], r[3], a_lm,
+              (unsigned)mt * 16u * lda_static * 2u + (unsigned)ks * 32u);
+  }
+}
+
+static void ptx_f16_tile_load_a_words(PtxFn *fn,
+                                      const MtlcTensorMmaDesc *desc,
+                                      const PtxMmaTileMemory *memory,
+                                      const PtxLanePointer *a_lane,
+                                      int fast_a, int m_tiles, int ks,
+                                      int a_base, const char *group,
+                                      const char *thread) {
+  for (int mt = 0; mt < m_tiles; mt++) {
+    for (int r = 0; r < 4; r++) {
+      unsigned row_off = (unsigned)mt * 16u + ((r & 1) ? 8u : 0u);
+      unsigned k_off = (unsigned)ks * 16u + ((r >> 1) ? 8u : 0u);
+      if (fast_a) {
+        char address[48], dst[24];
+        ptx_lane_address(fn, a_lane, row_off, k_off * 2u, address);
+        reg_name(PC_B32, a_base + mt * 4 + r, dst);
+        sb_printf(&fn->body, "\tld%s.b32 %s, [%s];\n", memory->spaces[0],
+                  dst, address);
+      } else {
+        PtxMmaCoordinate row = {1, 0, row_off};
+        PtxMmaCoordinate c0 = {0, 2, k_off};
+        PtxMmaCoordinate c1 = {0, 2, k_off + 1u};
+        ptx_f16_load_pair(fn, memory->bases[0], memory->strides[0],
+                          desc->a_layout, desc->transpose_a,
+                          memory->spaces[0], row, c0, row, c1, group,
+                          thread, a_base + mt * 4 + r);
+      }
+    }
+  }
+}
+
+static void ptx_f16_tile_ldmatrix_b_trans(PtxFn *fn, const char *matrix_ptr,
+                                          unsigned ldb_static, int n_tiles,
+                                          int ks, int b_base) {
+  for (int nt = 0; nt < n_tiles; nt += 2) {
+    unsigned offset = ((unsigned)ks * 16u * ldb_static +
+                       (unsigned)nt * 8u) * 2u;
+    char b0[24], b1[24], b2[24], b3[24];
+    reg_name(PC_B32, b_base + nt * 2, b0);
+    reg_name(PC_B32, b_base + nt * 2 + 1, b1);
+    if (nt + 1 < n_tiles) {
+      reg_name(PC_B32, b_base + nt * 2 + 2, b2);
+      reg_name(PC_B32, b_base + nt * 2 + 3, b3);
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
+                b0, b1, b2, b3, matrix_ptr, offset);
+    } else {
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%s, %s}, [%s+%u];\n",
+                b0, b1, matrix_ptr, offset);
+    }
+  }
+}
+
+static void ptx_f16_tile_ldmatrix_b(PtxFn *fn, const char *b_lm,
+                                    unsigned ldb_static, int n_tiles, int ks,
+                                    int b_base) {
+  for (int nt = 0; nt < n_tiles; nt += 2) {
+    unsigned offset = (unsigned)nt * 8u * ldb_static * 2u + (unsigned)ks * 32u;
+    char b0[24], b1[24], b2[24], b3[24];
+    reg_name(PC_B32, b_base + nt * 2, b0);
+    reg_name(PC_B32, b_base + nt * 2 + 1, b1);
+    if (nt + 1 < n_tiles) {
+      reg_name(PC_B32, b_base + nt * 2 + 2, b2);
+      reg_name(PC_B32, b_base + nt * 2 + 3, b3);
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
+                b0, b1, b2, b3, b_lm, offset);
+    } else {
+      sb_printf(&fn->body,
+                "\tldmatrix.sync.aligned.m8n8.x2.shared.b16 {%s, %s}, [%s+%u];\n",
+                b0, b1, b_lm, offset);
+    }
+  }
+}
+
+static void ptx_f16_tile_load_b_words(PtxFn *fn,
+                                      const MtlcTensorMmaDesc *desc,
+                                      const PtxMmaTileMemory *memory,
+                                      const PtxLanePointer *b_lane,
+                                      int fast_b, int n_tiles, int ks,
+                                      int b_base, const char *group,
+                                      const char *thread) {
+  for (int nt = 0; nt < n_tiles; nt++) {
+    for (int r = 0; r < 2; r++) {
+      unsigned col_off = (unsigned)nt * 8u;
+      unsigned k_off = (unsigned)ks * 16u + (r ? 8u : 0u);
+      if (fast_b) {
+        char address[48], dst[24];
+        ptx_lane_address(fn, b_lane, col_off, k_off * 2u, address);
+        reg_name(PC_B32, b_base + nt * 2 + r, dst);
+        sb_printf(&fn->body, "\tld%s.b32 %s, [%s];\n", memory->spaces[1],
+                  dst, address);
+      } else {
+        PtxMmaCoordinate r0 = {0, 2, k_off};
+        PtxMmaCoordinate r1 = {0, 2, k_off + 1u};
+        PtxMmaCoordinate column = {1, 0, col_off};
+        ptx_f16_load_pair(fn, memory->bases[1], memory->strides[1],
+                          desc->b_layout, desc->transpose_b,
+                          memory->spaces[1], r0, column, r1, column,
+                          group, thread, b_base + nt * 2 + r);
+      }
+    }
+  }
+}
+
+static void ptx_f16_tile_mma(PtxFn *fn, const char *element, int m_tiles,
+                             int n_tiles, int a_base, int b_base,
+                             int accumulator_base) {
+  for (int mt = 0; mt < m_tiles; mt++) {
+    char a[128];
+    ptx_reg_tuple_at(PC_B32, a_base + mt * 4, 4, a, sizeof(a));
+    for (int nt = 0; nt < n_tiles; nt++) {
+      char b[128], acc[128];
+      ptx_reg_tuple_at(PC_B32, b_base + nt * 2, 2, b, sizeof(b));
+      ptx_reg_tuple_at(PC_F32, accumulator_base + (mt * n_tiles + nt) * 4,
+                       4, acc, sizeof(acc));
+      sb_printf(&fn->body,
+                "\tmma.sync.aligned.m16n8k16.row.col.f32.%s.%s.f32 %s, %s, %s, %s;\n",
+                element, element, acc, a, b, acc);
+    }
+  }
+}
+
 static void ptx_emit_mma_f16_tile(
     PtxFn *fn, const IRInstruction *in, const PtxMmaProfile *profile,
     const PtxMmaTileMemory *memory, const char *group, const char *thread,
@@ -4321,52 +4706,18 @@ static void ptx_emit_mma_f16_tile(
   const MtlcTensorMmaDesc *desc = &IR_TENSOR_MMA(in);
   int m_tiles = profile->m_tiles, n_tiles = profile->n_tiles;
   int k_steps = desc->k / 16;
-  if (accumulator_base < 0) {
-    accumulator_base = fn->count[PC_F32];
-    for (int i = 0; i < m_tiles * n_tiles * 4; i++) new_reg(fn, PC_F32);
-  }
+  if (accumulator_base < 0)
+    accumulator_base =
+        ptx_mma_reserve_registers(fn, PC_F32, m_tiles * n_tiles * 4);
 
-  if (load_accumulator) {
-    for (int mt = 0; mt < m_tiles; mt++) {
-      for (int nt = 0; nt < n_tiles; nt++) {
-        int acc = accumulator_base + (mt * n_tiles + nt) * 4;
-        for (int e = 0; e < 4; e++) {
-          PtxMmaCoordinate row = {1, 0,
-                                  (unsigned)mt * 16u + (e >= 2 ? 8u : 0u)};
-          PtxMmaCoordinate column = {0, 2,
-                                     (unsigned)nt * 8u + (unsigned)(e & 1)};
-          ptx_mma_load_c(fn, memory, desc->c_layout, row, column, group,
-                         thread, acc + e);
-        }
-      }
-    }
-  }
+  if (load_accumulator)
+    ptx_mma_load_f32_accumulator_tile(fn, memory, desc->c_layout, m_tiles,
+                                      n_tiles, group, thread,
+                                      accumulator_base);
 
-  if (desc->c_scale_mode == MTLC_TENSOR_SCALE_PER_ROW) {
-    PtxLanePointer scale_lane;
-    ptx_lane_pointer(fn, memory->c_scale_base, memory->c_scale_space, "1", 4,
-                     group, 1, NULL, 0, &scale_lane);
-    for (int mt = 0; mt < m_tiles; mt++) {
-      for (int h = 0; h < 2; h++) {
-        char address[48], scale[24];
-        ptx_lane_address(fn, &scale_lane, (unsigned)mt * 16u + 8u * (unsigned)h,
-                         0, address);
-        reg_name(PC_F32, new_reg(fn, PC_F32), scale);
-        sb_printf(&fn->body, "\tld%s.f32 %s, [%s];\n", memory->c_scale_space,
-                  scale, address);
-        for (int nt = 0; nt < n_tiles; nt++) {
-          for (int e = 0; e < 2; e++) {
-            char acc[24];
-            reg_name(PC_F32, accumulator_base + (mt * n_tiles + nt) * 4 +
-                                 h * 2 + e,
-                     acc);
-            sb_printf(&fn->body, "\tmul.rn.f32 %s, %s, %s;\n", acc, acc,
-                      scale);
-          }
-        }
-      }
-    }
-  }
+  if (desc->c_scale_mode == MTLC_TENSOR_SCALE_PER_ROW)
+    ptx_f16_tile_scale_rows(fn, memory, m_tiles, n_tiles, group,
+                            accumulator_base);
 
   int fast_a = desc->a_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR &&
                !desc->transpose_a;
@@ -4390,30 +4741,9 @@ static void ptx_emit_mma_f16_tile(
     ptx_lane_pointer(fn, memory->bases[1], memory->spaces[1], ldb, 2, group,
                      1, thread, 4, &b_lane);
   char matrix_ptr[24];
-  if (matrix_b) {
-    // Lane l addresses row (l / 8 & 1) * 8 + l % 8 of the K step at column
-    // (l / 16) * 8 of the subtile pair: blocks (K 0-7, n8 0), (K 8-15,
-    // n8 0), (K 0-7, n8 1), (K 8-15, n8 1) -- b0/b1 of two subtiles.
-    char lane_id[24], quad[24], rowsel[24], offset[24], narrow[24];
-    reg_name(PC_B32, new_reg(fn, PC_B32), lane_id);
-    reg_name(PC_B32, new_reg(fn, PC_B32), quad);
-    reg_name(PC_B32, new_reg(fn, PC_B32), rowsel);
-    reg_name(PC_B32, new_reg(fn, PC_B32), offset);
-    reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
-    reg_name(PC_B32, new_reg(fn, PC_B32), matrix_ptr);
-    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", lane_id, group,
-              thread);
-    sb_printf(&fn->body, "\tand.b32 %s, %s, 15;\n", rowsel, lane_id);
-    sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", quad, lane_id);
-    sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", offset, rowsel,
-              ldb_static * 2u);
-    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", offset, quad,
-              offset);
-    sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
-              memory->bases[1]);
-    sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", matrix_ptr, narrow,
-              offset);
-  }
+  if (matrix_b)
+    ptx_f16_tile_matrix_b_pointer(fn, memory, group, thread, ldb_static,
+                                  matrix_ptr);
   // ldmatrix for a row-major A and a column-major B in workgroup memory
   // whose rows are whole 16-byte groups: one x4 brings a 16 x 16 A fragment
   // (rows (l / 8 & 1) * 8 + l % 8, K (l / 16) * 8) or the b0/b1 pairs of
@@ -4428,161 +4758,33 @@ static void ptx_emit_mma_f16_tile(
                strcmp(memory->spaces[1], ".shared") == 0 && ldb_static != 0 &&
                (ldb_static * 2u) % 16u == 0;
   char a_lm[24], b_lm[24];
-  if (a_ldsm || b_ldsm) {
-    char lid[24], lo[24], sel[24], hi[24], off[24], narrow[24];
-    reg_name(PC_B32, new_reg(fn, PC_B32), lid);
-    reg_name(PC_B32, new_reg(fn, PC_B32), lo);
-    reg_name(PC_B32, new_reg(fn, PC_B32), sel);
-    reg_name(PC_B32, new_reg(fn, PC_B32), hi);
-    sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 4, %s;\n", lid, group, thread);
-    sb_printf(&fn->body, "\tand.b32 %s, %s, 7;\n", lo, lid);
-    sb_printf(&fn->body, "\tbfe.u32 %s, %s, 3, 1;\n", sel, lid);
-    sb_printf(&fn->body, "\tshr.u32 %s, %s, 4;\n", hi, lid);
-    if (a_ldsm) {
-      reg_name(PC_B32, new_reg(fn, PC_B32), off);
-      reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
-      reg_name(PC_B32, new_reg(fn, PC_B32), a_lm);
-      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", off, sel, lo);
-      sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", off, off,
-                lda_static * 2u);
-      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", off, hi, off);
-      sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
-                memory->bases[0]);
-      sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", a_lm, narrow, off);
-    }
-    if (b_ldsm) {
-      reg_name(PC_B32, new_reg(fn, PC_B32), off);
-      reg_name(PC_B32, new_reg(fn, PC_B32), narrow);
-      reg_name(PC_B32, new_reg(fn, PC_B32), b_lm);
-      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 8, %s;\n", off, hi, lo);
-      sb_printf(&fn->body, "\tmul.lo.u32 %s, %s, %u;\n", off, off,
-                ldb_static * 2u);
-      sb_printf(&fn->body, "\tmad.lo.u32 %s, %s, 16, %s;\n", off, sel, off);
-      sb_printf(&fn->body, "\tcvt.u32.u64 %s, %s;\n", narrow,
-                memory->bases[1]);
-      sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", b_lm, narrow, off);
-    }
-  }
+  if (a_ldsm || b_ldsm)
+    ptx_f16_tile_ldsm_pointers(fn, memory, group, thread, a_ldsm, b_ldsm,
+                               lda_static, ldb_static, a_lm, b_lm);
   const char *element = profile->a_type;
   for (int ks = 0; ks < k_steps; ks++) {
-    int a_base = fn->count[PC_B32];
-    for (int i = 0; i < m_tiles * 4; i++) new_reg(fn, PC_B32);
-    int b_base = fn->count[PC_B32];
-    for (int i = 0; i < n_tiles * 2; i++) new_reg(fn, PC_B32);
-    for (int mt = 0; a_ldsm && mt < m_tiles; mt++) {
-      char r[4][24];
-      for (int i = 0; i < 4; i++) reg_name(PC_B32, a_base + mt * 4 + i, r[i]);
-      sb_printf(&fn->body,
-                "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
-                r[0], r[1], r[2], r[3], a_lm,
-                (unsigned)mt * 16u * lda_static * 2u + (unsigned)ks * 32u);
-    }
-    for (int mt = 0; !a_ldsm && mt < m_tiles; mt++) {
-      for (int r = 0; r < 4; r++) {
-        unsigned row_off = (unsigned)mt * 16u + ((r & 1) ? 8u : 0u);
-        unsigned k_off = (unsigned)ks * 16u + ((r >> 1) ? 8u : 0u);
-        if (fast_a) {
-          char address[48], dst[24];
-          ptx_lane_address(fn, &a_lane, row_off, k_off * 2u, address);
-          reg_name(PC_B32, a_base + mt * 4 + r, dst);
-          sb_printf(&fn->body, "\tld%s.b32 %s, [%s];\n", memory->spaces[0],
-                    dst, address);
-        } else {
-          PtxMmaCoordinate row = {1, 0, row_off};
-          PtxMmaCoordinate c0 = {0, 2, k_off};
-          PtxMmaCoordinate c1 = {0, 2, k_off + 1u};
-          ptx_f16_load_pair(fn, memory->bases[0], memory->strides[0],
-                            desc->a_layout, desc->transpose_a,
-                            memory->spaces[0], row, c0, row, c1, group,
-                            thread, a_base + mt * 4 + r);
-        }
-      }
-    }
-    if (matrix_b) {
-      for (int nt = 0; nt < n_tiles; nt += 2) {
-        unsigned offset = ((unsigned)ks * 16u * ldb_static +
-                           (unsigned)nt * 8u) * 2u;
-        char b0[24], b1[24], b2[24], b3[24];
-        reg_name(PC_B32, b_base + nt * 2, b0);
-        reg_name(PC_B32, b_base + nt * 2 + 1, b1);
-        if (nt + 1 < n_tiles) {
-          reg_name(PC_B32, b_base + nt * 2 + 2, b2);
-          reg_name(PC_B32, b_base + nt * 2 + 3, b3);
-          sb_printf(&fn->body,
-                    "\tldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
-                    b0, b1, b2, b3, matrix_ptr, offset);
-        } else {
-          sb_printf(&fn->body,
-                    "\tldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%s, %s}, [%s+%u];\n",
-                    b0, b1, matrix_ptr, offset);
-        }
-      }
-    } else if (b_ldsm) {
-      for (int nt = 0; nt < n_tiles; nt += 2) {
-        unsigned offset = (unsigned)nt * 8u * ldb_static * 2u + (unsigned)ks * 32u;
-        char b0[24], b1[24], b2[24], b3[24];
-        reg_name(PC_B32, b_base + nt * 2, b0);
-        reg_name(PC_B32, b_base + nt * 2 + 1, b1);
-        if (nt + 1 < n_tiles) {
-          reg_name(PC_B32, b_base + nt * 2 + 2, b2);
-          reg_name(PC_B32, b_base + nt * 2 + 3, b3);
-          sb_printf(&fn->body,
-                    "\tldmatrix.sync.aligned.m8n8.x4.shared.b16 {%s, %s, %s, %s}, [%s+%u];\n",
-                    b0, b1, b2, b3, b_lm, offset);
-        } else {
-          sb_printf(&fn->body,
-                    "\tldmatrix.sync.aligned.m8n8.x2.shared.b16 {%s, %s}, [%s+%u];\n",
-                    b0, b1, b_lm, offset);
-        }
-      }
-    } else {
-      for (int nt = 0; nt < n_tiles; nt++) {
-        for (int r = 0; r < 2; r++) {
-          unsigned col_off = (unsigned)nt * 8u;
-          unsigned k_off = (unsigned)ks * 16u + (r ? 8u : 0u);
-          if (fast_b) {
-            char address[48], dst[24];
-            ptx_lane_address(fn, &b_lane, col_off, k_off * 2u, address);
-            reg_name(PC_B32, b_base + nt * 2 + r, dst);
-            sb_printf(&fn->body, "\tld%s.b32 %s, [%s];\n", memory->spaces[1],
-                      dst, address);
-          } else {
-            PtxMmaCoordinate r0 = {0, 2, k_off};
-            PtxMmaCoordinate r1 = {0, 2, k_off + 1u};
-            PtxMmaCoordinate column = {1, 0, col_off};
-            ptx_f16_load_pair(fn, memory->bases[1], memory->strides[1],
-                              desc->b_layout, desc->transpose_b,
-                              memory->spaces[1], r0, column, r1, column,
-                              group, thread, b_base + nt * 2 + r);
-          }
-        }
-      }
-    }
-    for (int mt = 0; mt < m_tiles; mt++) {
-      char a[128];
-      ptx_reg_tuple_at(PC_B32, a_base + mt * 4, 4, a, sizeof(a));
-      for (int nt = 0; nt < n_tiles; nt++) {
-        char b[128], acc[128];
-        ptx_reg_tuple_at(PC_B32, b_base + nt * 2, 2, b, sizeof(b));
-        ptx_reg_tuple_at(PC_F32, accumulator_base + (mt * n_tiles + nt) * 4,
-                         4, acc, sizeof(acc));
-        sb_printf(&fn->body,
-                  "\tmma.sync.aligned.m16n8k16.row.col.f32.%s.%s.f32 %s, %s, %s, %s;\n",
-                  element, element, acc, a, b, acc);
-      }
-    }
+    int a_base = ptx_mma_reserve_registers(fn, PC_B32, m_tiles * 4);
+    int b_base = ptx_mma_reserve_registers(fn, PC_B32, n_tiles * 2);
+    if (a_ldsm)
+      ptx_f16_tile_ldmatrix_a(fn, a_lm, lda_static, m_tiles, ks, a_base);
+    else
+      ptx_f16_tile_load_a_words(fn, desc, memory, &a_lane, fast_a, m_tiles,
+                                ks, a_base, group, thread);
+    if (matrix_b)
+      ptx_f16_tile_ldmatrix_b_trans(fn, matrix_ptr, ldb_static, n_tiles, ks,
+                                    b_base);
+    else if (b_ldsm)
+      ptx_f16_tile_ldmatrix_b(fn, b_lm, ldb_static, n_tiles, ks, b_base);
+    else
+      ptx_f16_tile_load_b_words(fn, desc, memory, &b_lane, fast_b, n_tiles,
+                                ks, b_base, group, thread);
+    ptx_f16_tile_mma(fn, element, m_tiles, n_tiles, a_base, b_base,
+                     accumulator_base);
   }
 
-  if (store_accumulator) {
-    for (int mt = 0; mt < m_tiles; mt++) {
-      for (int nt = 0; nt < n_tiles; nt++) {
-        ptx_mma_store_f32_accumulator_subtile(
-            fn, in, profile, memory->bases[3], memory->spaces[3],
-            memory->strides[3], group, thread, (unsigned)mt * 16u,
-            (unsigned)nt * 8u, accumulator_base + (mt * n_tiles + nt) * 4);
-      }
-    }
-  }
+  if (store_accumulator)
+    ptx_mma_store_f32_accumulator_tile(fn, in, profile, memory, group, thread,
+                                       accumulator_base);
 }
 
 static void ptx_emit_mma_native_subtile(
