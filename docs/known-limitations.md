@@ -472,6 +472,22 @@ rule. `--profile-runtime` is the built-in alternative.
 
 `--musl` is rejected, because linking musl would break the owned-runtime rule.
 
+## macOS and Metal
+
+None of the Mac path has run on Apple hardware yet: the Mach-O link through
+`cc`, the hosted runtime's Apple branches, the Darwin Makefile, and the
+Objective-C calls that drive Metal. The `macos` CI job runs them on GitHub's
+Apple silicon runners and does not yet gate a merge. What is checked without
+a Mac is listed in [macOS and Metal](macos.md#what-has-run-where).
+
+On x86-64 macOS, Mettle code cannot read a variable that lives in a dynamic
+library; it can call the library's functions. A Mac program cannot link
+statically. Metal kernels refuse `float64`, 64-bit atomic read-modify-write,
+inline PTX, `tensor_matmul`, `tensor_epilogue`, `tensor_transfer`, register
+tiles, and FP8, FP6, FP4, sparse and TF32 `tensor_mma`. Metal has one GPU per
+process and no managed memory, and kernel `gpu_print` output goes to the
+system log.
+
 ## Narrow targets
 
 The 16- and 32-bit targets compute in one register's worth of value. A value
