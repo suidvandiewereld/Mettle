@@ -1,4 +1,4 @@
-// An import guard platform must be 'windows' or 'linux'.
+// An import guard platform must be 'windows', 'linux', 'macos' or 'posix'.
 
 import "std/core" if solaris;
 

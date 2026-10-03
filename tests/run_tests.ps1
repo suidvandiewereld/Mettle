@@ -1631,7 +1631,7 @@ $cases = @(
   @{ Name = "err_global_init_address_arith"; Path = "tests/err_global_init_address_arith.mettle"; ShouldSucceed = $false
      Pattern = "a global's initializer must be known at compile time"
      OutputMustNotMatch = @("internal compiler error") },
-  @{ Name = "err_import_guard_bad_platform"; Path = "tests/err_import_guard_bad_platform.mettle"; ShouldSucceed = $false; Pattern = "Import guard platform must be 'windows' or 'linux'" },
+  @{ Name = "err_import_guard_bad_platform"; Path = "tests/err_import_guard_bad_platform.mettle"; ShouldSucceed = $false; Pattern = "Import guard platform must be 'windows', 'linux', 'macos' or 'posix'" },
   @{ Name = "block_comment"; Path = "tests/test_block_comment.mettle"; ShouldSucceed = $true },
   @{ Name = "compound_assign"; Path = "tests/test_compound_assign.mettle"; ShouldSucceed = $true },
   @{ Name = "compound_assign_for"; Path = "tests/test_compound_assign_for.mettle"; ShouldSucceed = $true },
@@ -11648,7 +11648,7 @@ try {
   $dupBObj = Join-Path $tmpDir "linker_duplicate_b.obj"
   $unresolvedObj = Join-Path $tmpDir "linker_unresolved_entry.obj"
 
-  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/symbol_resolve_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $symbolResolveExe 2>&1 | Out-String
+  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/symbol_resolve_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c src/codegen/macho_emitter.c -Isrc -Isrc/codegen -o $symbolResolveExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "Symbol-resolve harness compile failed: $compileHarness"
   }
@@ -11694,7 +11694,7 @@ try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $relocationExe = Join-Path $tmpDir "relocation_test.exe"
 
-  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/relocation_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/linker/relocation.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $relocationExe 2>&1 | Out-String
+  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/relocation_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/linker/relocation.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c src/codegen/macho_emitter.c -Isrc -Isrc/codegen -o $relocationExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "Relocation harness compile failed: $compileHarness"
   }
@@ -11718,7 +11718,7 @@ try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $peEmitterExe = Join-Path $tmpDir "pe_emitter_test.exe"
 
-  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/pe_emitter_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/linker/relocation.c src/linker/pe_emitter.c src/linker/import_lib.c src/runtime/verify_owned.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $peEmitterExe 2>&1 | Out-String
+  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/pe_emitter_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/linker/relocation.c src/linker/pe_emitter.c src/linker/import_lib.c src/runtime/verify_owned.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c src/codegen/macho_emitter.c -Isrc -Isrc/codegen -o $peEmitterExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "PE-emitter harness compile failed: $compileHarness"
   }
