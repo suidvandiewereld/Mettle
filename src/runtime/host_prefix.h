@@ -137,6 +137,10 @@
 #define clock_gettime mtlc_host_clock_gettime
 #define nanosleep mtlc_host_nanosleep
 #define usleep mtlc_host_usleep
+#undef htons
+#undef ntohs
+#undef htonl
+#undef ntohl
 #define htons mtlc_host_htons
 #define ntohs mtlc_host_ntohs
 #define htonl mtlc_host_htonl

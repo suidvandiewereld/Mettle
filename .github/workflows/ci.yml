@@ -482,7 +482,7 @@ jobs:
           sw_vers
 
       - name: Build compiler
-        run: make -j"$(sysctl -n hw.ncpu)"
+        run: make -k -j"$(sysctl -n hw.ncpu)"
 
       - name: Build and run programs
         run: |

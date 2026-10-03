@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>G0001: A kernel holds more tile registers at once than its budget | Mettle</title>
+<meta name="description" content="G0001: A kernel holds more tile registers at once than its budget" />
+<link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Courier+Prime:ital,wght@0,400;0,700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../assets/doc.css" />
+</head>
+<body>
+<header class="bar"><div class="wrap">
+  <a class="brand" href="../index.html"><img src="../assets/mark.svg" alt="" width="22" height="22" />Mettle</a>
+  <nav><a href="../index.html">Home</a><a href="../internals.html">Internals</a><a href="../reading-diagnostics.html">Diagnostics</a><a href="../reading-the-report.html">The report</a><a href="index.html" aria-current="page">Codes</a></nav>
+</div></header>
+<main class="wrap">
+<h1><span class="code">G0001</span>A kernel holds more tile registers at once than its budget</h1>
+<p class="lede">Reported by the compiler as an error or warning.</p>
+<pre><code>mettle explain G0001</code></pre>
+
+<p>A register tile is a subgroup&#x27;s value held in registers, each work item its share, and tiles never spill. The backend states what each tile costs a work item (PTX: an f32 fragment_c M x N tile costs M*N/32 registers, an f16 fragment_a M x K tile M*K/64, a row vector M/8), takes the tiles live at each point of the kernel, and compares the peak with the work item&#x27;s register limit: 255, or the multiple of 8 below 65536 / block threads when that is smaller. This kernel went over. The message names the line of the peak and every tile live there with its cost.</p>
+<p>A run of element-wise tile operations is computed one element at a time, so a tile made inside such a run and used only there costs nothing. <code>--explain</code> and <code>--report-gpu-types</code> print every tile, its cost, its live lines and the peak.</p>
+<p>Fix: shrink a tile, end one&#x27;s life earlier, or keep an operand in memory and let tensor_mma read it there.</p>
+
+<h2>Related</h2>
+<ul class="codelist"><li><a href="E0001.html"><span class="c">E0001</span><span class="t">Lexical error</span></a></li><li><a href="E0002.html"><span class="c">E0002</span><span class="t">Syntax error</span></a></li><li><a href="E0003.html"><span class="c">E0003</span><span class="t">Semantic error</span></a></li><li><a href="E0004.html"><span class="c">E0004</span><span class="t">Type mismatch</span></a></li><li><a href="E0005.html"><span class="c">E0005</span><span class="t">Scope error</span></a></li><li><a href="E0006.html"><span class="c">E0006</span><span class="t">I/O error</span></a></li><li><a href="E0007.html"><span class="c">E0007</span><span class="t">Internal compiler error</span></a></li><li><a href="M0101.html"><span class="c">M0101</span><span class="t">Use after free</span></a></li></ul>
+
+</main>
+<footer class="foot"><div class="wrap">
+  <span>Generated from <code>src/error/error_explain.c</code>.</span>
+  <span class="sp"><a href="https://github.com/suidvandiewereld/Mettle">GitHub</a></span>
+</div></footer>
+</body>
+</html>

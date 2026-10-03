@@ -102,13 +102,33 @@ struct IRFiber {
 void ir_fiber_switch(void **save, void *load);
 void ir_fiber_trampoline(void);
 
+#if defined(__APPLE__)
+#define IR_FIBER_TEXT ".text\n"
+#define IR_FIBER_NAME(name) "_" #name
+#define IR_FIBER_TYPE(name)
+#define IR_FIBER_SIZE(name)
+#define IR_FIBER_END
+#elif defined(__x86_64__)
+#define IR_FIBER_TEXT ".pushsection .text\n"
+#define IR_FIBER_NAME(name) #name
+#define IR_FIBER_TYPE(name) ".type " #name ",@function\n"
+#define IR_FIBER_SIZE(name) ".size " #name ", .-" #name "\n"
+#define IR_FIBER_END ".popsection\n"
+#else
+#define IR_FIBER_TEXT ".pushsection .text\n"
+#define IR_FIBER_NAME(name) #name
+#define IR_FIBER_TYPE(name) ".type " #name ",%function\n"
+#define IR_FIBER_SIZE(name) ".size " #name ", .-" #name "\n"
+#define IR_FIBER_END ".popsection\n"
+#endif
+
 #if defined(__x86_64__)
 
-__asm__(".pushsection .text\n"
+__asm__(IR_FIBER_TEXT
         ".p2align 4\n"
-        ".globl ir_fiber_switch\n"
-        ".type ir_fiber_switch,@function\n"
-        "ir_fiber_switch:\n"
+        ".globl " IR_FIBER_NAME(ir_fiber_switch) "\n"
+        IR_FIBER_TYPE(ir_fiber_switch)
+        IR_FIBER_NAME(ir_fiber_switch) ":\n"
         "pushq %rbp\n"
         "pushq %rbx\n"
         "pushq %r12\n"
@@ -130,16 +150,16 @@ __asm__(".pushsection .text\n"
         "popq %rbx\n"
         "popq %rbp\n"
         "ret\n"
-        ".size ir_fiber_switch, .-ir_fiber_switch\n"
+        IR_FIBER_SIZE(ir_fiber_switch)
         ".p2align 4\n"
-        ".globl ir_fiber_trampoline\n"
-        ".type ir_fiber_trampoline,@function\n"
-        "ir_fiber_trampoline:\n"
+        ".globl " IR_FIBER_NAME(ir_fiber_trampoline) "\n"
+        IR_FIBER_TYPE(ir_fiber_trampoline)
+        IR_FIBER_NAME(ir_fiber_trampoline) ":\n"
         "movq %r12, %rdi\n"
         "callq *%r13\n"
         "ud2\n"
-        ".size ir_fiber_trampoline, .-ir_fiber_trampoline\n"
-        ".popsection\n");
+        IR_FIBER_SIZE(ir_fiber_trampoline)
+        IR_FIBER_END);
 
 enum { IR_FIBER_FRAME_WORDS = 8 };
 
@@ -157,11 +177,11 @@ static void ir_fiber_frame(uint64_t *frame, IRFiber *fiber,
 
 #elif defined(__aarch64__)
 
-__asm__(".pushsection .text\n"
+__asm__(IR_FIBER_TEXT
         ".p2align 4\n"
-        ".globl ir_fiber_switch\n"
-        ".type ir_fiber_switch,%function\n"
-        "ir_fiber_switch:\n"
+        ".globl " IR_FIBER_NAME(ir_fiber_switch) "\n"
+        IR_FIBER_TYPE(ir_fiber_switch)
+        IR_FIBER_NAME(ir_fiber_switch) ":\n"
         "sub sp, sp, #176\n"
         "stp x19, x20, [sp, #0]\n"
         "stp x21, x22, [sp, #16]\n"
@@ -196,16 +216,16 @@ __asm__(".pushsection .text\n"
         "ldp x19, x20, [sp, #0]\n"
         "add sp, sp, #176\n"
         "ret\n"
-        ".size ir_fiber_switch, .-ir_fiber_switch\n"
+        IR_FIBER_SIZE(ir_fiber_switch)
         ".p2align 4\n"
-        ".globl ir_fiber_trampoline\n"
-        ".type ir_fiber_trampoline,%function\n"
-        "ir_fiber_trampoline:\n"
+        ".globl " IR_FIBER_NAME(ir_fiber_trampoline) "\n"
+        IR_FIBER_TYPE(ir_fiber_trampoline)
+        IR_FIBER_NAME(ir_fiber_trampoline) ":\n"
         "mov x0, x19\n"
         "blr x20\n"
         "brk #0\n"
-        ".size ir_fiber_trampoline, .-ir_fiber_trampoline\n"
-        ".popsection\n");
+        IR_FIBER_SIZE(ir_fiber_trampoline)
+        IR_FIBER_END);
 
 enum { IR_FIBER_FRAME_WORDS = 22 };
 
