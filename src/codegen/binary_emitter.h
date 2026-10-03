@@ -8,6 +8,8 @@ typedef enum {
   BINARY_TARGET_FORMAT_COFF_WIN64 = 0,
   BINARY_TARGET_FORMAT_ELF_X64,
   BINARY_TARGET_FORMAT_ELF_ARM64,
+  BINARY_TARGET_FORMAT_MACHO_X64,
+  BINARY_TARGET_FORMAT_MACHO_ARM64,
 } BinaryTargetFormat;
 
 BinaryTargetFormat binary_target_format_host_default(void);

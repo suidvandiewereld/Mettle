@@ -13,4 +13,7 @@ int binary_emitter_lookup_symbol_index(const BinaryEmitter *emitter,
 int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
                                          const char *filename);
 
+int binary_emitter_write_macho_object_file(BinaryEmitter *emitter,
+                                           const char *filename);
+
 #endif

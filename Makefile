@@ -70,6 +70,7 @@ CODEGEN_SOURCES = \
 	$(SRCDIR)/codegen/binary_emitter.c \
 	$(SRCDIR)/codegen/code_generator.c \
 	$(SRCDIR)/codegen/elf_emitter.c \
+	$(SRCDIR)/codegen/macho_emitter.c \
 	$(SRCDIR)/codegen/gpu_detect.c \
 	$(SRCDIR)/codegen/ptx_emitter.c \
 	$(SRCDIR)/codegen/spirv_emitter.c \

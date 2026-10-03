@@ -380,6 +380,10 @@ static uint16_t binary_emitter_map_relocation_kind(BinaryRelocationKind kind) {
 BinaryTargetFormat binary_target_format_host_default(void) {
 #ifdef _WIN32
   return BINARY_TARGET_FORMAT_COFF_WIN64;
+#elif defined(__APPLE__) && defined(__aarch64__)
+  return BINARY_TARGET_FORMAT_MACHO_ARM64;
+#elif defined(__APPLE__)
+  return BINARY_TARGET_FORMAT_MACHO_X64;
 #elif defined(__aarch64__) && defined(__linux__)
   return BINARY_TARGET_FORMAT_ELF_ARM64;
 #else
@@ -1062,6 +1066,9 @@ int binary_emitter_write_object_file(BinaryEmitter *emitter,
   case BINARY_TARGET_FORMAT_ELF_X64:
   case BINARY_TARGET_FORMAT_ELF_ARM64:
     return binary_emitter_write_elf_object_file(emitter, filename);
+  case BINARY_TARGET_FORMAT_MACHO_X64:
+  case BINARY_TARGET_FORMAT_MACHO_ARM64:
+    return binary_emitter_write_macho_object_file(emitter, filename);
   default:
     binary_emitter_set_error(emitter, "Unknown target object format");
     return 0;
