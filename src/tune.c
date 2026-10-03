@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 #define TUNE_MAX_ROWS 256
 #define TUNE_MAX_COLUMNS 32
@@ -130,7 +133,15 @@ static int tune_copy_file(const char *from, const char *to) {
     }
   }
   fclose(in);
-  return fclose(out) == 0;
+  if (fclose(out) != 0) {
+    return 0;
+  }
+#ifndef _WIN32
+  if (chmod(to, 0755) != 0) {
+    return 0;
+  }
+#endif
+  return 1;
 }
 
 static int tune_file_exists(const char *path) {
