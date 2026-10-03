@@ -1,0 +1,130 @@
+import "std/io";
+import "std/mem";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+const CH = 32;
+const N = 512;
+const SENT = 1000;
+var g: int32* = 0;
+
+@noinline fn id32(x: int32) -> int32 { return x; }
+@noinline fn idu(x: uint32) -> uint32 { return x; }
+
+@noinline fn fill_mul(b: int32) {
+  var k: int32 = 0;
+  while (k < CH) {
+    g[b * CH + k] = -1;
+    k = k + 1;
+  }
+}
+
+@noinline fn fill_const() {
+  var k: int32 = 0;
+  while (k < CH) {
+    g[64 + k] = 7;
+    k = k + 1;
+  }
+}
+
+@noinline fn fill_sym(off: int32, n: int32) {
+  var k: int32 = 0;
+  while (k < n) {
+    g[off + k] = 3;
+    k = k + 1;
+  }
+}
+
+@noinline fn fill_range(off: int32, s: int32, e: int32) -> int32 {
+  var k: int32 = s;
+  while (k < e) {
+    g[off + k] = 9;
+    k = k + 1;
+  }
+  return k;
+}
+
+@noinline fn fill_far(p: int32*, b: int32) {
+  var k: int32 = 0;
+  while (k < CH) {
+    p[b * CH + k] = 5;
+    k = k + 1;
+  }
+}
+
+@noinline fn fill_unsigned(p: int32*, u: uint32) {
+  var k: int32 = 0;
+  while (k < CH) {
+    p[u + k] = 6;
+    k = k + 1;
+  }
+}
+
+fn reset() {
+  var i: int32 = 0;
+  while (i < N) {
+    g[i] = SENT;
+    i = i + 1;
+  }
+}
+
+fn span_is(lo: int32, hi: int32, v: int32) -> int32 {
+  var i: int32 = 0;
+  var bad: int32 = 0;
+  while (i < N) {
+    var want: int32 = SENT;
+    if (i >= lo && i < hi) { want = v; }
+    if (g[i] != want) { bad = 1; }
+    i = i + 1;
+  }
+  return bad;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  g = (int32*)malloc(4 * N);
+
+  reset();
+  fill_mul(id32(2));
+  if (span_is(64, 96, -1) != 0) { fails |= 1; }
+
+  reset();
+  fill_const();
+  if (span_is(64, 96, 7) != 0) { fails |= 2; }
+
+  reset();
+  fill_sym(id32(100), id32(70));
+  if (span_is(100, 170, 3) != 0) { fails |= 4; }
+  reset();
+  fill_sym(id32(100), id32(5));
+  if (span_is(100, 105, 3) != 0) { fails |= 4; }
+
+  reset();
+  var end: int32 = fill_range(id32(200), id32(10), id32(90));
+  if (span_is(210, 290, 9) != 0 || end != 90) { fails |= 8; }
+  reset();
+  end = fill_range(id32(200), id32(50), id32(40));
+  if (span_is(0, 0, 9) != 0 || end != 50) { fails |= 8; }
+
+  reset();
+  var far: int32* = g - 2147483648;
+  fill_far(far, id32(67108864));
+  if (span_is(0, 32, 5) != 0) { fails |= 16; }
+
+  reset();
+  fill_far(g + 300, id32(-2));
+  if (span_is(236, 268, 5) != 0) { fails |= 32; }
+
+  reset();
+  var ufar: int32* = g - 4294967295;
+  fill_unsigned(ufar, idu(4294967295));
+  if (span_is(0, 32, 6) != 0) { fails |= 64; }
+
+  if (fails != 0) {
+    println("FAIL mask {fails}");
+    exit2(fails);
+    return fails;
+  }
+  println("PASS");
+  return 0;
+}

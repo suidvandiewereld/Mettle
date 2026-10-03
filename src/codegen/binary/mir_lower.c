@@ -2152,13 +2152,7 @@ static int mir_gate_fill_counter(const IRFunction *ir_function,
                       in->arguments[3].int_value == 0);
     int offset_zero = (in->arguments[4].kind == IR_OPERAND_INT &&
                        in->arguments[4].int_value == 0);
-    int wide = in->argument_count > 5 &&
-               in->arguments[5].kind == IR_OPERAND_INT &&
-               in->arguments[5].int_value == 64;
     if (!start_zero) {
-      if (!wide && !offset_zero) {
-        return mir_trace_bail(ir_function, "simd_fill:start");
-      }
       if (in->arguments[3].kind != IR_OPERAND_TEMP &&
           in->arguments[3].kind != IR_OPERAND_SYMBOL &&
           in->arguments[3].kind != IR_OPERAND_INT) {
@@ -2166,9 +2160,6 @@ static int mir_gate_fill_counter(const IRFunction *ir_function,
       }
     }
     if (!offset_zero) {
-      if (!wide) {
-        return mir_trace_bail(ir_function, "simd_fill:offset_width");
-      }
       if (in->arguments[4].kind != IR_OPERAND_TEMP &&
           in->arguments[4].kind != IR_OPERAND_SYMBOL &&
           in->arguments[4].kind != IR_OPERAND_INT) {

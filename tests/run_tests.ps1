@@ -13409,6 +13409,31 @@ foreach ($variant in @("debug", "release")) {
     Write-CaseResult -Name "index_address_width_$variant" -Passed $false -Reason $_.Exception.Message
   }
 }
+foreach ($variant in @("debug", "opt", "release")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "fill_int32_offset_$variant.exe"
+    $buildArgs = @("--build")
+    if ($variant -eq "opt") { $buildArgs += "-O" }
+    if ($variant -eq "release") { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_fill_int32_offset.mettle", "-o", $exePath)
+
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+
+    if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
+    if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "a fill loop with an int32 index offset went wrong in $variant (exit $LASTEXITCODE)"
+    }
+    Write-CaseResult -Name "fill_int32_offset_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "fill_int32_offset_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
 
 # --assume-no-signed-overflow drops the wrap-around truncation after signed
 # narrow arithmetic (docs/types.md, Integers). A program whose signed
