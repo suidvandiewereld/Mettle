@@ -28,6 +28,17 @@ typedef struct GpuDetectResult {
 
 const GpuDetectResult *gpu_detect_local(void);
 
+typedef struct GpuMetalDetect {
+  int available;
+  int metal3;
+  int unified_memory;
+  int threadgroup_memory;
+  long long working_set;
+  char name[128];
+} GpuMetalDetect;
+
+const GpuMetalDetect *gpu_detect_metal(void);
+
 int gpu_detect_ptx_target(int device, char *out, size_t out_size);
 
 const char *gpu_detect_ptxas_targets(void);

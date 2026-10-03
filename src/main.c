@@ -3637,10 +3637,30 @@ static void gpu_info_format_memory(long long bytes, char *out, size_t out_size) 
   snprintf(out, out_size, "%lld.%lld GiB", tenths / 10, tenths % 10);
 }
 
+static void report_metal_info(const GpuMetalDetect *metal) {
+  char memory[32];
+  gpu_info_format_memory(metal->working_set, memory, sizeof(memory));
+  printf("  Metal device      %s\n", metal->name[0] ? metal->name : "(unnamed)");
+  printf("      Metal 3              %s\n",
+         metal->metal3 ? "yes" : "no (Mettle kernels need Metal 3)");
+  printf("      threadgroup memory   %d KiB\n", metal->threadgroup_memory / 1024);
+  printf("      working set          %s%s\n", memory,
+         metal->unified_memory ? " (unified with host)" : "");
+  printf("  --emit-metal builds kernels for it; the runtime compiles them at\n"
+         "  load time (Metal 3.2 by default).\n");
+}
+
 static int report_gpu_info(const char *default_target, int isa_major,
                            int isa_minor) {
   const GpuDetectResult *local = gpu_detect_local();
+  const GpuMetalDetect *metal = gpu_detect_metal();
   printf("Mettle GPU target report\n");
+  if (metal->available) {
+    report_metal_info(metal);
+    if (!local->available) {
+      return metal->metal3 ? 0 : 1;
+    }
+  }
 
   if (!local->available) {
     printf("  Local devices     none (%s)\n", local->source);

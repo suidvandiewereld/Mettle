@@ -216,6 +216,74 @@ static int gpu_detect_via_nvidia_smi(GpuDetectResult *out) {
   return 1;
 }
 
+#if defined(__APPLE__)
+#include <dlfcn.h>
+
+typedef void *(*GpuSelRegister)(const char *);
+typedef void *(*GpuCreateDevice)(void);
+typedef void *(*GpuPoolPush)(void);
+typedef void (*GpuPoolPop)(void *);
+
+static int gpu_detect_metal_device(GpuMetalDetect *out) {
+  void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
+  void *metal =
+      dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
+  GpuSelRegister sel;
+  GpuCreateDevice create;
+  GpuPoolPush push;
+  GpuPoolPop pop;
+  void *send;
+  void *device;
+  void *pool;
+  void *name;
+  const char *text;
+  if (!objc || !metal) return 0;
+  sel = (GpuSelRegister)dlsym(objc, "sel_registerName");
+  push = (GpuPoolPush)dlsym(objc, "objc_autoreleasePoolPush");
+  pop = (GpuPoolPop)dlsym(objc, "objc_autoreleasePoolPop");
+  send = dlsym(objc, "objc_msgSend");
+  create = (GpuCreateDevice)dlsym(metal, "MTLCreateSystemDefaultDevice");
+  if (!sel || !push || !pop || !send || !create) return 0;
+  pool = push();
+  device = create();
+  if (!device) {
+    pop(pool);
+    return 0;
+  }
+  name = ((void *(*)(void *, void *))send)(device, sel("name"));
+  text = name ? ((const char *(*)(void *, void *))send)(name, sel("UTF8String"))
+              : NULL;
+  snprintf(out->name, sizeof(out->name), "%s", text ? text : "");
+  out->metal3 = ((signed char (*)(void *, void *, long))send)(
+                    device, sel("supportsFamily:"), 5001L) != 0;
+  out->unified_memory =
+      ((signed char (*)(void *, void *))send)(device, sel("hasUnifiedMemory")) !=
+      0;
+  out->working_set = (long long)((unsigned long long (*)(void *, void *))send)(
+      device, sel("recommendedMaxWorkingSetSize"));
+  out->threadgroup_memory = (int)((unsigned long (*)(void *, void *))send)(
+      device, sel("maxThreadgroupMemoryLength"));
+  ((void (*)(void *, void *))send)(device, sel("release"));
+  pop(pool);
+  out->available = 1;
+  return 1;
+}
+#endif
+
+const GpuMetalDetect *gpu_detect_metal(void) {
+  static GpuMetalDetect cached;
+  static int done = 0;
+  if (done) return &cached;
+  done = 1;
+  memset(&cached, 0, sizeof(cached));
+#if defined(__APPLE__)
+  if (!gpu_detect_metal_device(&cached)) {
+    memset(&cached, 0, sizeof(cached));
+  }
+#endif
+  return &cached;
+}
+
 const GpuDetectResult *gpu_detect_local(void) {
   static GpuDetectResult cached;
   static int done = 0;
