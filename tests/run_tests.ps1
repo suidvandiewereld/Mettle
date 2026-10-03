@@ -14753,6 +14753,148 @@ catch {
   Write-CaseResult -Name "arm64_encoder" -Passed $false -Reason $_.Exception.Message
 }
 
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $structureExe = "bin/gpu_structure_test.exe"
+  & gcc -Wall -Wextra -std=c99 -O2 -Isrc tests/gpu_structure_test.c src/codegen/gpu_structure.c -o $structureExe
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to compile the GPU control-flow structurizer test"
+  }
+  $structureOutput = & $structureExe 20000 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $structureOutput -notmatch " 0 failures") {
+    throw "GPU control-flow structurizer test failed:`n$structureOutput"
+  }
+  Write-CaseResult -Name "gpu_structure" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "gpu_structure" -Passed $false -Reason $_.Exception.Message
+}
+
+$script:MetalAccepted = @(
+  "examples/gpu_vadd/vadd_kernel.mettle",
+  "examples/gpu_inference/decode_kernels.mettle",
+  "tests/gpu/address_spaces.mettle",
+  "tests/gpu/address_spaces_generic.mettle",
+  "tests/gpu/async_copy.mettle",
+  "tests/gpu/atomic_u32_profile.mettle",
+  "tests/gpu/auto_staging.mettle",
+  "tests/gpu/bit_intrinsics.mettle",
+  "tests/gpu/compute_kernels.mettle",
+  "tests/gpu/device_decorators.mettle",
+  "tests/gpu/generic_shared_helper.mettle",
+  "tests/gpu/layouts.mettle",
+  "tests/gpu/native_indices.mettle",
+  "tests/gpu/qwen3_typed_kernels.mettle",
+  "tests/gpu/record_kernels.mettle",
+  "tests/gpu/subgroup_shuffle.mettle",
+  "tests/gpu/tensor_block_scaled_i8.mettle",
+  "tests/gpu/tensor_chain.mettle",
+  "tests/gpu/tensor_loop.mettle",
+  "tests/gpu/tensor_pipeline.mettle",
+  "tests/gpu/u16_typed_loads.mettle",
+  "tests/gpu/uniform_collectives.mettle",
+  "tests/gpu/vector_and_packed.mettle",
+  "tests/gpu/warp_row_early_return.mettle"
+)
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $metalDir = Join-Path $scratchRoot "metal_emit"
+  New-Item -ItemType Directory -Force $metalDir | Out-Null
+  foreach ($source in $script:MetalAccepted) {
+    $out = Join-Path $metalDir (([IO.Path]::GetFileNameWithoutExtension($source)) + ".metal")
+    $log = & $CompilerPath -O --emit-metal $source -o $out 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $out)) {
+      throw "--emit-metal rejected ${source}:`n$log"
+    }
+    $text = Get-Content -Raw $out
+    if ($text -match "\bdouble\b") {
+      throw "--emit-metal wrote a double into $out"
+    }
+  }
+  $refused = @(
+    @{ Source = "tests/gpu/atomic_kernels.mettle"; Message = "no 64-bit atomic" },
+    @{ Source = "tests/gpu/ptx_inline_asm_operands.mettle"; Message = "inline PTX" },
+    @{ Source = "tests/gpu/ptx_async_predicate.mettle"; Message = "transaction-barrier" }
+  )
+  foreach ($case in $refused) {
+    $out = Join-Path $metalDir "refused.metal"
+    $log = & $CompilerPath -O --emit-metal $case.Source -o $out 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      throw "--emit-metal accepted $($case.Source), which Metal cannot express"
+    }
+    if ($log -notmatch [regex]::Escape($case.Message)) {
+      throw "--emit-metal refused $($case.Source) without naming '$($case.Message)':`n$log"
+    }
+  }
+  $expectations = @(
+    @{ File = "vadd_kernel.metal"; Pattern = "max_total_threads_per_threadgroup\(256\)" },
+    @{ File = "vadd_kernel.metal"; Pattern = "#pragma METAL fp math_mode\(safe\)" },
+    @{ File = "tensor_chain.metal"; Pattern = "simdgroup_multiply_accumulate" },
+    @{ File = "tensor_block_scaled_i8.metal"; Pattern = "12582912\.0f" },
+    @{ File = "subgroup_shuffle.metal"; Pattern = "simd_active_threads_mask" },
+    @{ File = "record_kernels.metal"; Pattern = "static_assert\(sizeof\(" },
+    @{ File = "atomic_u32_profile.metal"; Pattern = "coherent\(device\) device atomic_uint\*" }
+  )
+  foreach ($expect in $expectations) {
+    $text = Get-Content -Raw (Join-Path $metalDir $expect.File)
+    if ($text -notmatch $expect.Pattern) {
+      throw "$($expect.File) is missing $($expect.Pattern)"
+    }
+  }
+  $checked = Join-Path $metalDir "kernel_diagnostics.metal"
+  $log = & $CompilerPath -O --gpu-checks --emit-metal tests/gpu/kernel_diagnostics.mettle -o $checked 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or (Get-Content -Raw $checked) -notmatch "os_log_default\.log_fault") {
+    throw "--gpu-checks did not lower gpu_assert to Metal logging:`n$log"
+  }
+  Write-CaseResult -Name "metal_emit" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "metal_emit" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $metalDir = Join-Path $scratchRoot "metal_emit"
+  $metalTool = $null
+  $metalPrefix = @()
+  if ($env:METTLE_METAL_COMPILER) {
+    $metalTool = $env:METTLE_METAL_COMPILER
+  }
+  elseif (-not $script:OnWindows -and (Get-Command xcrun -ErrorAction SilentlyContinue)) {
+    $metalTool = "xcrun"
+    $metalPrefix = @("-sdk", "macosx", "metal")
+  }
+  elseif (Get-Command metal -ErrorAction SilentlyContinue) {
+    $metalTool = (Get-Command metal).Source
+  }
+  if (-not $metalTool) {
+    Write-CaseResult -Name "metal_compiler" -Passed $true -Reason "skipped: no Metal compiler (set METTLE_METAL_COMPILER or install Apple's Metal tools)"
+  }
+  else {
+    $files = Get-ChildItem (Join-Path $metalDir "*.metal") | Where-Object { $_.Name -ne "refused.metal" }
+    if ($files.Count -eq 0) { throw "metal_emit produced no files to compile" }
+    foreach ($file in $files) {
+      $air = [IO.Path]::ChangeExtension($file.FullName, ".air")
+      $log = & $metalTool @metalPrefix -std=metal3.2 -c $file.FullName -o $air 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) {
+        throw "Apple's Metal compiler rejected $($file.Name):`n$log"
+      }
+    }
+    Write-CaseResult -Name "metal_compiler" -Passed $true -Reason "$($files.Count) files"
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "metal_compiler" -Passed $false -Reason $_.Exception.Message
+}
+
+
 # AArch64 emit-layer + execution gate. Emits complete AAPCS64 functions
 # (prologue/body/epilogue with branch fixups), validates each by decoding every
 # word with the from-scratch disassembler, and writes them as minimal static
