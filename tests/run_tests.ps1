@@ -14999,8 +14999,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "emitting the Metal host program failed:`n$log" }
     $interpSources = Get-ChildItem tests/metal -Filter "msl_interp*.c" |
       Where-Object { $_.Name -notlike "*_test*" } | ForEach-Object { $_.FullName }
-    $log = & $hostGcc.Source -std=c99 -O2 -o $hostExe $hostObj src/runtime/metal_runtime.c `
-      tests/metal/metal_provider_interp.c @interpSources -lm 2>&1 | Out-String
+    $hostLinkArgs = @("-std=c99", "-O2", "-o", $hostExe, $hostObj, "src/runtime/metal_runtime.c",
+                      "tests/metal/metal_provider_interp.c") + $interpSources + @("-lm")
+    if (-not $script:OnWindows) { $hostLinkArgs += "-no-pie" }
+    $log = & $hostGcc.Source @hostLinkArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "linking the Metal host program failed:`n$log" }
     $env:METTLE_METAL_HOST_LIBRARY = $hostLib
     try {
