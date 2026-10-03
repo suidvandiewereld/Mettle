@@ -1,7 +1,7 @@
 # Metal test apparatus
 
 No Mac is attached to this project yet, so the Metal backend's execution
-evidence comes from two pieces here:
+evidence comes from these pieces:
 
 - `msl_interp.c` / `msl_interp.h`: a CPU interpreter for the Metal Shading
   Language dialect `mettle --emit-metal` produces. It is strict: it refuses
@@ -9,6 +9,12 @@ evidence comes from two pieces here:
 - `metal_harness.c`: contracts with CPU oracles. Its default backend runs the
   emitted MSL through `msl_interp`; on macOS the same contracts run on the
   GPU through the Metal framework.
+
+- `metal_host_main.mettle` with `metal_host_kernels.mettle`: a Mettle host
+  program built with `--gpu-provider=metal`. Linked with
+  `src/runtime/metal_runtime.c` and `metal_provider_interp.c`, which runs the
+  interpreter in place of a GPU, it checks argument packing, grids, the
+  workgroup arena, and graph capture and replay end to end.
 
 `msl_run.c` is the command-line front end: `msl_run --check file.metal`
 parses and type-checks every function; `msl_run --selftest` runs the
