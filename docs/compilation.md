@@ -35,6 +35,7 @@ the backend one program, so you never compile imported files separately.
 | `--emit-arm64-obj` | An AArch64 relocatable object. The default on an ARM host. |
 | `--emit-ptx` | Declared kernels as NVIDIA PTX. |
 | `--emit-spirv` | Declared kernels as OpenCL SPIR-V. |
+| `--emit-metal` | Declared kernels as Metal Shading Language for Apple GPUs. |
 | `--emit-flat <file>` | A raw image with no container, laid out at `--image-base`. |
 
 [Linker and build pipelines](linker-build-pipelines.md) covers which linker

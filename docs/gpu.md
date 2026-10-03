@@ -1,9 +1,10 @@
 # GPU offload
 
-libmtlc has two GPU code generators, NVIDIA PTX and SPIR-V (OpenCL),
-both emitted from the same IR with no `nvcc`, no `cudart`, and no LLVM. Through
-the reference frontend, kernels are written in Mettle, compiled to a `.ptx`
-module with `--emit-ptx` (or a `.spv` module with `--emit-spirv`), and, for the
+libmtlc has three GPU code generators, NVIDIA PTX, SPIR-V (OpenCL) and Metal
+Shading Language for Apple GPUs, all emitted from the same IR with no `nvcc`,
+no `cudart`, and no LLVM. Through the reference frontend, kernels are written
+in Mettle, compiled to a `.ptx` module with `--emit-ptx` (a `.spv` module with
+`--emit-spirv`, a `.metal` file with `--emit-metal`), and, for the
 CUDA path, launched from a normal Mettle host program via the
 [`std/gpu`](standard-library.md#stdgpu) bindings and the `dispatch` statement.
 (A frontend driving libmtlc directly reaches the same generators through
@@ -2100,6 +2101,83 @@ Control flow maps directly onto SPIR-V basic blocks (`OpBranch` /
 structured-control-flow rules (`OpSelectionMerge`/`OpLoopMerge`) are mandated
 only by the `Shader` capability, so `Kernel` (OpenCL) modules may branch freely,
 which `spirv-val --target-env opencl2.0` confirms.
+
+## Metal (Apple GPU) target
+
+`--emit-metal` compiles the same kernels to Metal Shading Language source for
+Apple GPUs. The Metal runtime compiles that source when a host program loads
+it (`newLibraryWithSource`), the way the CUDA driver compiles PTX.
+
+```bash
+mettle -O --emit-metal kernels.mettle -o kernels.metal
+mettle -O --emit-metal --metal-version=4.1 kernels.mettle -o kernels.metal
+```
+
+`--metal-version` takes 3.1, 3.2 (the default, macOS 15), 4.0 or 4.1.
+`--metal-fast-math` lets Metal reassociate and contract float arithmetic. By
+default the module starts with `#pragma METAL fp math_mode(safe)` and
+`fp contract(off)`, and the math built-ins call the `precise::` forms, so
+`sqrtf` is correctly rounded. `--gpu-checks` turns a failed `gpu_assert` into
+a fault in Metal's log.
+
+### What a kernel becomes
+
+Every kernel parameter goes into one argument struct at `buffer(0)`, laid out
+the way the CUDA parameter buffer is: each field at its natural alignment,
+pointers as 64-bit GPU addresses (`MTLBuffer.gpuAddress` plus an offset),
+records as their own bytes. The host makes every allocation resident before a
+dispatch. The launch-sized workgroup arena is `threadgroup(0)`, sized with
+`setThreadgroupMemoryLength`. `kernel(block = N)` becomes
+`[[max_total_threads_per_threadgroup(N)]]`.
+
+| Mettle | Metal |
+|---|---|
+| `thread`, `block`, `block_dim`, `grid_dim` | `thread_position_in_threadgroup`, `threadgroup_position_in_grid`, `threads_per_threadgroup`, `threadgroups_per_grid` |
+| `subgroup_local_id()`, `subgroup_size()` | `thread_index_in_simdgroup`, `threads_per_simdgroup` |
+| `workgroup` / `private` arrays | `threadgroup` / `thread` arrays |
+| `barrier(workgroup, ...)` | `threadgroup_barrier` with the matching memory flags |
+| subgroup broadcast, reductions, scans, ballot, any, all | `simd_broadcast`, `simd_sum`, `simd_min`, `simd_max`, `simd_prefix_*_sum`, `simd_ballot`, `simd_any`, `simd_all` |
+| `subgroup_shuffle` | `simd_shuffle`; an inactive or out-of-range source lane returns the caller's value |
+| uint32 atomics | `atomic_uint`; ordered forms use `atomic_thread_fence` on Metal 3.2 and native orders on 4.1 |
+| `async_copy_workgroup` | ordinary copies, in order |
+| `tensor_mma` with f16, bf16 or f32 inputs | `simdgroup_matrix` 8x8 tiles |
+| block-scaled int8 x int8/int4 `tensor_mma` | exact integer dot products in scalar code, the CPU grid runner's rounding sequence |
+| `gpu_print`, `gpu_print_i32`, ... | `os_log_default.log`, Metal 3.2 |
+
+Metal has no `goto`, so the compiler rebuilds structured `if`, `while` and
+`switch` blocks from the kernel's control flow; ordinary loops and branches
+come back as written.
+
+### What Metal does not have
+
+Each of these is refused with a message naming the kernel and the line:
+
+- `float64`. Apple GPUs have no double. A fractional literal like `0.5` is
+  float64, so `x * 0.5` with `x: float32` computes in float64. When every
+  operand is a float32 value or a literal float32 holds exactly, and the
+  result is only rounded back to float32, the compiler computes it in float32
+  and gets the same bits. A compare of a float32 against a float64 literal is
+  rewritten exactly too. Anything else is refused; write `(float32)0.1`.
+- 64-bit atomic read-modify-write. Metal has only `atomic_max`/`atomic_min`
+  on `atomic_ulong`, and they return nothing.
+- Inline PTX, transaction barriers and tensor maps (`mbarrier_*`,
+  `tma_load_2d`).
+- `tensor_matmul`, `tensor_epilogue`, `tensor_transfer`, register tiles, and
+  `tensor_mma` in FP8/FP6/FP4, sparse or TF32 form.
+- A pointer that holds workgroup memory on one path and device memory on
+  another. Metal has no generic address space; a helper that takes a plain
+  `T*` is compiled once per address space it is called with.
+
+### Testing without a Mac
+
+`tests/metal/metal_harness.c` runs 25 contracts with CPU oracles. On Windows
+and Linux it executes the emitted MSL in `tests/metal/msl_interp.c`, a strict
+interpreter that also refuses anything MSL leaves undefined (signed overflow,
+oversized shifts, misaligned or out-of-bounds access). Built on macOS with
+`-DMETAL_HARNESS_NATIVE -framework Metal -framework Foundation -lobjc`, the
+same contracts run on the GPU. When Apple's Metal compiler is installed
+(`METTLE_METAL_COMPILER`, `xcrun`, or `metal` on PATH), the suite compiles
+every emitted file with it.
 
 ## Notes and limits
 
