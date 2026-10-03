@@ -493,8 +493,18 @@ jobs:
           ./bin/mettle --build tests/test_parallel_loop.mettle -o /tmp/parallel
           /tmp/parallel
 
+      # GitHub's hosted macOS runners expose a paravirtual GPU without Metal 3,
+      # so the steps that run kernels only run where the device has it.
       - name: Report the GPU
-        run: ./bin/mettle --gpu-info || true
+        id: gpu
+        run: |
+          ./bin/mettle --gpu-info | tee /tmp/gpu-info.txt || true
+          if grep -Eq 'Metal 3 +yes' /tmp/gpu-info.txt; then
+            echo "metal3=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "metal3=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Metal 3 device on this runner; skipping the GPU steps"
+          fi
 
       - name: Apple's Metal compiler accepts every emitted kernel file
         run: |
@@ -509,6 +519,7 @@ jobs:
           done
 
       - name: Metal contracts on the GPU
+        if: steps.gpu.outputs.metal3 == 'true'
         run: |
           cc -std=c99 -O2 -DMETAL_HARNESS_NATIVE tests/metal/metal_harness.c \
             src/runtime/metal_provider.c -framework Metal -framework Foundation \
@@ -516,11 +527,13 @@ jobs:
           /tmp/metal_harness /tmp/metal/metal_kernels.metal
 
       - name: A Mettle host program drives Metal
+        if: steps.gpu.outputs.metal3 == 'true'
         run: |
           ./bin/mettle --build tests/metal/metal_host_main.mettle -o /tmp/metal_host
           METTLE_METAL_HOST_LIBRARY=/tmp/metal/metal_host_kernels.metal /tmp/metal_host
 
       - name: The decode example on Metal
+        if: steps.gpu.outputs.metal3 == 'true'
         working-directory: examples/gpu_inference
         run: |
           ../../bin/mettle -O --emit-metal decode_kernels.mettle -o decode_kernels.metal \
