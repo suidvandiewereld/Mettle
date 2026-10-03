@@ -74,6 +74,10 @@ environment variables:
 | `METTLE_METAL_SYNC=1` | Wait after every launch, to find the one that failed. |
 | `METTLE_METAL_VERSION=3.1` | The Metal language version the runtime compiles with; 3.2 by default. |
 
+`gpu_print` and a failed `gpu_assert` write through `os_log`, so on a Mac
+their output lands in the system log rather than on stdout; read it with
+`log stream --predicate 'process == "app"'` or in Console.
+
 Mettle needs a Metal 3 GPU, because kernels address device memory through
 64-bit GPU addresses: any Apple silicon Mac, or an Intel Mac with a recent
 AMD GPU. Metal 3.2, the default language version, needs macOS 15.
