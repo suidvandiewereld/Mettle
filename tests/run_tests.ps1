@@ -14854,6 +14854,7 @@ try {
     @{ File = "vadd_kernel.metal"; Pattern = "max_total_threads_per_threadgroup\(256\)" },
     @{ File = "vadd_kernel.metal"; Pattern = "#pragma METAL fp math_mode\(safe\)" },
     @{ File = "tensor_chain.metal"; Pattern = "simdgroup_multiply_accumulate" },
+    @{ File = "tensor_loop.metal"; Pattern = "simdgroup_store\(mtl_res_\d+\[" },
     @{ File = "tensor_block_scaled_i8.metal"; Pattern = "12582912\.0f" },
     @{ File = "subgroup_shuffle.metal"; Pattern = "simd_active_threads_mask" },
     @{ File = "record_kernels.metal"; Pattern = "static_assert\(sizeof\(" },

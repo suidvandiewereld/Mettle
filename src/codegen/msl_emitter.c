@@ -156,6 +156,8 @@ typedef struct MslFn {
   Sb out;
   int indent;
   size_t temp_counter;
+  uint32_t *resident;
+  size_t resident_count;
 } MslFn;
 
 typedef struct MslSpec {
@@ -1281,6 +1283,7 @@ static void fn_free(MslFn *fn) {
   }
   free(fn->vars);
   free(fn->blocks);
+  free(fn->resident);
   sb_free(&fn->out);
   free(fn);
 }
@@ -3430,9 +3433,21 @@ static const char *matrix_type(MtlcTensorElement element) {
   }
 }
 
+static int resident_group(const MslFn *fn, uint32_t group) {
+  for (size_t i = 0; i < fn->resident_count; i++) {
+    if (fn->resident[i] == group) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
-                                 const MslMmaOperands *ops, size_t id) {
+                                 const MslMmaOperands *ops, size_t id,
+                                 int role, uint32_t group) {
   unsigned mb = desc->m / 8u, nb = desc->n / 8u, kb = desc->k / 8u;
+  int resident = role != IR_TENSOR_RESIDENCY_NONE;
+  char acc[64];
   const char *in_type = mma_element_type(desc->a_element);
   const char *acc_type = mma_element_type(desc->accumulator_element);
   const char *out_type = mma_element_type(desc->result_element);
@@ -3446,23 +3461,30 @@ static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
   int c_rows = desc->c_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR;
   int d_rows = desc->d_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR;
   char ptr[4800], row[64], col[64];
+  if (resident) {
+    snprintf(acc, sizeof(acc), "mtl_res_%u", (unsigned)group);
+  } else {
+    snprintf(acc, sizeof(acc), "mtl_acc_%zu", id);
+  }
   line(fn, "{");
   fn->indent++;
-  line(fn, "%s mtl_acc_%zu[%u];", acc_matrix, id, mb * nb);
+  if (!resident) {
+    line(fn, "%s %s[%u];", acc_matrix, acc, mb * nb);
+  }
   line(fn, "%s mtl_ma_%zu[%u];", in_matrix, id, mb);
   line(fn, "%s mtl_mb_%zu[%u];", in_matrix, id, nb);
-  for (unsigned i = 0; i < mb; i++) {
+  for (unsigned i = 0; i < mb && role != IR_TENSOR_RESIDENCY_UPDATE; i++) {
     for (unsigned j = 0; j < nb; j++) {
       if (ops->c_zero) {
-        line(fn, "mtl_acc_%zu[%u] = make_filled_simdgroup_matrix<%s, 8, 8>((%s)0);",
-             id, i * nb + j, acc_type, acc_type);
+        line(fn, "%s[%u] = make_filled_simdgroup_matrix<%s, 8, 8>((%s)0);",
+             acc, i * nb + j, acc_type, acc_type);
         continue;
       }
       snprintf(row, sizeof(row), "%uu", i * 8u);
       snprintf(col, sizeof(col), "%uu", j * 8u);
       mma_block_pointer(fn, ops->pointer[2], ops->space[2], acc_type, acc_size,
                         ops->stride[2], c_rows, row, col, ptr, sizeof(ptr));
-      line(fn, "simdgroup_load(mtl_acc_%zu[%u], %s, %s, ulong2(0ul, 0ul), %s);", id,
+      line(fn, "simdgroup_load(%s[%u], %s, %s, ulong2(0ul, 0ul), %s);", acc,
            i * nb + j, ptr, ops->stride[2], c_rows ? "false" : "true");
     }
   }
@@ -3496,9 +3518,9 @@ static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
     for (unsigned i = 0; i < mb; i++) {
       for (unsigned j = 0; j < nb; j++) {
         line(fn,
-             "simdgroup_multiply_accumulate(mtl_acc_%zu[%u], mtl_ma_%zu[%u], "
-             "mtl_mb_%zu[%u], mtl_acc_%zu[%u]);",
-             id, i * nb + j, id, i, id, j, id, i * nb + j);
+             "simdgroup_multiply_accumulate(%s[%u], mtl_ma_%zu[%u], "
+             "mtl_mb_%zu[%u], %s[%u]);",
+             acc, i * nb + j, id, i, id, j, acc, i * nb + j);
       }
     }
   }
@@ -3513,18 +3535,69 @@ static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
               "format",
               fn_name(fn));
   }
+  for (unsigned i = 0; i < mb && !resident; i++) {
+    for (unsigned j = 0; j < nb; j++) {
+      snprintf(row, sizeof(row), "%uu", i * 8u);
+      snprintf(col, sizeof(col), "%uu", j * 8u);
+      mma_block_pointer(fn, ops->pointer[3], ops->space[3], out_type, out_size,
+                        ops->stride[3], d_rows, row, col, ptr, sizeof(ptr));
+      line(fn, "simdgroup_store(%s[%u], %s, %s, ulong2(0ul, 0ul), %s);", acc,
+           i * nb + j, ptr, ops->stride[3], d_rows ? "false" : "true");
+    }
+  }
+  fn->indent--;
+  line(fn, "}");
+}
+
+static void emit_mma_resident_commit(MslFn *fn, const MtlcTensorMmaDesc *desc,
+                                     const MslMmaOperands *ops,
+                                     uint32_t group) {
+  unsigned mb = desc->m / 8u, nb = desc->n / 8u;
+  const char *out_type = mma_element_type(desc->result_element);
+  size_t out_size = mma_element_size(desc->result_element);
+  int d_rows = desc->d_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR;
+  char ptr[4800], row[64], col[64];
   for (unsigned i = 0; i < mb; i++) {
     for (unsigned j = 0; j < nb; j++) {
       snprintf(row, sizeof(row), "%uu", i * 8u);
       snprintf(col, sizeof(col), "%uu", j * 8u);
       mma_block_pointer(fn, ops->pointer[3], ops->space[3], out_type, out_size,
                         ops->stride[3], d_rows, row, col, ptr, sizeof(ptr));
-      line(fn, "simdgroup_store(mtl_acc_%zu[%u], %s, %s, ulong2(0ul, 0ul), %s);", id,
-           i * nb + j, ptr, ops->stride[3], d_rows ? "false" : "true");
+      line(fn, "simdgroup_store(mtl_res_%u[%u], %s, %s, ulong2(0ul, 0ul), %s);",
+           (unsigned)group, i * nb + j, ptr, ops->stride[3],
+           d_rows ? "false" : "true");
     }
   }
-  fn->indent--;
-  line(fn, "}");
+}
+
+static void declare_residency(MslFn *fn) {
+  const IRFunction *func = fn->func;
+  for (size_t i = 0; i < func->instruction_count && !fn->m->error; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    const MtlcTensorMmaDesc *desc;
+    uint32_t *grown;
+    if (in->op != IR_OP_TENSOR_MMA ||
+        in->tensor_residency_role != IR_TENSOR_RESIDENCY_START ||
+        in->tensor_residency_id == 0 ||
+        ir_tensor_mma_instruction_count(in) != 1 ||
+        resident_group(fn, in->tensor_residency_id)) {
+      continue;
+    }
+    desc = &IR_TENSOR_MMA(in);
+    if (!mma_native_supported(fn, desc) ||
+        desc->result_element != desc->accumulator_element) {
+      continue;
+    }
+    grown = realloc(fn->resident, (fn->resident_count + 1) * sizeof(uint32_t));
+    if (!grown) {
+      mod_error(fn->m, "Metal: out of memory");
+      return;
+    }
+    fn->resident = grown;
+    fn->resident[fn->resident_count++] = in->tensor_residency_id;
+    line(fn, "%s mtl_res_%u[%u];", matrix_type(desc->accumulator_element),
+         (unsigned)in->tensor_residency_id, (desc->m / 8u) * (desc->n / 8u));
+  }
 }
 
 static int mma_scaled_supported(const MtlcTensorMmaDesc *desc) {
@@ -3721,11 +3794,18 @@ static void emit_tensor_mma(MslFn *fn, const IRInstruction *in) {
   for (size_t tile = 0; tile < tiles && !fn->m->error; tile++) {
     MslMmaOperands ops;
     size_t id = fn->temp_counter++;
+    int role = IR_TENSOR_RESIDENCY_NONE;
     if (!mma_collect(fn, in, tile * per_tile, per_tile, &ops)) {
       return;
     }
+    if (native && tiles == 1 &&
+        (in->tensor_residency_role == IR_TENSOR_RESIDENCY_START ||
+         in->tensor_residency_role == IR_TENSOR_RESIDENCY_UPDATE) &&
+        resident_group(fn, in->tensor_residency_id)) {
+      role = (int)in->tensor_residency_role;
+    }
     if (native) {
-      emit_mma_native_tile(fn, desc, &ops, id);
+      emit_mma_native_tile(fn, desc, &ops, id, role, in->tensor_residency_id);
     } else {
       emit_mma_scaled_tile(fn, desc, &ops, id);
     }
@@ -3812,6 +3892,22 @@ static void emit_instruction(MslFn *fn, const IRInstruction *in,
     emit_tensor_mma(fn, in);
     return;
   case IR_OP_TENSOR_COMMIT:
+    if (resident_group(fn, in->tensor_residency_id)) {
+      MslMmaOperands ops;
+      size_t per_tile = ir_tensor_mma_operand_count(&IR_TENSOR_MMA(in));
+      if (!per_tile || in->argument_count < per_tile ||
+          !mma_collect(fn, in, 0, per_tile, &ops)) {
+        mod_error(fn->m, "Metal: malformed tensor commit in '%s'",
+                  fn_name(fn));
+        return;
+      }
+      line(fn, "simdgroup_barrier(mem_flags::mem_threadgroup | "
+               "mem_flags::mem_device);");
+      emit_mma_resident_commit(fn, &IR_TENSOR_MMA(in), &ops,
+                               in->tensor_residency_id);
+      line(fn, "simdgroup_barrier(mem_flags::mem_threadgroup | "
+               "mem_flags::mem_device);");
+    }
     return;
   case IR_OP_TENSOR_MATMUL:
   case IR_OP_TENSOR_EPILOGUE:
@@ -4351,6 +4447,7 @@ static void emit_body(MslFn *fn) {
     line(fn, "int mtl_exit = 0;");
   }
   declare_locals(fn);
+  declare_residency(fn);
   emit_seq(fn, structure.root);
   gpu_structure_free(&structure);
 }
