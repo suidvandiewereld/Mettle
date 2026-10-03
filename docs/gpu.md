@@ -2184,10 +2184,14 @@ mettle -O --build host.mettle -o host
 ```
 
 `--gpu-provider=metal` picks the Metal provider on another host, which is how
-the tests run it against the interpreter. Each launch commits its own command
-buffer and waits for it, so `gpu_sync`, streams and events have nothing to
-wait on; events record host time. Metal has one GPU per process, no managed
-memory (`gpu_managed_malloc` returns null) and no graph capture.
+the tests run it against the interpreter. Launches collect in one command
+buffer, with a buffer barrier between dispatches, and the buffer commits when
+the host next touches device memory: a copy, a free, `gpu_sync`, an event
+record, every 512 launches, and at exit. An error in a batch names its first
+and last kernel; `METTLE_METAL_SYNC=1` waits after every launch to find the
+one that failed. Streams are one ordered queue, and events record host time
+after waiting. Metal has one GPU per process, no managed memory
+(`gpu_managed_malloc` returns null) and no graph capture.
 
 A launch needs each argument's size and alignment to build the argument
 struct. `dispatch` appends them to the parameter table it passes the
