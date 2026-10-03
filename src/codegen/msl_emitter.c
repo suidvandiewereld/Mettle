@@ -168,6 +168,7 @@ typedef struct MslSpec {
   size_t *call_spec;
   size_t instruction_count;
   MslFn *fn;
+  int coherent;
 } MslSpec;
 
 typedef struct {
@@ -1301,7 +1302,8 @@ static void spec_name(MslMod *m, MslSpec *spec) {
     snprintf(spec->name, sizeof(spec->name), "%s", base);
     return;
   }
-  snprintf(spec->name, sizeof(spec->name), "mtl_fn_%s", base);
+  snprintf(spec->name, sizeof(spec->name), "mtl_fn_%s%s", base,
+           spec->coherent ? "_c" : "");
   for (size_t p = 0; p < spec->param_count; p++) {
     if (spec->param_space[p] == MS_TG || spec->param_space[p] == MS_THREAD) {
       generic = 1;
@@ -1323,11 +1325,13 @@ static void spec_name(MslMod *m, MslSpec *spec) {
 }
 
 static size_t find_or_add_spec(MslMod *m, size_t function_index,
-                               const MslSpace *spaces, size_t count) {
+                               const MslSpace *spaces, size_t count,
+                               int coherent) {
   MslSpec *spec;
   for (size_t i = 0; i < m->nspecs; i++) {
     MslSpec *s = &m->specs[i];
-    if (s->function_index != function_index || s->param_count != count) {
+    if (s->function_index != function_index || s->param_count != count ||
+        s->coherent != coherent) {
       continue;
     }
     if (count == 0 ||
@@ -1349,6 +1353,7 @@ static size_t find_or_add_spec(MslMod *m, size_t function_index,
   memset(spec, 0, sizeof(*spec));
   spec->function_index = function_index;
   spec->param_count = count;
+  spec->coherent = coherent;
   spec->param_space = calloc(count ? count : 1, sizeof(MslSpace));
   if (!spec->param_space) {
     mod_error(m, "Metal: out of memory");
@@ -1442,7 +1447,8 @@ static int discover_calls(MslMod *m, size_t spec_index) {
       }
     }
     target = find_or_add_spec(m, callee_index, spaces,
-                              callee->parameter_count);
+                              callee->parameter_count,
+                              m->specs[spec_index].coherent);
     free(spaces);
     if (target == SIZE_MAX) {
       return 0;
@@ -4543,25 +4549,55 @@ static void emit_prelude(MslMod *m, Sb *out) {
   }
 }
 
-static int module_needs_coherence(MslMod *m) {
-  for (size_t f = 0; f < m->program->function_count; f++) {
-    IRFunction *func = m->program->functions[f];
-    if (!func || !m->graph.reachable || !m->graph.reachable[f]) {
-      continue;
-    }
-    for (size_t i = 0; i < func->instruction_count; i++) {
-      const IRInstruction *in = &func->instructions[i];
-      if (in->op == IR_OP_CALL && ir_intrinsic_is_atomic(in->intrinsic) &&
-          in->memory_order != MTLC_MEMORY_ORDER_RELAXED &&
-          in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
-          (in->memory_scope == MTLC_MEMORY_SCOPE_DEVICE ||
-           in->memory_scope == MTLC_MEMORY_SCOPE_SYSTEM ||
-           in->memory_scope == MTLC_MEMORY_SCOPE_DEFAULT)) {
-        return 1;
-      }
+static int function_orders_device_memory(const IRFunction *func) {
+  for (size_t i = 0; i < func->instruction_count; i++) {
+    const IRInstruction *in = &func->instructions[i];
+    if (in->op == IR_OP_CALL && ir_intrinsic_is_atomic(in->intrinsic) &&
+        in->memory_order != MTLC_MEMORY_ORDER_RELAXED &&
+        in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
+        (in->memory_scope == MTLC_MEMORY_SCOPE_DEVICE ||
+         in->memory_scope == MTLC_MEMORY_SCOPE_SYSTEM ||
+         in->memory_scope == MTLC_MEMORY_SCOPE_DEFAULT)) {
+      return 1;
     }
   }
   return 0;
+}
+
+static unsigned char *coherence_by_function(MslMod *m) {
+  size_t count = m->program->function_count;
+  unsigned char *needs = calloc(count ? count : 1, 1);
+  int changed = 1;
+  if (!needs) {
+    mod_error(m, "Metal: out of memory");
+    return NULL;
+  }
+  for (size_t f = 0; f < count; f++) {
+    IRFunction *func = m->program->functions[f];
+    needs[f] = func && m->graph.reachable && m->graph.reachable[f] &&
+               function_orders_device_memory(func);
+  }
+  while (changed) {
+    changed = 0;
+    for (size_t f = 0; f < count; f++) {
+      IRFunction *func = m->program->functions[f];
+      if (!func || needs[f] || !m->graph.reachable || !m->graph.reachable[f]) {
+        continue;
+      }
+      for (size_t i = 0; i < func->instruction_count; i++) {
+        const IRInstruction *in = &func->instructions[i];
+        size_t callee = 0;
+        if (in->op == IR_OP_CALL && in->intrinsic == MTLC_INTRINSIC_NONE &&
+            lookup_function(m, in->text, &callee) && callee < count &&
+            needs[callee]) {
+          needs[f] = 1;
+          changed = 1;
+          break;
+        }
+      }
+    }
+  }
+  return needs;
 }
 
 void msl_emit_default_options(MslEmitOptions *options) {
@@ -4614,6 +4650,7 @@ int msl_emit_program(IRProgram *program, FILE *out,
   Sb kernels = {0};
   Sb protos = {0};
   Sb prelude = {0};
+  unsigned char *coherence = NULL;
   int ok;
   if (error) {
     *error = NULL;
@@ -4639,13 +4676,9 @@ int msl_emit_program(IRProgram *program, FILE *out,
     }
     return 0;
   }
-  m.coherent_device = module_needs_coherence(&m);
-  if (m.coherent_device && !version_at_least(&m, 3, 2)) {
-    mod_error(&m,
-              "Metal: device-scope ordered atomics need coherent device "
-              "memory, which starts at --metal-version=3.2");
-  }
-  for (size_t f = 0; f < program->function_count && !m.error; f++) {
+  coherence = coherence_by_function(&m);
+  for (size_t f = 0; f < program->function_count && coherence && !m.error;
+       f++) {
     IRFunction *func = program->functions[f];
     if (func && func->is_kernel && m.graph.reachable && m.graph.reachable[f]) {
       MslSpace *spaces = calloc(func->parameter_count + 1, sizeof(MslSpace));
@@ -4653,10 +4686,18 @@ int msl_emit_program(IRProgram *program, FILE *out,
         mod_error(&m, "Metal: out of memory");
         break;
       }
-      find_or_add_spec(&m, f, spaces, func->parameter_count);
+      if (coherence[f] && !version_at_least(&m, 3, 2)) {
+        mod_error(&m,
+                  "Metal: '%s' orders device memory with atomics, which "
+                  "needs coherent device memory; that starts at "
+                  "--metal-version=3.2",
+                  func->name);
+      }
+      find_or_add_spec(&m, f, spaces, func->parameter_count, coherence[f]);
       free(spaces);
     }
   }
+  free(coherence);
   if (!m.error) {
     analyze_all(&m);
   }
@@ -4670,6 +4711,7 @@ int msl_emit_program(IRProgram *program, FILE *out,
   }
   for (size_t s = 0; s < m.nspecs && !m.error; s++) {
     MslSpec *spec = &m.specs[s];
+    m.coherent_device = spec->coherent;
     if (spec->fn->func->is_kernel) {
       emit_kernel(&m, spec, &kernels);
     } else {

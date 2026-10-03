@@ -14798,6 +14798,7 @@ $script:MetalAccepted = @(
   "tests/gpu/address_spaces_generic.mettle",
   "tests/gpu/async_copy.mettle",
   "tests/gpu/atomic_u32_profile.mettle",
+  "tests/gpu/metal_coherence_scope.mettle",
   "tests/gpu/auto_staging.mettle",
   "tests/gpu/bit_intrinsics.mettle",
   "tests/gpu/compute_kernels.mettle",
@@ -14856,7 +14857,9 @@ try {
     @{ File = "tensor_block_scaled_i8.metal"; Pattern = "12582912\.0f" },
     @{ File = "subgroup_shuffle.metal"; Pattern = "simd_active_threads_mask" },
     @{ File = "record_kernels.metal"; Pattern = "static_assert\(sizeof\(" },
-    @{ File = "atomic_u32_profile.metal"; Pattern = "coherent\(device\) device atomic_uint\*" }
+    @{ File = "atomic_u32_profile.metal"; Pattern = "coherent\(device\) device atomic_uint\*" },
+    @{ File = "metal_coherence_scope.metal"; Pattern = "mtl_fn_bump_c\(coherent\(device\) device uchar\*" },
+    @{ File = "metal_coherence_scope.metal"; Pattern = "(?s)struct mtl_args_plain \{\s+device uint\* p0;" }
   )
   foreach ($expect in $expectations) {
     $text = Get-Content -Raw (Join-Path $metalDir $expect.File)

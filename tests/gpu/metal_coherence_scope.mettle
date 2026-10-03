@@ -1,0 +1,14 @@
+@noinline fn bump(p: uint32*, i: int32) {
+  p[i] = p[i] + (uint32)1;
+}
+
+kernel ordered(flags: uint32*, data: uint32*) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  bump(data, i);
+  atomic_fetch_add(flags, 0, (uint32)1, order: release, scope: device);
+}
+
+kernel plain(data: uint32*) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  bump(data, i);
+}
