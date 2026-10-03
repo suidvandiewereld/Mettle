@@ -72,7 +72,10 @@ frontend can drive instead. The documentation is organized the same way.
 
 ## GPU
 
-- [GPU offload](gpu.md): `kernel`, `dispatch`, and the PTX and SPIR-V targets.
+- [GPU offload](gpu.md): `kernel`, `dispatch`, and the PTX, SPIR-V and Metal
+  targets.
+- [macOS and Metal](macos.md): building on a Mac, Mac targets from other
+  machines, Metal from `std/gpu`, and what has run where.
 - [GPU architecture](gpu-architecture.md): the target matrix and the
   acceptance gates.
 

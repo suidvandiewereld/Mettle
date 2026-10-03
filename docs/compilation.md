@@ -48,10 +48,12 @@ runs for each combination. [GPU offload](gpu.md) covers the device targets.
 | `--target <triple>` | Compile for another machine. |
 | `--image-base <addr>` | Where the linked image loads, replacing the format's default. |
 
-The triples are `x86_64-windows`, `x86_64-linux`, `x86_64-none`,
-`aarch64-linux`, `aarch64-none`, `i386-none`, `i686-none`, and `i8086-none`. A
-trailing vendor or environment is accepted and ignored, so
-`x86_64-unknown-linux-gnu` selects `x86_64-linux`. The 16- and 32-bit targets
+The triples are `x86_64-windows`, `x86_64-linux`, `x86_64-macos`,
+`x86_64-none`, `aarch64-linux`, `aarch64-macos`, `aarch64-none`, `i386-none`,
+`i686-none`, and `i8086-none`. A trailing vendor or environment is accepted and
+ignored, so `x86_64-unknown-linux-gnu` selects `x86_64-linux`, and the Apple
+spellings `arm64-apple-macos14` and `aarch64-apple-darwin` select
+`aarch64-macos`. The macOS triples emit Mach-O; see [macOS and Metal](macos.md). The 16- and 32-bit targets
 emit a flat image only.
 
 `--target` emits an object for the named machine; it does not link one.
