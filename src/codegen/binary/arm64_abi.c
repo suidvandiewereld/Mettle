@@ -123,6 +123,14 @@ int arm64_reg_is_allocatable(Arm64Reg r) {
 
 int arm64_compute_arg_layout(const int *is_float, int count,
                              Arm64ArgLocation *out, int *stack_bytes_out) {
+  return arm64_compute_arg_layout_packed(is_float, NULL, count, out,
+                                         stack_bytes_out);
+}
+
+int arm64_compute_arg_layout_packed(const int *is_float,
+                                    const int *stack_sizes, int count,
+                                    Arm64ArgLocation *out,
+                                    int *stack_bytes_out) {
   if (count < 0 || (count > 0 && (!is_float || !out))) {
     return 0;
   }
@@ -149,12 +157,20 @@ int arm64_compute_arg_layout(const int *is_float, int count,
         continue;
       }
     }
-    loc->kind = ARM64_ARG_ON_STACK;
-    loc->reg = ARM64_SP;
-    loc->stack_offset = stack_cursor;
-    stack_cursor += abi->stack_slot_bytes;
+    {
+      int size = stack_sizes ? stack_sizes[i] : abi->stack_slot_bytes;
+      if (size != 1 && size != 2 && size != 4) {
+        size = abi->stack_slot_bytes;
+      }
+      stack_cursor = (stack_cursor + size - 1) / size * size;
+      loc->kind = ARM64_ARG_ON_STACK;
+      loc->reg = ARM64_SP;
+      loc->stack_offset = stack_cursor;
+      stack_cursor += size;
+    }
   }
 
+  stack_cursor = (stack_cursor + 7) / 8 * 8;
   if (stack_bytes_out) {
     *stack_bytes_out = stack_cursor;
   }

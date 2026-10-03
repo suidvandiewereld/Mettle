@@ -180,6 +180,10 @@ int arm64_reg_is_volatile(Arm64Reg r);
 int arm64_reg_arg_index(Arm64Reg r);
 int arm64_reg_is_allocatable(Arm64Reg r);
 
+int arm64_compute_arg_layout_packed(const int *is_float,
+                                    const int *stack_sizes, int count,
+                                    Arm64ArgLocation *out,
+                                    int *stack_bytes_out);
 int arm64_compute_arg_layout(const int *is_float, int count,
                              Arm64ArgLocation *out, int *stack_bytes_out);
 

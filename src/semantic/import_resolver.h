@@ -10,6 +10,8 @@ typedef struct {
   size_t import_directory_count;
   const char *stdlib_directory;
   int target_is_elf;
+  int target_is_macos;
+  int gpu_provider_metal;
 } ImportResolverOptions;
 
 int resolve_imports(ASTNode *program, const char *base_path,

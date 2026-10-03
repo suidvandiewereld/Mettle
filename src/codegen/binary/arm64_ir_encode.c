@@ -402,6 +402,64 @@ static int type_text_float_bits(const char *t) {
   return type_text_base_is(t, "float32") ? 32 : 64;
 }
 
+static int darwin_packs_stack_args(void) {
+  return mtlc_target()->os == MTLC_TARGET_OS_MACOS;
+}
+
+static int stack_size_of_type(const MtlcType *t) {
+  if (!t || !darwin_packs_stack_args()) return 8;
+  switch (t->kind) {
+  case MTLC_TYPE_INT8:
+  case MTLC_TYPE_UINT8:
+  case MTLC_TYPE_BOOL:
+    return 1;
+  case MTLC_TYPE_INT16:
+  case MTLC_TYPE_UINT16:
+  case MTLC_TYPE_FLOAT16:
+  case MTLC_TYPE_BFLOAT16:
+    return 2;
+  case MTLC_TYPE_INT32:
+  case MTLC_TYPE_UINT32:
+  case MTLC_TYPE_FLOAT32:
+    return 4;
+  default:
+    return 8;
+  }
+}
+
+static int stack_size_of_type_text(const char *t) {
+  if (!t || !darwin_packs_stack_args() || strchr(t, '*') != NULL ||
+      strchr(t, '[') != NULL) {
+    return 8;
+  }
+  if (type_text_base_is(t, "int8") || type_text_base_is(t, "uint8") ||
+      type_text_base_is(t, "bool")) {
+    return 1;
+  }
+  if (type_text_base_is(t, "int16") || type_text_base_is(t, "uint16") ||
+      type_text_base_is(t, "float16") || type_text_base_is(t, "bfloat16")) {
+    return 2;
+  }
+  if (type_text_base_is(t, "int32") || type_text_base_is(t, "uint32") ||
+      type_text_base_is(t, "float32")) {
+    return 4;
+  }
+  return 8;
+}
+
+static uint32_t stack_store_of_size(int size, Arm64Reg rt, int offset) {
+  switch (size) {
+  case 1:
+    return arm64_strb_imm(rt, ARM64_SP, offset);
+  case 2:
+    return arm64_strh_imm(rt, ARM64_SP, offset);
+  case 4:
+    return arm64_str_imm(0, rt, ARM64_SP, offset);
+  default:
+    return arm64_str_imm(1, rt, ARM64_SP, offset);
+  }
+}
+
 static uint64_t ieee_bits_at(const IROperand *op, int bits) {
   if (bits == 32) {
     float f = (float)op->float_value;
@@ -1377,15 +1435,27 @@ static int max_outgoing_stack(Arm64Emit *e, const IRFunction *fn,
                  indirect ? "(indirect)" : call->text);
       return 0;
     }
+    int *stack_sizes = calloc((size_t)count, sizeof(*stack_sizes));
+    if (!stack_sizes) {
+      free(is_float);
+      free(locations);
+      arm64_fail(e, "out of memory laying out the arguments of '%s'",
+                 indirect ? "(indirect)" : call->text);
+      return 0;
+    }
     for (int k = 0; k < count; k++) {
       is_float[k] = call_arg_is_float(program, call, (size_t)k, floats);
+      stack_sizes[k] =
+          stack_size_of_type(call_arg_type(program, call, (size_t)k));
     }
     int bytes = 0;
-    if (!arm64_compute_arg_layout(is_float, count, locations, &bytes)) {
+    if (!arm64_compute_arg_layout_packed(is_float, stack_sizes, count,
+                                         locations, &bytes)) {
       arm64_fail(e, "cannot lay out the %d arguments of '%s' under AAPCS64",
                  count, indirect ? "(indirect)" : call->text);
     }
     if (bytes > maximum) maximum = bytes;
+    free(stack_sizes);
     free(is_float);
     free(locations);
     if (e->error) return 0;
@@ -1573,10 +1643,19 @@ static int emit_call_arguments(Arm64Emit *e, SlotMap *slots,
     arm64_fail(e, "out of memory laying out the arguments of '%s'", who);
     return 0;
   }
+  int *stack_sizes = calloc((size_t)count, sizeof(*stack_sizes));
+  if (!stack_sizes) {
+    free(is_float);
+    free(locations);
+    arm64_fail(e, "out of memory laying out the arguments of '%s'", who);
+    return 0;
+  }
   for (int k = 0; k < count; k++) {
     is_float[k] = call_arg_is_float(prog, in, (size_t)k, fs);
+    stack_sizes[k] = stack_size_of_type(call_arg_type(prog, in, (size_t)k));
   }
-  if (!arm64_compute_arg_layout(is_float, count, locations, NULL)) {
+  if (!arm64_compute_arg_layout_packed(is_float, stack_sizes, count, locations,
+                                       NULL)) {
     arm64_fail(e, "cannot lay out the %d arguments of '%s' under AAPCS64",
                count, who);
   }
@@ -1591,10 +1670,11 @@ static int emit_call_arguments(Arm64Emit *e, SlotMap *slots,
       load_call_argument(e, slots, prog, in, arg, location.reg);
     } else {
       load_call_argument(e, slots, prog, in, arg, R_LHS);
-      arm64_emit_word(
-          e, arm64_str_imm(1, R_LHS, ARM64_SP, location.stack_offset));
+      arm64_emit_word(e, stack_store_of_size(stack_sizes[k], R_LHS,
+                                             location.stack_offset));
     }
   }
+  free(stack_sizes);
   free(is_float);
   free(locations);
   return !e->error;
@@ -2554,11 +2634,20 @@ static int encode_function(Arm64Emit *e, const IRFunction *fn, LblMap *fns,
       arm64_fail(e, "out of memory homing the parameters of '%s'", fn->name);
       goto done;
     }
+    int *stack_sizes = calloc((size_t)count, sizeof(*stack_sizes));
+    if (!stack_sizes) {
+      free(is_float);
+      free(locations);
+      arm64_fail(e, "out of memory homing the parameters of '%s'", fn->name);
+      goto done;
+    }
     for (int i = 0; i < count; i++) {
       const char *type = fn->parameter_types ? fn->parameter_types[i] : NULL;
       is_float[i] = type_text_is_float_scalar(type);
+      stack_sizes[i] = stack_size_of_type_text(type);
     }
-    if (!arm64_compute_arg_layout(is_float, count, locations, NULL)) {
+    if (!arm64_compute_arg_layout_packed(is_float, stack_sizes, count,
+                                         locations, NULL)) {
       arm64_fail(e, "cannot lay out the %d parameters of '%s' under AAPCS64",
                  count, fn->name);
     }
@@ -2573,11 +2662,36 @@ static int encode_function(Arm64Emit *e, const IRFunction *fn, LblMap *fns,
       } else if (location.kind == ARM64_ARG_IN_GP_REGISTER) {
         emit_slot_str(e, location.reg, off);
       } else {
-        arm64_emit_word(e, arm64_ldr_imm(1, R_LHS, ARM64_X29,
-                                         16 + location.stack_offset));
+        const char *type =
+            fn->parameter_types ? fn->parameter_types[i] : NULL;
+        int from = 16 + location.stack_offset;
+        switch (stack_sizes[i]) {
+        case 1:
+          arm64_emit_word(e, arm64_ldrb_imm(R_LHS, ARM64_X29, from));
+          if (type_text_base_is(type, "int8")) {
+            arm64_emit_word(e, arm64_sxtb(R_LHS, R_LHS));
+          }
+          break;
+        case 2:
+          arm64_emit_word(e, arm64_ldrh_imm(R_LHS, ARM64_X29, from));
+          if (type_text_base_is(type, "int16")) {
+            arm64_emit_word(e, arm64_sxth(R_LHS, R_LHS));
+          }
+          break;
+        case 4:
+          arm64_emit_word(e, arm64_ldr_imm(0, R_LHS, ARM64_X29, from));
+          if (type_text_base_is(type, "int32")) {
+            arm64_emit_word(e, arm64_sxtw(R_LHS, R_LHS));
+          }
+          break;
+        default:
+          arm64_emit_word(e, arm64_ldr_imm(1, R_LHS, ARM64_X29, from));
+          break;
+        }
         emit_slot_str(e, R_LHS, off);
       }
     }
+    free(stack_sizes);
     free(is_float);
     free(locations);
     if (e->error) goto done;
@@ -3626,7 +3740,10 @@ int arm64_ir_write_object(const IRProgram *prog, const char *path, char *error,
     arm64_object_error(error, error_capacity, "invalid AArch64 object input");
     return 0;
   }
-  emitter = binary_emitter_create(BINARY_TARGET_FORMAT_ELF_ARM64);
+  emitter = binary_emitter_create(
+      mtlc_target()->format == BINARY_TARGET_FORMAT_MACHO_ARM64
+          ? BINARY_TARGET_FORMAT_MACHO_ARM64
+          : BINARY_TARGET_FORMAT_ELF_ARM64);
   if (!emitter) {
     arm64_object_error(error, error_capacity,
                        "out of memory creating AArch64 object emitter");

@@ -21,7 +21,8 @@ typedef enum {
 typedef enum {
   MTLC_TARGET_OS_WINDOWS = 0,
   MTLC_TARGET_OS_LINUX,
-  MTLC_TARGET_OS_NONE
+  MTLC_TARGET_OS_NONE,
+  MTLC_TARGET_OS_MACOS
 } MtlcTargetOs;
 
 typedef struct {

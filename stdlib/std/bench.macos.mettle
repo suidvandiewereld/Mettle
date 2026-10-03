@@ -1,0 +1,11 @@
+extern fn clock_gettime(clk_id: int32, ts: cstring) -> int32 = "clock_gettime";
+
+export fn bench_time_us() -> int64 {
+  var ts: uint8[16];
+  if (clock_gettime(6, &ts[0]) != 0) {
+    return 0;
+  }
+  var sec: int64 = *((int64*)&ts[0]);
+  var nsec: int64 = *((int64*)&ts[8]);
+  return sec * 1000000 + nsec / 1000;
+}

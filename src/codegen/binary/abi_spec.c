@@ -74,6 +74,7 @@ void code_generator_binary_select_abi(BinaryTargetFormat format) {
   }
   switch (format) {
   case BINARY_TARGET_FORMAT_ELF_X64:
+  case BINARY_TARGET_FORMAT_MACHO_X64:
     g_active_abi = &SYSV_ABI;
     break;
   case BINARY_TARGET_FORMAT_COFF_WIN64:

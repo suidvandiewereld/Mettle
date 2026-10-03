@@ -343,6 +343,49 @@ static void test_abi(void) {
     check_int("fp a8 stack", locs[8].kind, ARM64_ARG_ON_STACK);
     check_int("fp stack bytes", sb, 16);
   }
+
+  {
+    int isf[10] = {0};
+    int sizes[10] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 2};
+    Arm64ArgLocation locs[10];
+    int sb = -1;
+    arm64_compute_arg_layout_packed(isf, sizes, 10, locs, &sb);
+    check_int("darwin char s0 offset", locs[8].stack_offset, 0);
+    check_int("darwin short s1 offset", locs[9].stack_offset, 2);
+    check_int("darwin two stack args bytes", sb, 8);
+  }
+
+  {
+    int isf[14] = {0};
+    int sizes[14] = {8, 8, 8, 8, 8, 8, 8, 8, 1, 2, 4, 8, 1, 4};
+    Arm64ArgLocation locs[14];
+    int sb = -1;
+    arm64_compute_arg_layout_packed(isf, sizes, 14, locs, &sb);
+    check_int("darwin mixed char", locs[8].stack_offset, 0);
+    check_int("darwin mixed short", locs[9].stack_offset, 2);
+    check_int("darwin mixed int", locs[10].stack_offset, 4);
+    check_int("darwin mixed long", locs[11].stack_offset, 8);
+    check_int("darwin mixed char after long", locs[12].stack_offset, 16);
+    check_int("darwin mixed int after char", locs[13].stack_offset, 20);
+    check_int("darwin mixed bytes", sb, 24);
+  }
+
+  {
+    int isf[10];
+    int sizes[10];
+    Arm64ArgLocation locs[10];
+    int sb = -1;
+    for (int i = 0; i < 10; i++) {
+      isf[i] = 1;
+      sizes[i] = 4;
+    }
+    arm64_compute_arg_layout_packed(isf, sizes, 10, locs, &sb);
+    check_int("darwin float s0", locs[8].stack_offset, 0);
+    check_int("darwin float s1", locs[9].stack_offset, 4);
+    check_int("darwin float bytes", sb, 8);
+    arm64_compute_arg_layout(isf, 10, locs, &sb);
+    check_int("linux float s1 keeps 8-byte slots", locs[9].stack_offset, 8);
+  }
 }
 
 int main(void) {

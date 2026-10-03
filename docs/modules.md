@@ -49,12 +49,19 @@ gives those internal names.
 
 ```mettle
 import "std/net" if windows;
-import "std/net_posix" if linux;
+import "std/net_posix" if posix;
 ```
 
-The guard is `windows` or `linux`. An import for the other platform is dropped
-before the path is resolved, so that file need not exist on this machine.
-Guards work on all three import forms.
+The guard is `windows`, `linux`, `macos`, or `posix`, which means Linux or
+macOS. An import for another platform is dropped before the path is resolved,
+so that file need not exist on this machine. Guards work on all three import
+forms.
+
+A `std/` import without an extension picks the platform's file when one
+exists: `std/io.linux.mettle` on Linux, and on macOS `std/io.macos.mettle`
+first, then the Linux file. With the Metal GPU provider (the default on
+macOS, or `--gpu-provider=metal`), `std/gpu` resolves to
+`std/gpu.metal.mettle`.
 
 ### Embedding a file
 

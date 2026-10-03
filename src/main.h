@@ -48,6 +48,7 @@ typedef struct {
   int metal_version_major;
   int metal_version_minor;
   int metal_fast_math;
+  int gpu_provider;
   int emit_arm64;
   int emit_arm64_obj;
   int optimize;

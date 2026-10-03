@@ -5226,9 +5226,10 @@ static int parser_parse_import_guard(Parser *parser, char **out_guard) {
     return 0;
   }
   const char *name = parser->current_token.value;
-  if (strcmp(name, "windows") != 0 && strcmp(name, "linux") != 0) {
-    parser_set_error(parser,
-                     "Import guard platform must be 'windows' or 'linux'");
+  if (strcmp(name, "windows") != 0 && strcmp(name, "linux") != 0 &&
+      strcmp(name, "macos") != 0 && strcmp(name, "posix") != 0) {
+    parser_set_error(parser, "Import guard platform must be 'windows', "
+                             "'linux', 'macos' or 'posix'");
     return 0;
   }
   *out_guard = strdup(name);

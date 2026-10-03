@@ -2465,6 +2465,27 @@ static char *resolve_import_path(ImportContext *ctx,
   return resolved;
 }
 
+static char *resolve_std_variant(ImportContext *ctx, const char *import_path,
+                                 const char *suffix) {
+  size_t base_len = strlen(import_path);
+  size_t suffix_len = strlen(suffix);
+  char *variant = malloc(base_len + suffix_len + 1);
+  char *candidate = NULL;
+  char *resolved = NULL;
+  if (!variant) {
+    return NULL;
+  }
+  memcpy(variant, import_path, base_len);
+  memcpy(variant + base_len, suffix, suffix_len + 1);
+  candidate = join_paths(ctx->options->stdlib_directory, variant);
+  free(variant);
+  if (candidate) {
+    resolved = resolve_candidate_path(candidate);
+    free(candidate);
+  }
+  return resolved;
+}
+
 static char *resolve_import_path_uncached(ImportContext *ctx,
                                           const char *current_file_path,
                                           const char *import_path) {
@@ -2478,22 +2499,22 @@ static char *resolve_import_path_uncached(ImportContext *ctx,
 
   if (ctx && ctx->options && ctx->options->stdlib_directory &&
       import_uses_std_namespace(import_path)) {
+    if (ctx->options->gpu_provider_metal && !path_has_extension(import_path)) {
+      char *resolved = resolve_std_variant(ctx, import_path, ".metal.mettle");
+      if (resolved) {
+        return resolved;
+      }
+    }
+    if (ctx->options->target_is_macos && !path_has_extension(import_path)) {
+      char *resolved = resolve_std_variant(ctx, import_path, ".macos.mettle");
+      if (resolved) {
+        return resolved;
+      }
+    }
     if (ctx->options->target_is_elf && !path_has_extension(import_path)) {
-      size_t base_len = strlen(import_path);
-      char *linux_import = malloc(base_len + 14);
-      if (linux_import) {
-        memcpy(linux_import, import_path, base_len);
-        memcpy(linux_import + base_len, ".linux.mettle", 14);
-        char *linux_candidate =
-            join_paths(ctx->options->stdlib_directory, linux_import);
-        free(linux_import);
-        if (linux_candidate) {
-          char *resolved = resolve_candidate_path(linux_candidate);
-          free(linux_candidate);
-          if (resolved) {
-            return resolved;
-          }
-        }
+      char *resolved = resolve_std_variant(ctx, import_path, ".linux.mettle");
+      if (resolved) {
+        return resolved;
       }
     }
 
@@ -3657,12 +3678,21 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
   }
 }
 
-static int import_platform_matches(const char *guard, int target_is_elf) {
+static int import_platform_matches(const char *guard, int target_is_elf,
+                                   int target_is_macos) {
   if (!guard) {
     return 1;
   }
-  const char *target = target_is_elf ? "linux" : "windows";
-  return strcmp(guard, target) == 0;
+  if (strcmp(guard, "posix") == 0) {
+    return target_is_elf;
+  }
+  if (strcmp(guard, "macos") == 0) {
+    return target_is_macos;
+  }
+  if (strcmp(guard, "linux") == 0) {
+    return target_is_elf && !target_is_macos;
+  }
+  return strcmp(guard, "windows") == 0 && !target_is_elf;
 }
 
 static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
@@ -3703,7 +3733,8 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
 
       if (!import_platform_matches(
               import_decl->platform_guard,
-              ctx && ctx->options && ctx->options->target_is_elf)) {
+              ctx && ctx->options && ctx->options->target_is_elf,
+              ctx && ctx->options && ctx->options->target_is_macos)) {
         ast_destroy_node(decl);
         continue;
       }

@@ -666,12 +666,22 @@ static int host_target_is_elf(void) {
          format == BINARY_TARGET_FORMAT_ELF_ARM64;
 }
 
+static int host_target_is_macho(void) {
+  BinaryTargetFormat format = mtlc_target()->format;
+  return format == BINARY_TARGET_FORMAT_MACHO_X64 ||
+         format == BINARY_TARGET_FORMAT_MACHO_ARM64;
+}
+
+static int host_target_is_posix(void) {
+  return host_target_is_elf() || host_target_is_macho();
+}
+
 static char *default_executable_filename(const char *input_filename) {
   if (!input_filename || input_filename[0] == '\0') {
     return NULL;
   }
 
-  if (!host_target_is_elf()) {
+  if (!host_target_is_posix()) {
     return replace_extension(input_filename, ".exe");
   }
 
@@ -686,7 +696,7 @@ static char *default_executable_filename(const char *input_filename) {
 }
 
 static const char *default_object_output_filename(void) {
-  return host_target_is_elf() ? "output.o" : "output.obj";
+  return host_target_is_posix() ? "output.o" : "output.obj";
 }
 
 static const char *linker_mode_name(LinkerMode mode) {
@@ -892,8 +902,97 @@ cleanup:
   return found;
 }
 
+static int macho_object_has_undefined_symbol_prefix(const char *object_path,
+                                                    const char *prefix) {
+  FILE *file = NULL;
+  unsigned char *data = NULL;
+  long file_size = 0;
+  size_t prefix_length = 0u;
+  size_t cursor = 32u;
+  size_t commands_end = 0u;
+  unsigned int command_count = 0u;
+  unsigned int c = 0u;
+  int found = 1;
+
+  if (!object_path || !prefix) {
+    return 1;
+  }
+  file = fopen(object_path, "rb");
+  if (!file) {
+    return 1;
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return 1;
+  }
+  file_size = ftell(file);
+  if (file_size < 32 || fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return 1;
+  }
+  data = malloc((size_t)file_size);
+  if (!data) {
+    fclose(file);
+    return 1;
+  }
+  if (fread(data, 1, (size_t)file_size, file) != (size_t)file_size ||
+      read_u32_le(data) != 0xfeedfacfu) {
+    goto cleanup;
+  }
+  command_count = read_u32_le(data + 16);
+  commands_end = 32u + (size_t)read_u32_le(data + 20);
+  if (commands_end > (size_t)file_size) {
+    goto cleanup;
+  }
+  prefix_length = strlen(prefix);
+  for (c = 0u; c < command_count && cursor + 8u <= commands_end; c++) {
+    const unsigned char *command = data + cursor;
+    size_t command_size = (size_t)read_u32_le(command + 4);
+    if (command_size < 8u || cursor + command_size > commands_end) {
+      goto cleanup;
+    }
+    if (read_u32_le(command) == 0x2u && command_size >= 24u) {
+      size_t symbol_offset = (size_t)read_u32_le(command + 8);
+      size_t symbol_count = (size_t)read_u32_le(command + 12);
+      size_t string_offset = (size_t)read_u32_le(command + 16);
+      size_t string_size = (size_t)read_u32_le(command + 20);
+      size_t s = 0u;
+      if (symbol_offset + symbol_count * 16u > (size_t)file_size ||
+          string_offset + string_size > (size_t)file_size) {
+        goto cleanup;
+      }
+      found = 0;
+      for (s = 0u; s < symbol_count; s++) {
+        const unsigned char *entry = data + symbol_offset + s * 16u;
+        size_t name_offset = (size_t)read_u32_le(entry);
+        const char *name = NULL;
+        if ((entry[4] & 0x0eu) != 0u || (entry[4] & 0x01u) == 0u ||
+            name_offset == 0u || name_offset >= string_size) {
+          continue;
+        }
+        name = (const char *)(data + string_offset + name_offset);
+        if (name[0] == '_' && name_offset + 1u + prefix_length <= string_size &&
+            strncmp(name + 1, prefix, prefix_length) == 0) {
+          found = 1;
+          goto cleanup;
+        }
+      }
+      goto cleanup;
+    }
+    cursor += command_size;
+  }
+
+cleanup:
+  free(data);
+  fclose(file);
+  return found;
+}
+
 static int object_needs_runtime_object(const char *object_path,
                                        const char *prefix) {
+  if (host_target_is_macho()) {
+    return macho_object_has_undefined_symbol_prefix(object_path, prefix);
+  }
   if (host_target_is_elf()) {
     return elf_object_has_undefined_symbol_prefix(object_path, prefix);
   }
@@ -3684,6 +3783,17 @@ static DriverFlagResult parse_flag_checks(CompilerOptions *options,
     options->metal_version_minor = metal_options.version_minor;
   } else if (strcmp(argv[i], "--metal-fast-math") == 0) {
     options->metal_fast_math = 1;
+  } else if (strncmp(argv[i], "--gpu-provider=", 15) == 0) {
+    if (strcmp(argv[i] + 15, "cuda") == 0) {
+      options->gpu_provider = 1;
+    } else if (strcmp(argv[i] + 15, "metal") == 0) {
+      options->gpu_provider = 2;
+    } else {
+      fprintf(stderr,
+              "Error: --gpu-provider expects cuda or metal (got '%s')\n",
+              argv[i] + 15);
+      return DRIVER_FLAG_FAILED;
+    }
   } else {
     return DRIVER_FLAG_UNMATCHED;
   }
@@ -6066,7 +6176,11 @@ static int compile_stage_imports(CompileContext *ctx) {
   }
   import_options.target_is_elf =
       (options && (options->emit_arm64 || options->emit_arm64_obj)) ||
-      host_target_is_elf();
+      host_target_is_posix();
+  import_options.target_is_macos = host_target_is_macho();
+  import_options.gpu_provider_metal =
+      options && (options->gpu_provider == 2 ||
+                  (options->gpu_provider == 0 && host_target_is_macho()));
 
   compiler_set_phase(PROFILE_PHASE_PRELUDE);
   ctx->phase_start = compiler_profile_begin(&ctx->profile);
@@ -7155,6 +7269,7 @@ void print_usage(const char *program_name) {
   printf("  --emit-spirv        Emit declared kernels as OpenCL SPIR-V\n");
   printf("  --emit-metal        Emit declared kernels as Metal Shading Language\n");
   printf("  --metal-version=V   Metal language version: 3.1, 3.2 (default), 4.0, 4.1\n");
+  printf("  --gpu-provider=P    std/gpu runs launches through cuda or metal (metal on macOS)\n");
   printf("  --metal-fast-math   Let Metal reassociate and contract float math\n");
   printf("  --linker <mode>     Linker backend: auto, internal, gcc, or msvc "
          "(default: internal with --build, otherwise %s)\n",

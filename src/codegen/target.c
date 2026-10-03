@@ -34,6 +34,24 @@ static const MtlcTargetEntry TARGET_TABLE[] = {
      64, BINARY_TARGET_FORMAT_ELF_ARM64, 0},
     {"aarch64-none", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_NONE, 64,
      BINARY_TARGET_FORMAT_ELF_ARM64, 1},
+    {"aarch64-macos", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_ARM64, 0},
+    {"arm64-macos", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_ARM64, 0},
+    {"aarch64-apple-macos", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_ARM64, 0},
+    {"arm64-apple-macos", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_ARM64, 0},
+    {"aarch64-apple-darwin", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_MACOS,
+     64, BINARY_TARGET_FORMAT_MACHO_ARM64, 0},
+    {"arm64-apple-darwin", MTLC_TARGET_ARCH_AARCH64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_ARM64, 0},
+    {"x86_64-macos", MTLC_TARGET_ARCH_X86_64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_X64, 0},
+    {"x86_64-apple-macos", MTLC_TARGET_ARCH_X86_64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_X64, 0},
+    {"x86_64-apple-darwin", MTLC_TARGET_ARCH_X86_64, MTLC_TARGET_OS_MACOS, 64,
+     BINARY_TARGET_FORMAT_MACHO_X64, 0},
     {"i386-none", MTLC_TARGET_ARCH_X86_32, MTLC_TARGET_OS_NONE, 32,
      BINARY_TARGET_FORMAT_ELF_X64, 1},
     {"i686-none", MTLC_TARGET_ARCH_X86_32, MTLC_TARGET_OS_NONE, 32,
@@ -47,6 +65,24 @@ static const MtlcTargetEntry TARGET_TABLE[] = {
 static MtlcTarget g_target;
 static int g_target_initialized;
 
+static int triple_matches(const char *triple, const char *name) {
+  size_t name_length = strlen(name);
+  char next;
+  if (strncmp(triple, name, name_length) != 0) {
+    return 0;
+  }
+  next = triple[name_length];
+  if (next == '\0' || next == '-') {
+    return 1;
+  }
+  if (next >= '0' && next <= '9' && name_length >= 5 &&
+      (strcmp(name + name_length - 5, "macos") == 0 ||
+       (name_length >= 6 && strcmp(name + name_length - 6, "darwin") == 0))) {
+    return 1;
+  }
+  return 0;
+}
+
 static void mtlc_target_init_host(void) {
   BinaryTargetFormat format = binary_target_format_host_default();
   memset(&g_target, 0, sizeof(g_target));
@@ -58,6 +94,16 @@ static void mtlc_target_init_host(void) {
     g_target.arch = MTLC_TARGET_ARCH_AARCH64;
     g_target.os = MTLC_TARGET_OS_LINUX;
     snprintf(g_target.triple, sizeof(g_target.triple), "aarch64-linux");
+    break;
+  case BINARY_TARGET_FORMAT_MACHO_ARM64:
+    g_target.arch = MTLC_TARGET_ARCH_AARCH64;
+    g_target.os = MTLC_TARGET_OS_MACOS;
+    snprintf(g_target.triple, sizeof(g_target.triple), "aarch64-macos");
+    break;
+  case BINARY_TARGET_FORMAT_MACHO_X64:
+    g_target.arch = MTLC_TARGET_ARCH_X86_64;
+    g_target.os = MTLC_TARGET_OS_MACOS;
+    snprintf(g_target.triple, sizeof(g_target.triple), "x86_64-macos");
     break;
   case BINARY_TARGET_FORMAT_ELF_X64:
     g_target.arch = MTLC_TARGET_ARCH_X86_64;
@@ -92,11 +138,7 @@ int mtlc_target_select(const char *triple, char *error, size_t error_size) {
   }
   for (i = 0; i < sizeof(TARGET_TABLE) / sizeof(TARGET_TABLE[0]); i++) {
     const MtlcTargetEntry *entry = &TARGET_TABLE[i];
-    size_t name_length = strlen(entry->name);
-    if (strncmp(triple, entry->name, name_length) != 0) {
-      continue;
-    }
-    if (triple[name_length] != '\0' && triple[name_length] != '-') {
+    if (!triple_matches(triple, entry->name)) {
       continue;
     }
     g_target.arch = entry->arch;
@@ -122,8 +164,9 @@ void mtlc_target_set_image_base(uint64_t base) {
 }
 
 const char *mtlc_target_triple_list(void) {
-  return "x86_64-windows, x86_64-linux, x86_64-none, aarch64-linux, "
-         "aarch64-none, i386-none, i686-none, i8086-none";
+  return "x86_64-windows, x86_64-linux, x86_64-macos, x86_64-none, "
+         "aarch64-linux, aarch64-macos, aarch64-none, i386-none, i686-none, "
+         "i8086-none";
 }
 
 MtlcTargetOs mtlc_target_host_os(void) {
@@ -131,6 +174,9 @@ MtlcTargetOs mtlc_target_host_os(void) {
   case BINARY_TARGET_FORMAT_ELF_X64:
   case BINARY_TARGET_FORMAT_ELF_ARM64:
     return MTLC_TARGET_OS_LINUX;
+  case BINARY_TARGET_FORMAT_MACHO_X64:
+  case BINARY_TARGET_FORMAT_MACHO_ARM64:
+    return MTLC_TARGET_OS_MACOS;
   case BINARY_TARGET_FORMAT_COFF_WIN64:
   default:
     return MTLC_TARGET_OS_WINDOWS;
@@ -143,6 +189,8 @@ const char *mtlc_target_os_name(MtlcTargetOs os) {
     return "Linux";
   case MTLC_TARGET_OS_WINDOWS:
     return "Windows";
+  case MTLC_TARGET_OS_MACOS:
+    return "macOS";
   case MTLC_TARGET_OS_NONE:
   default:
     return "freestanding";
@@ -179,6 +227,8 @@ static const char *os_short_name(MtlcTargetOs os) {
     return "windows";
   case MTLC_TARGET_OS_LINUX:
     return "linux";
+  case MTLC_TARGET_OS_MACOS:
+    return "macos";
   case MTLC_TARGET_OS_NONE:
   default:
     return "none";
@@ -189,6 +239,9 @@ static const char *format_name(BinaryTargetFormat format) {
   switch (format) {
   case BINARY_TARGET_FORMAT_COFF_WIN64:
     return "coff";
+  case BINARY_TARGET_FORMAT_MACHO_X64:
+  case BINARY_TARGET_FORMAT_MACHO_ARM64:
+    return "macho";
   case BINARY_TARGET_FORMAT_ELF_ARM64:
   case BINARY_TARGET_FORMAT_ELF_X64:
   default:
@@ -270,7 +323,10 @@ static void describe_entry(const MtlcTargetEntry *entry, const char *triple,
       out->separate_classes = 0;
     } else {
       out->shadow_space = 0;
-      out->red_zone = entry->os == MTLC_TARGET_OS_LINUX ? 128 : 0;
+      out->red_zone = entry->os == MTLC_TARGET_OS_LINUX ||
+                              entry->os == MTLC_TARGET_OS_MACOS
+                          ? 128
+                          : 0;
       set_names(out->int_args, &out->int_arg_count, sysv_int, 6);
       set_names(out->float_args, &out->float_arg_count, sysv_float, 8);
       snprintf(out->indirect_return, sizeof(out->indirect_return), "rdi");
@@ -304,9 +360,7 @@ static const MtlcTargetEntry *find_entry(const char *triple) {
   }
   for (i = 0; i < sizeof(TARGET_TABLE) / sizeof(TARGET_TABLE[0]); i++) {
     const MtlcTargetEntry *entry = &TARGET_TABLE[i];
-    size_t name_length = strlen(entry->name);
-    if (strncmp(triple, entry->name, name_length) == 0 &&
-        (triple[name_length] == '\0' || triple[name_length] == '-')) {
+    if (triple_matches(triple, entry->name)) {
       return entry;
     }
   }

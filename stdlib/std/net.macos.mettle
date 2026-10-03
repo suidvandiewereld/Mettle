@@ -1,0 +1,159 @@
+import "std/core";
+import "std/mem";
+import "std/thread";
+
+export var net_ref_count: int32 = 0;
+export var net_ref_lock: int32 = 0;
+
+export fn AF_INET() -> int32     { return 2; }
+export fn SOCK_STREAM() -> int32 { return 1; }
+export fn SOCK_DGRAM() -> int32  { return 2; }
+export fn IPPROTO_TCP() -> int32 { return 6; }
+export fn IPPROTO_UDP() -> int32 { return 17; }
+export fn SOL_SOCKET() -> int32 { return 65535; }
+
+export fn MSG_NOSIGNAL() -> int32 { return 0; }
+export fn SO_NOSIGPIPE() -> int32 { return 4130; }
+export fn SO_REUSEADDR() -> int32 { return 4; }
+export fn SD_RECEIVE() -> int32 { return 0; }
+export fn SD_SEND() -> int32 { return 1; }
+export fn SD_BOTH() -> int32 { return 2; }
+export fn INADDR_ANY() -> int32 { return 0; }
+export fn INVALID_SOCKET() -> int64 { return -1; }
+export fn SOCKET_ERROR() -> int32 { return -1; }
+
+extern fn close(fd: int64) -> int32 = "close";
+export fn closesocket(s: int64) -> int32 {
+  return close(s);
+}
+
+export extern fn socket(af: int32, sock_type: int32, protocol: int32) -> int64 = "socket";
+export extern fn shutdown(s: int64, how: int32) -> int32 = "shutdown";
+
+export extern fn connect(s: int64, addr: cstring, addrlen: int32) -> int32 = "connect";
+export extern fn bind(s: int64, addr: cstring, addrlen: int32) -> int32 = "bind";
+export extern fn listen(s: int64, backlog: int32) -> int32 = "listen";
+export extern fn accept(s: int64, addr: cstring, addrlen: cstring) -> int64 = "accept";
+export extern fn setsockopt(s: int64, level: int32, optname: int32, optval: cstring, optlen: int32) -> int32 = "setsockopt";
+export extern fn send(s: int64, buf: cstring, len: int32, flags: int32) -> int32 = "send";
+export extern fn recv(s: int64, buf: cstring, len: int32, flags: int32) -> int32 = "recv";
+
+export extern fn htons(hostshort: int32) -> int32 = "htons";
+export extern fn htonl(hostlong: int32) -> int32 = "htonl";
+export extern fn ntohs(netshort: int32) -> int32 = "ntohs";
+export extern fn ntohl(netlong: int32) -> int32 = "ntohl";
+export extern fn inet_addr(cp: cstring) -> int32 = "inet_addr";
+
+export fn WSAStartup(version: int32, wsa_data: cstring) -> int32 { return 0; }
+export fn WSACleanup() -> int32 { return 0; }
+
+extern fn posix_get_errno() -> int32 = "posix_get_errno";
+export fn WSAGetLastError() -> int32 { return posix_get_errno(); }
+
+export fn net_init() -> Result<int32, int32> {
+  spin_lock(&net_ref_lock);
+  if (net_ref_count > 0) {
+    net_ref_count = net_ref_count + 1;
+    spin_unlock(&net_ref_lock);
+    return Ok(0);
+  }
+  net_ref_count = 1;
+  spin_unlock(&net_ref_lock);
+  return Ok(0);
+}
+
+export fn net_cleanup() -> int32 {
+  spin_lock(&net_ref_lock);
+  if (net_ref_count <= 0) {
+    spin_unlock(&net_ref_lock);
+    return 0;
+  }
+  net_ref_count = net_ref_count - 1;
+  spin_unlock(&net_ref_lock);
+  return 0;
+}
+
+export fn net_last_error() -> int32 {
+  return posix_get_errno();
+}
+
+fn socket_no_sigpipe(s: int64) {
+  var opt: uint8[4];
+  opt[0] = 1;
+  opt[1] = 0;
+  opt[2] = 0;
+  opt[3] = 0;
+  setsockopt(s, SOL_SOCKET(), SO_NOSIGPIPE(), &opt[0], 4);
+}
+
+export fn socket_tcp() -> Result<int64, int32> {
+  var s: int64 = socket(AF_INET(), SOCK_STREAM(), IPPROTO_TCP());
+  if (s == INVALID_SOCKET()) { return Err(net_last_error()); }
+  socket_no_sigpipe(s);
+  return Ok(s);
+}
+
+export fn socket_udp() -> Result<int64, int32> {
+  var s: int64 = socket(AF_INET(), SOCK_DGRAM(), IPPROTO_UDP());
+  if (s == INVALID_SOCKET()) { return Err(net_last_error()); }
+  socket_no_sigpipe(s);
+  return Ok(s);
+}
+
+export fn net_is_initialized() -> int32 {
+  var ready: int32 = 0;
+  spin_lock(&net_ref_lock);
+  if (net_ref_count > 0) {
+    ready = 1;
+  }
+  spin_unlock(&net_ref_lock);
+  return ready;
+}
+
+export fn sockaddr_in(ip: cstring, port: int32) -> Result<cstring, int32> {
+  var buf: cstring = malloc(16);
+  if (buf == 0) { return Err(0); }
+  memset(buf, 0, 16);
+  buf[0] = 16;
+  buf[1] = 2;
+  var net_port: int32 = htons(port);
+  buf[2] = (uint8)net_port;
+  buf[3] = (uint8)(net_port / 256);
+  var addr: int32 = inet_addr(ip);
+  buf[4] = (uint8)addr;
+  buf[5] = (uint8)(addr / 256);
+  buf[6] = (uint8)(addr / 65536);
+  buf[7] = (uint8)(addr / 16777216);
+  return Ok(buf);
+}
+
+export fn sockaddr_in_any(port: int32) -> Result<cstring, int32> {
+  var buf: cstring = malloc(16);
+  if (buf == 0) { return Err(0); }
+  memset(buf, 0, 16);
+  buf[0] = 16;
+  buf[1] = 2;
+  var net_port: int32 = htons(port);
+  buf[2] = (uint8)net_port;
+  buf[3] = (uint8)(net_port / 256);
+  return Ok(buf);
+}
+
+export fn set_reuseaddr(sock: int64, enabled: int32) -> int32 {
+  var opt: uint8[4];
+  if (enabled != 0) { opt[0] = 1; } else { opt[0] = 0; }
+  opt[1] = 0;
+  opt[2] = 0;
+  opt[3] = 0;
+  return setsockopt(sock, SOL_SOCKET(), SO_REUSEADDR(), &opt[0], 4);
+}
+
+export fn send_all(sock: int64, buf: cstring, len: int32) -> Result<int32, int32> {
+  var total: int32 = 0;
+  while (total < len) {
+    var sent: int32 = send(sock, &buf[total], len - total, MSG_NOSIGNAL());
+    if (sent <= 0) { return Err(net_last_error()); }
+    total = total + sent;
+  }
+  return Ok(total);
+}
