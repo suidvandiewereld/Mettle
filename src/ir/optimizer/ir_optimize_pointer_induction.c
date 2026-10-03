@@ -168,6 +168,26 @@ int ir_resolve_indexed_address_temp(const IRFunction *function,
   return 0;
 }
 
+static int ir_ptr_header_reentered_past(const IRFunction *function,
+                                        size_t init_index,
+                                        size_t header_index) {
+  for (size_t l = init_index + 1; l < header_index; l++) {
+    const IRInstruction *label = &function->instructions[l];
+    if (label->op != IR_OP_LABEL || !label->text) {
+      continue;
+    }
+    for (size_t j = header_index; j < function->instruction_count; j++) {
+      const IRInstruction *ins = &function->instructions[j];
+      if ((ins->op == IR_OP_JUMP || ins->op == IR_OP_BRANCH_ZERO ||
+           ins->op == IR_OP_BRANCH_EQ) &&
+          ins->text && strcmp(ins->text, label->text) == 0) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 int ir_ptr_induction_iv_start_value(const IRFunction *function,
                                            size_t header_index,
                                            const char *iv_symbol,
@@ -198,6 +218,7 @@ int ir_ptr_induction_iv_start_value(const IRFunction *function,
 
   {
     const IRInstruction *init = NULL;
+    size_t init_index = 0;
     for (size_t i = 0; i < header_index; i++) {
       const IRInstruction *ins = &function->instructions[i];
       if (!ir_instruction_writes_destination(ins) ||
@@ -208,6 +229,11 @@ int ir_ptr_induction_iv_start_value(const IRFunction *function,
         return 0;
       }
       init = ins;
+      init_index = i;
+    }
+    if (init && ir_ptr_header_reentered_past(function, init_index,
+                                             header_index)) {
+      return 0;
     }
     if (init) {
       *out_start = init->lhs.int_value;

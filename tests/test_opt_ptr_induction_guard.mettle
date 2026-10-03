@@ -39,6 +39,102 @@ fn count_below(order: int32*, n: int32, q: int32) -> int32 {
   return hits;
 }
 
+fn nested_guard(order: int32*, inv: uint8*, n: int32, q: int32, core: int32) -> int32 {
+  var nv: int32 = 0;
+  var homes: int32 = 0;
+  var r: int32 = 0;
+  while (r < n) {
+    var cell: int64 = (int64)order[r];
+    if (r < q) {
+      inv[cell] = 1;
+      if (r < core) {
+        inv[cell] = 5;
+      }
+      nv = nv + 1;
+    }
+    if (r >= core) {
+      inv[cell] = inv[cell] | 2;
+      homes = homes + 1;
+    }
+    r = r + 1;
+  }
+  return nv * 1000 + homes;
+}
+
+fn setup_slots(ord: int32*, cur: int64*, home: int64*, occ: int32*, n: int32, nslots: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    ord[i] = n - 1 - i;
+    home[i] = (int64)(1000 + i);
+    cur[i] = home[i];
+    if (i % 2 == 0) {
+      cur[i] = (int64)i;
+    }
+    i = i + 1;
+  }
+  var k: int32 = 0;
+  while (k < nslots) {
+    occ[k] = -1;
+    if (k < 8) {
+      occ[k] = 0;
+    }
+    k = k + 1;
+  }
+}
+
+fn move_to_slots(ord: int32*, cur: int64*, home: int64*, occ: int32*, n: int32, nslots: int32) -> int32 {
+  var moves: int32 = 0;
+  var free_slot: int32 = 0;
+  var r: int32 = 0;
+  while (r < n && moves < 1000) {
+    var cell: int64 = (int64)ord[r];
+    if (cur[cell] == home[cell]) {
+      while (free_slot < nslots && occ[free_slot] >= 0) {
+        free_slot = free_slot + 1;
+      }
+      if (free_slot >= nslots) {
+        break;
+      }
+      cur[cell] = (int64)(5000 + free_slot);
+      occ[free_slot] = (int32)cell;
+      moves = moves + 1;
+    }
+    r = r + 1;
+  }
+  return moves;
+}
+
+fn check_slots(nslots: int32, want_moves: int32) -> int32 {
+  var n: int32 = 64;
+  var ord: int32* = (int32*)malloc((int64)n * 4);
+  var cur: int64* = (int64*)malloc((int64)n * 8);
+  var home: int64* = (int64*)malloc((int64)n * 8);
+  var occ: int32* = (int32*)malloc((int64)nslots * 4);
+  setup_slots(ord, cur, home, occ, n, nslots);
+  var moves: int32 = move_to_slots(ord, cur, home, occ, n, nslots);
+  if (moves != want_moves) {
+    println("nslots {(int64)nslots}: moves = {(int64)moves}, expected {(int64)want_moves}");
+    return 0;
+  }
+  var k: int32 = 0;
+  while (k < nslots - 8) {
+    var want: int32 = -1;
+    if (k < want_moves) {
+      want = 63 - 2 * k;
+    }
+    if (occ[8 + k] != want) {
+      println("nslots {(int64)nslots}: occ[{(int64)(8 + k)}] = {(int64)occ[8 + k]}, expected {(int64)want}");
+      return 0;
+    }
+    k = k + 1;
+  }
+  free(ord);
+  free(cur);
+  free(home);
+  free(occ);
+  return 1;
+}
+
 fn main() -> int32 {
   var n: int32 = 128;
   var q: int32 = 54;
@@ -73,6 +169,40 @@ fn main() -> int32 {
   if (hits != 5555) {
     println("hits = {(int64)hits}, expected 5555");
     return 4;
+  }
+
+  memset(mark, 0, (int64)n);
+  var nested: int32 = nested_guard(order, mark, n, 32, 16);
+  if (nested != 32112) {
+    println("nested = {(int64)nested}, expected 32112");
+    return 5;
+  }
+  var fives: int32 = 0;
+  var threes: int32 = 0;
+  var twos: int32 = 0;
+  c = 0;
+  while (c < n) {
+    if (mark[c] == 5) {
+      fives = fives + 1;
+    }
+    if (mark[c] == 3) {
+      threes = threes + 1;
+    }
+    if (mark[c] == 2) {
+      twos = twos + 1;
+    }
+    c = c + 1;
+  }
+  if (fives != 16 || threes != 16 || twos != 96) {
+    println("nested marks = {(int64)fives}/{(int64)threes}/{(int64)twos}, expected 16/16/96");
+    return 6;
+  }
+
+  if (check_slots(64, 32) == 0) {
+    return 7;
+  }
+  if (check_slots(28, 20) == 0) {
+    return 8;
   }
 
   println("ptr_induction_guard OK");
