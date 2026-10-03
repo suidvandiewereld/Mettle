@@ -14,7 +14,12 @@ void mtlc_gpu_launch_checked(int64_t function,
             *(int64_t *)(uintptr_t)kernel_params[1] == 22 &&
             *(int64_t *)(uintptr_t)kernel_params[2] == 33 &&
             *(int32_t *)(uintptr_t)kernel_params[3] == 1024 &&
-            *(float *)(uintptr_t)kernel_params[4] == 2.5f;
+            *(float *)(uintptr_t)kernel_params[4] == 2.5f &&
+            kernel_params[5] == ((8 << 24) | 8) &&
+            kernel_params[6] == ((8 << 24) | 8) &&
+            kernel_params[7] == ((8 << 24) | 8) &&
+            kernel_params[8] == ((4 << 24) | 4) &&
+            kernel_params[9] == ((4 << 24) | 4);
   }
   if (launch_calls == 0) {
     valid = valid && gx == 4 && gy == 1 && gz == 1 && bx == 256 &&

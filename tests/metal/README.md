@@ -96,7 +96,7 @@ indexing `[]`, calls. Casts: C style `(TYPE)EXPR`, `as_type<TYPE>(EXPR)`
 ### Built-in functions
 
 - Math: `precise::sqrt rsqrt sin cos log exp`, `fast::` forms of the same,
-  `fabs`, `fmod`, `fma` (on `half2`).
+  `fabs`, `fmod`, `fma` (on `float` or `half2`, rounded once).
 - Synchronization: `threadgroup_barrier(FLAGS)`, `simdgroup_barrier(FLAGS)`
   with FLAGS `mem_flags::mem_none`, `mem_flags::mem_threadgroup`,
   `mem_flags::mem_device`, or two of them joined by `|`;

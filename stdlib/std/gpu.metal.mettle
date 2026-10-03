@@ -1,0 +1,289 @@
+extern fn __mtlc_metal_init() -> int32 = "mettle_metal_rt_init";
+extern fn __mtlc_metal_error() -> cstring = "mettle_metal_rt_error";
+extern fn __mtlc_metal_device_name() -> cstring = "mettle_metal_rt_device_name";
+extern fn __mtlc_metal_property(which: int32) -> int64 = "mettle_metal_rt_property";
+extern fn __mtlc_metal_load_file(path: cstring) -> int32 = "mettle_metal_rt_load_file";
+extern fn __mtlc_metal_load_source(text: cstring) -> int32 = "mettle_metal_rt_load_source";
+extern fn __mtlc_metal_kernel(name: cstring) -> int64 = "mettle_metal_rt_kernel";
+extern fn __mtlc_metal_kernel_name(handle: int64) -> cstring = "mettle_metal_rt_kernel_name";
+extern fn __mtlc_metal_alloc(bytes: int64) -> int64 = "mettle_metal_rt_alloc";
+extern fn __mtlc_metal_free(address: int64) -> int32 = "mettle_metal_rt_free";
+extern fn __mtlc_metal_alloc_mapped(bytes: int64, device_out: int64*) -> uint8* = "mettle_metal_rt_alloc_mapped";
+extern fn __mtlc_metal_free_mapped(host: uint8*) -> int32 = "mettle_metal_rt_free_mapped";
+extern fn __mtlc_metal_to_device(dst: int64, src: uint8*, bytes: int64) -> int32 = "mettle_metal_rt_to_device";
+extern fn __mtlc_metal_to_host(dst: uint8*, src: int64, bytes: int64) -> int32 = "mettle_metal_rt_to_host";
+extern fn __mtlc_metal_launch(f: int64, gx: int32, gy: int32, gz: int32,
+                              bx: int32, by: int32, bz: int32,
+                              shared_bytes: int32, stream: int64,
+                              params: int64*, nargs: int32) -> int32 = "mettle_metal_rt_launch";
+extern fn __mtlc_metal_launch_checked(f: int64, gx: int32, gy: int32, gz: int32,
+                                      bx: int32, by: int32, bz: int32,
+                                      shared_bytes: int32, stream: int64,
+                                      params: int64*, nargs: int32) = "mettle_metal_rt_launch_checked";
+extern fn __mtlc_metal_note(text: cstring) = "mettle_metal_rt_note";
+extern fn __mtlc_metal_fail(first: cstring, second: cstring, third: cstring) = "mettle_metal_rt_fail";
+extern fn __mtlc_metal_now_ms() -> float64 = "mettle_metal_rt_now_ms";
+
+@inline fn __mtlc_metal_cstr(s: string) -> cstring { return s.chars; }
+
+fn __mtlc_metal_report(what: string) {
+  __mtlc_metal_note(what.chars);
+  __mtlc_metal_note(__mtlc_metal_cstr(": "));
+  __mtlc_metal_note(__mtlc_metal_error());
+  __mtlc_metal_note(__mtlc_metal_cstr("\n"));
+}
+
+export fn gpu_error_name(status: int32) -> cstring {
+  if (status == 0) { return __mtlc_metal_cstr("METAL_SUCCESS"); }
+  return __mtlc_metal_cstr("METAL_ERROR");
+}
+
+export fn gpu_error_text(status: int32) -> cstring {
+  if (status == 0) { return __mtlc_metal_cstr("no error"); }
+  return __mtlc_metal_error();
+}
+
+export fn gpu_init() -> int64 { return gpu_init_on(0); }
+
+export fn gpu_init_on(ordinal: int32) -> int64 {
+  if (ordinal != 0) {
+    __mtlc_metal_note(__mtlc_metal_cstr("mettle: Metal exposes one GPU to a process; ask for GPU 0\n"));
+    return 0;
+  }
+  if (__mtlc_metal_init() == 0) {
+    __mtlc_metal_report("mettle: no usable Metal device");
+    return 0;
+  }
+  return 1;
+}
+
+export fn gpu_device_count() -> int32 {
+  if (__mtlc_metal_init() == 0) { return 0; }
+  return 1;
+}
+
+fn __mtlc_metal_property_of(ordinal: int32, which: int32) -> int64 {
+  if (ordinal != 0 || __mtlc_metal_init() == 0) { return 0; }
+  return __mtlc_metal_property(which);
+}
+
+export fn gpu_sm_count(ordinal: int32) -> int32 { return 0; }
+export fn gpu_warp_size(ordinal: int32) -> int32 {
+  return (int32)__mtlc_metal_property_of(ordinal, 4);
+}
+export fn gpu_max_threads_per_block(ordinal: int32) -> int32 {
+  return (int32)__mtlc_metal_property_of(ordinal, 0);
+}
+export fn gpu_max_shared_memory_per_block(ordinal: int32) -> int32 {
+  return (int32)__mtlc_metal_property_of(ordinal, 1);
+}
+export fn gpu_is_integrated(ordinal: int32) -> int32 {
+  return (int32)__mtlc_metal_property_of(ordinal, 3);
+}
+export fn gpu_compute_capability(ordinal: int32) -> int32 { return 0; }
+export fn gpu_total_memory(ordinal: int32) -> int64 {
+  return __mtlc_metal_property_of(ordinal, 2);
+}
+export fn gpu_driver_version() -> int32 { return 0; }
+
+export fn gpu_device_name(ordinal: int32, buffer: uint8*, capacity: int32) -> string {
+  var name: string;
+  name.chars = (cstring)buffer;
+  name.length = (uint64)0;
+  if (buffer == (uint8*)0 || capacity <= 1) { return name; }
+  buffer[0] = 0;
+  if (ordinal != 0 || __mtlc_metal_init() == 0) { return name; }
+  var source: cstring = __mtlc_metal_device_name();
+  var n: int64 = 0;
+  while (n < (int64)capacity - 1 && source[n] != 0) {
+    buffer[n] = (uint8)source[n];
+    n = n + 1;
+  }
+  buffer[n] = 0;
+  name.length = (uint64)n;
+  return name;
+}
+
+export fn gpu_open(path: cstring) -> int32 {
+  return gpu_open_on(0, path);
+}
+
+export fn gpu_open_on(ordinal: int32, path: cstring) -> int32 {
+  if (gpu_init_on(ordinal) == 0) { return 0; }
+  if (gpu_module_file(path) == 0) { return 0; }
+  return 1;
+}
+
+export fn gpu_module(source: uint8*) -> int64 {
+  var status: int32 = 0;
+  var mod: int64 = gpu_module_ex(source, &status);
+  if (mod == 0) {
+    __mtlc_metal_report("mettle: the Metal library would not build");
+  }
+  return mod;
+}
+
+export fn gpu_module_ex(source: uint8*, status_out: int32*) -> int64 {
+  if (__mtlc_metal_load_source((cstring)source) == 0) {
+    status_out[0] = 1;
+    return 0;
+  }
+  status_out[0] = 0;
+  gpu_module_bind(1);
+  return 1;
+}
+
+@inline export fn gpu_jit_log() -> cstring { return __mtlc_metal_error(); }
+
+export fn gpu_module_file(path: cstring) -> int64 {
+  if (__mtlc_metal_load_file(path) == 0) {
+    __mtlc_metal_report("mettle: the Metal library would not build");
+    __mtlc_metal_note(__mtlc_metal_cstr("  emit it with `mettle --emit-metal`\n"));
+    return 0;
+  }
+  gpu_module_bind(1);
+  return 1;
+}
+
+export fn gpu_func(mod: int64, name: cstring) -> int64 {
+  if (mod == 0) { return 0; }
+  return __mtlc_metal_kernel(name);
+}
+
+export fn gpu_malloc(bytes: int64) -> int64 { return __mtlc_metal_alloc(bytes); }
+@inline export fn gpu_free(dptr: int64) -> int32 { return __mtlc_metal_free(dptr); }
+
+export fn gpu_managed_malloc(bytes: int64) -> uint8* { return (uint8*)0; }
+@inline export fn gpu_managed_free(ptr: uint8*) -> int32 { return 1; }
+
+export fn gpu_malloc_async(bytes: int64, stream: int64) -> int64 {
+  return __mtlc_metal_alloc(bytes);
+}
+@inline export fn gpu_free_async(ptr: int64, stream: int64) -> int32 {
+  return __mtlc_metal_free(ptr);
+}
+
+export fn gpu_host_mapped_malloc(bytes: int64, dev_ptr_out: int64*) -> uint8* {
+  return __mtlc_metal_alloc_mapped(bytes, dev_ptr_out);
+}
+@inline export fn gpu_host_free(ptr: uint8*) -> int32 {
+  return __mtlc_metal_free_mapped(ptr);
+}
+@inline export fn gpu_to_device(dst: int64, src: uint8*, bytes: int64) -> int32 {
+  return __mtlc_metal_to_device(dst, src, bytes);
+}
+@inline export fn gpu_to_host(dst: uint8*, src: int64, bytes: int64) -> int32 {
+  return __mtlc_metal_to_host(dst, src, bytes);
+}
+@inline export fn gpu_sync() -> int32 { return 0; }
+
+export fn gpu_stream_create() -> int64 { return 1; }
+@inline export fn gpu_stream_destroy(stream: int64) -> int32 { return 0; }
+@inline export fn gpu_stream_sync(stream: int64) -> int32 { return 0; }
+@inline export fn gpu_to_device_async(dst: int64, src: uint8*, bytes: int64,
+                              stream: int64) -> int32 {
+  return __mtlc_metal_to_device(dst, src, bytes);
+}
+@inline export fn gpu_to_host_async(dst: uint8*, src: int64, bytes: int64,
+                            stream: int64) -> int32 {
+  return __mtlc_metal_to_host(dst, src, bytes);
+}
+
+var g_metal_event_ms: float64[256];
+var g_metal_event_count: int32 = 0;
+
+export fn gpu_event_create() -> int64 {
+  if (g_metal_event_count >= 256) { return 0; }
+  g_metal_event_ms[g_metal_event_count] = 0.0;
+  g_metal_event_count = g_metal_event_count + 1;
+  return (int64)g_metal_event_count;
+}
+@inline export fn gpu_event_destroy(event: int64) -> int32 { return 0; }
+export fn gpu_event_record(event: int64, stream: int64) -> int32 {
+  if (event < 1 || event > (int64)g_metal_event_count) { return 1; }
+  g_metal_event_ms[event - 1] = __mtlc_metal_now_ms();
+  return 0;
+}
+@inline export fn gpu_event_sync(event: int64) -> int32 { return 0; }
+@inline export fn gpu_stream_wait_event(stream: int64, event: int64) -> int32 {
+  return 0;
+}
+export fn gpu_event_elapsed_ms(start: int64, finish: int64,
+                               ms_out: float32*) -> int32 {
+  if (start < 1 || start > (int64)g_metal_event_count ||
+      finish < 1 || finish > (int64)g_metal_event_count) {
+    return 1;
+  }
+  ms_out[0] = (float32)(g_metal_event_ms[finish - 1] - g_metal_event_ms[start - 1]);
+  return 0;
+}
+
+@inline export fn gpu_device_attribute(device: int32, attribute: int32,
+                               value_out: int32*) -> int32 {
+  value_out[0] = 0;
+  return 1;
+}
+
+@inline export fn gpu_launch(f: int64, grid: int32, block: int32,
+                          params: int64*, nargs: int32) -> int32 {
+  return __mtlc_metal_launch(f, grid, 1, 1, block, 1, 1, 0, 0, params, nargs);
+}
+
+@inline export fn gpu_launch_3d(f: int64,
+                        gx: int32, gy: int32, gz: int32,
+                        bx: int32, by: int32, bz: int32,
+                        shared_bytes: int32, stream: int64,
+                        params: int64*, nargs: int32) -> int32 {
+  return __mtlc_metal_launch(f, gx, gy, gz, bx, by, bz, shared_bytes, stream,
+                             params, nargs);
+}
+
+export fn mtlc_gpu_launch_checked(f: int64,
+                                  gx: int32, gy: int32, gz: int32,
+                                  bx: int32, by: int32, bz: int32,
+                                  shared_bytes: int32, stream: int64,
+                                  params: int64*, nargs: int32) {
+  __mtlc_metal_launch_checked(f, gx, gy, gz, bx, by, bz, shared_bytes, stream,
+                              params, nargs);
+}
+
+@inline export fn gpu_launch_on(f: int64, grid: int32, block: int32,
+                        stream: int64, params: int64*, nargs: int32) -> int32 {
+  return gpu_launch_3d(f, grid, 1, 1, block, 1, 1, 0, stream, params, nargs);
+}
+
+@inline export fn gpu_graph_capture_begin(stream: int64) -> int32 { return 1; }
+export fn gpu_graph_capture_end(stream: int64) -> int64 { return 0; }
+@inline export fn gpu_graph_launch(exec: int64, stream: int64) -> int32 { return 1; }
+@inline export fn gpu_graph_destroy(exec: int64) -> int32 { return 1; }
+
+var g_gpu_bound_module: int64 = 0;
+
+export fn gpu_module_bind(mod: int64) -> int64 {
+  var previous: int64 = g_gpu_bound_module;
+  g_gpu_bound_module = mod;
+  return previous;
+}
+
+@inline export fn gpu_module_bound() -> int64 { return g_gpu_bound_module; }
+
+export fn mtlc_gpu_kernel_handle(name: cstring) -> int64 {
+  if (g_gpu_bound_module == 0) {
+    __mtlc_metal_fail(__mtlc_metal_cstr("mettle: dispatch of kernel '"), name,
+                      __mtlc_metal_cstr("' before any GPU module was loaded"));
+  }
+  var handle: int64 = __mtlc_metal_kernel(name);
+  if (handle == 0) {
+    __mtlc_metal_note(__mtlc_metal_cstr("mettle: the loaded Metal library cannot run kernel '"));
+    __mtlc_metal_note(name);
+    __mtlc_metal_note(__mtlc_metal_cstr("'\n  Metal: "));
+    __mtlc_metal_fail(__mtlc_metal_error(), __mtlc_metal_cstr(""),
+                      __mtlc_metal_cstr(""));
+  }
+  return handle;
+}
+
+export fn gpu_launch_sync(f: int64, grid: int32, block: int32,
+                                params: int64*, nargs: int32) -> int32 {
+  return gpu_launch(f, grid, block, params, nargs);
+}

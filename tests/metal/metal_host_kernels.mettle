@@ -1,0 +1,56 @@
+struct HostParams { count: int32; alpha: float32; beta: float32; }
+
+kernel(block = 64) host_vadd(a: float32*, b: float32*, c: float32*, n: int32) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  if (i < n) {
+    c[i] = a[i] + b[i];
+  }
+}
+
+kernel host_mixed(out: int64*, i8: int8, u16: uint16, x: float32, wide: int64,
+                  p: HostParams, flag: bool, last: int32) {
+  if (block.x == 0 && thread.x == 0) {
+    out[0] = (int64)i8;
+    out[1] = (int64)u16;
+    out[2] = (int64)(x * (float32)4.0);
+    out[3] = wide;
+    out[4] = (int64)p.count;
+    out[5] = (int64)(p.alpha * (float32)8.0);
+    out[6] = (int64)(p.beta * (float32)8.0);
+    if (flag) {
+      out[7] = (int64)last;
+    } else {
+      out[7] = (int64)-1;
+    }
+  }
+}
+
+kernel host_scale_rows(data: float32*, p: HostParams) {
+  var row: int32 = block.y;
+  var col: int32 = block.x * block_dim.x + thread.x;
+  if (col < p.count) {
+    var at: int32 = row * p.count + col;
+    data[at] = data[at] * p.alpha + p.beta;
+  }
+}
+
+kernel host_block_sum(x: int32*, out: int32*, n: int32) {
+  workgroup var partial: int32*;
+  var lane: int32 = thread.x;
+  var i: int32 = block.x * block_dim.x + lane;
+  var value: int32 = 0;
+  if (i < n) {
+    value = x[i];
+  }
+  partial[lane] = value;
+  barrier(workgroup, acq_rel);
+  if (lane == 0) {
+    var total: int32 = 0;
+    var k: int32 = 0;
+    while (k < block_dim.x) {
+      total = total + partial[k];
+      k = k + 1;
+    }
+    out[block.x] = total;
+  }
+}

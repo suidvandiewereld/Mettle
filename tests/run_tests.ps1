@@ -14772,6 +14772,25 @@ catch {
   Write-CaseResult -Name "gpu_structure" -Passed $false -Reason $_.Exception.Message
 }
 
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $machoExe = "bin/macho_object_test.exe"
+  & gcc -Wall -Wextra -std=c99 -O2 -Isrc -Iinclude tests/macho_object_test.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c src/codegen/macho_emitter.c -o $machoExe
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to compile the Mach-O object writer test"
+  }
+  $machoOutput = & $machoExe 2000 bin 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $machoOutput -notmatch " 0 failures") {
+    throw "Mach-O object writer test failed:`n$machoOutput"
+  }
+  Write-CaseResult -Name "macho_object" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "macho_object" -Passed $false -Reason $_.Exception.Message
+}
+
 $script:MetalAccepted = @(
   "examples/gpu_vadd/vadd_kernel.mettle",
   "examples/gpu_inference/decode_kernels.mettle",
@@ -14860,6 +14879,70 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $interpGcc = Get-Command gcc -ErrorAction SilentlyContinue
+  if (-not $interpGcc) {
+    Write-CaseResult -Name "metal_interp" -Passed $true -Reason "skipped: gcc not found"
+  } else {
+    $interpDir = Join-Path $scratchRoot "metal_interp"
+    New-Item -ItemType Directory -Force $interpDir | Out-Null
+    $mslRun = Join-Path $interpDir "msl_run.exe"
+    $interpSources = Get-ChildItem tests/metal -Filter "msl_interp*.c" | ForEach-Object { $_.FullName }
+    $log = & $interpGcc.Source -std=c99 -O2 -Wall -Wextra -o $mslRun tests/metal/msl_run.c @interpSources -lm 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "building the MSL interpreter failed:`n$log" }
+    $selftest = & $mslRun --selftest 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "MSL interpreter selftest failed:`n$selftest" }
+    $emitted = @()
+    foreach ($source in $script:MetalAccepted) {
+      $out = Join-Path $interpDir (([IO.Path]::GetFileNameWithoutExtension($source)) + ".metal")
+      $log = & $CompilerPath -O --emit-metal $source -o $out 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "--emit-metal rejected ${source}:`n$log" }
+      $emitted += $out
+    }
+    $check = & $mslRun --check @emitted 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "emitted MSL broke the strict dialect:`n$check" }
+    Write-CaseResult -Name "metal_interp" -Passed $true -Reason "$($emitted.Count) files"
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "metal_interp" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $harnessGcc = Get-Command gcc -ErrorAction SilentlyContinue
+  if (-not $harnessGcc) {
+    Write-CaseResult -Name "metal_harness" -Passed $true -Reason "skipped: gcc not found"
+  } else {
+    $harnessDir = Join-Path $scratchRoot "metal_harness"
+    New-Item -ItemType Directory -Force $harnessDir | Out-Null
+    $harnessExe = Join-Path $harnessDir "metal_harness.exe"
+    $contracts = Join-Path $harnessDir "contracts.metal"
+    $log = & $CompilerPath -O --emit-metal tests/metal/metal_kernels.mettle -o $contracts 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "emitting the Metal contract kernels failed:`n$log" }
+    $interpSources = Get-ChildItem tests/metal -Filter "msl_interp*.c" | ForEach-Object { $_.FullName }
+    $log = & $harnessGcc.Source -std=c99 -O2 -Wall -Wextra -o $harnessExe tests/metal/metal_harness.c @interpSources -lm 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "building the Metal contract harness failed:`n$log" }
+    $plain = & $harnessExe $contracts 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $plain -notmatch "25/25 contracts passed") {
+      throw "Metal contracts failed:`n$plain"
+    }
+    $spurious = & $harnessExe --spurious-cas $contracts 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $spurious -notmatch "25/25 contracts passed") {
+      throw "Metal contracts failed with spurious CAS failures:`n$spurious"
+    }
+    Write-CaseResult -Name "metal_harness" -Passed $true -Reason "25 contracts, twice"
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "metal_harness" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $metalDir = Join-Path $scratchRoot "metal_emit"
   $metalTool = $null
   $metalPrefix = @()
@@ -14892,6 +14975,43 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "metal_compiler" -Passed $false -Reason $_.Exception.Message
+}
+
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $hostGcc = Get-Command gcc -ErrorAction SilentlyContinue
+  if (-not $hostGcc) {
+    Write-CaseResult -Name "metal_host_e2e" -Passed $true -Reason "skipped: gcc not found"
+  } else {
+    $hostDir = Join-Path $scratchRoot "metal_host"
+    New-Item -ItemType Directory -Force $hostDir | Out-Null
+    $hostLib = Join-Path $hostDir "host.metal"
+    $hostObj = Join-Path $hostDir "host.obj"
+    $hostExe = Join-Path $hostDir "host.exe"
+    $log = & $CompilerPath -O --emit-metal tests/metal/metal_host_kernels.mettle -o $hostLib 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "emitting the Metal host kernels failed:`n$log" }
+    $log = & $CompilerPath --gpu-provider=metal --emit-obj tests/metal/metal_host_main.mettle -o $hostObj 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "emitting the Metal host program failed:`n$log" }
+    $interpSources = Get-ChildItem tests/metal -Filter "msl_interp*.c" |
+      Where-Object { $_.Name -notlike "*_test*" } | ForEach-Object { $_.FullName }
+    $log = & $hostGcc.Source -std=c99 -O2 -o $hostExe $hostObj src/runtime/metal_runtime.c `
+      tests/metal/metal_provider_interp.c @interpSources -lm 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "linking the Metal host program failed:`n$log" }
+    $env:METTLE_METAL_HOST_LIBRARY = $hostLib
+    try {
+      $run = & $hostExe 2>&1 | Out-String
+      $code = $LASTEXITCODE
+    } finally {
+      Remove-Item Env:METTLE_METAL_HOST_LIBRARY -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) { throw "the Metal host program exited ${code}:`n$run" }
+    Write-CaseResult -Name "metal_host_e2e" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "metal_host_e2e" -Passed $false -Reason $_.Exception.Message
 }
 
 

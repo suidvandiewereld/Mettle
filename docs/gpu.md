@@ -2168,12 +2168,44 @@ Each of these is refused with a message naming the kernel and the line:
   another. Metal has no generic address space; a helper that takes a plain
   `T*` is compiled once per address space it is called with.
 
+### Launching on Metal
+
+On macOS, `std/gpu` runs launches through Metal. The host program is the same
+one that drives CUDA: `gpu_open` loads the `.metal` file that `--emit-metal`
+wrote, `gpu_malloc` returns a 64-bit GPU address, `gpu_to_device` and
+`gpu_to_host` copy through the buffer's shared storage, and `dispatch` checks
+each launch against the `extern kernel` declarations from
+`--emit-kernel-decls`.
+
+```bash
+mettle -O --emit-metal kernels.mettle -o kernels.metal \
+  --emit-kernel-decls=kernel_decls.mettle
+mettle -O --build host.mettle -o host
+```
+
+`--gpu-provider=metal` picks the Metal provider on another host, which is how
+the tests run it against the interpreter. Each launch commits its own command
+buffer and waits for it, so `gpu_sync`, streams and events have nothing to
+wait on; events record host time. Metal has one GPU per process, no managed
+memory (`gpu_managed_malloc` returns null) and no graph capture.
+
+A launch needs each argument's size and alignment to build the argument
+struct. `dispatch` appends them to the parameter table it passes the
+provider: `nargs` pointers to argument cells, then `nargs` words of
+`alignment << 24 | size`. The CUDA provider reads only the pointers. A
+hand-built table for `gpu_launch` on Metal needs the second half too.
+
 ### Testing without a Mac
 
 `tests/metal/metal_harness.c` runs 25 contracts with CPU oracles. On Windows
 and Linux it executes the emitted MSL in `tests/metal/msl_interp.c`, a strict
 interpreter that also refuses anything MSL leaves undefined (signed overflow,
-oversized shifts, misaligned or out-of-bounds access). Built on macOS with
+oversized shifts, misaligned or out-of-bounds access).
+`tests/metal/metal_host_main.mettle` is a Mettle host program built with
+`--gpu-provider=metal` and linked with `src/runtime/metal_runtime.c` and
+`tests/metal/metal_provider_interp.c`, a provider that runs the interpreter in
+place of a GPU. It checks scalar, record and pointer argument packing, 2-D
+grids, and the dynamic workgroup arena end to end. Built on macOS with
 `-DMETAL_HARNESS_NATIVE -framework Metal -framework Foundation -lobjc`, the
 same contracts run on the GPU. When Apple's Metal compiler is installed
 (`METTLE_METAL_COMPILER`, `xcrun`, or `metal` on PATH), the suite compiles

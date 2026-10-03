@@ -3697,7 +3697,9 @@ static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
     return 0;
   }
   for (size_t i = 0; i < nargs; i++) {
-    if (!launch->argument_types[controls + i]) {
+    const MtlcType *type = launch->argument_types[controls + i];
+    if (!type || type->size == 0 || type->size >= ((size_t)1 << 24) ||
+        type->alignment >= 128) {
       return 0;
     }
   }
@@ -3721,8 +3723,8 @@ static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
   if (nargs > 0) {
     IRInstruction params_decl = {0};
     IRInstruction params_base = {0};
-    snprintf(params_type, sizeof(params_type), "int64[%zu]", nargs);
-    params_array_type = ir_program_int64_array_type(program, nargs);
+    snprintf(params_type, sizeof(params_type), "int64[%zu]", nargs * 2u);
+    params_array_type = ir_program_int64_array_type(program, nargs * 2u);
     if (!params_array_type) {
       return 0;
     }
@@ -3806,6 +3808,42 @@ static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
       }
       ir_operand_destroy(&store.dest);
       ir_operand_destroy(&store.lhs);
+    }
+
+    for (size_t i = 0; i < nargs; i++) {
+      const MtlcType *type = launch->argument_types[controls + i];
+      size_t alignment = type->alignment ? type->alignment : 1;
+      char layout_slot_name[80];
+      IRInstruction slot = {0};
+      IRInstruction store = {0};
+      snprintf(layout_slot_name, sizeof(layout_slot_name),
+               ".__mtlc_gpu%zu_layout%zu", launch_id, i);
+
+      slot.op = IR_OP_BINARY;
+      slot.location = launch->location;
+      slot.dest = ir_operand_temp(layout_slot_name);
+      slot.lhs = ir_operand_temp(params_base_name);
+      slot.rhs = ir_operand_int((long long)((nargs + i) * 8u));
+      slot.text = "+";
+      if (!slot.dest.name || !slot.lhs.name ||
+          !ir_function_append_instruction(out, &slot)) {
+        ir_operand_destroy(&slot.dest);
+        ir_operand_destroy(&slot.lhs);
+        return 0;
+      }
+      ir_operand_destroy(&slot.dest);
+      ir_operand_destroy(&slot.lhs);
+
+      store.op = IR_OP_STORE;
+      store.location = launch->location;
+      store.dest = ir_operand_temp(layout_slot_name);
+      store.lhs = ir_operand_int((long long)((alignment << 24) | type->size));
+      store.rhs = ir_operand_int(8);
+      if (!store.dest.name || !ir_function_append_instruction(out, &store)) {
+        ir_operand_destroy(&store.dest);
+        return 0;
+      }
+      ir_operand_destroy(&store.dest);
     }
   }
 

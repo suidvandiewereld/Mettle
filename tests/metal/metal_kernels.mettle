@@ -1,0 +1,550 @@
+extern fn sqrtf(x: float32) -> float32 = "sqrtf";
+extern fn expf(x: float32) -> float32 = "expf";
+extern fn rsqrtf(x: float32) -> float32 = "rsqrtf";
+
+kernel atomic_litmus32(state: uint32*, tickets: uint32*, cas: uint32*,
+                       shared_out: uint32*) {
+  workgroup var local32: uint32[1];
+  var id: uint64 = (uint64)(block.x * block_dim.x + thread.x);
+  var zero: uint64 = 0;
+  var one: uint32 = 1;
+  var id32: uint32 = (uint32)id;
+  var bit: uint32 = (uint32)1 << (uint32)(id % (uint64)32);
+  tickets[id] = atomic_fetch_add(state, 0, one, order: acq_rel, scope: device);
+  atomic_fetch_sub(state, 1, one, order: release, scope: device);
+  atomic_fetch_min(state, 2, id32, order: relaxed, scope: device);
+  atomic_fetch_max(state, 3, id32, order: relaxed, scope: device);
+  atomic_fetch_and(state, 4, ~bit, order: relaxed, scope: device);
+  atomic_fetch_or(state, 5, bit, order: relaxed, scope: device);
+  atomic_fetch_xor(state, 6, bit, order: relaxed, scope: device);
+  atomic_exchange(state, 7, id32, order: relaxed, scope: device);
+  cas[id] = atomic_compare_exchange(state, 8, 0, id32 + one,
+                                    success_order: acq_rel,
+                                    failure_order: acquire, scope: device);
+  if (thread.x == 0) {
+    local32[0] = 0;
+  }
+  barrier(workgroup, acq_rel);
+  atomic_fetch_add(local32, zero, one, order: relaxed);
+  barrier(workgroup, acq_rel);
+  if (thread.x == 0) {
+    shared_out[block.x] = local32[0];
+  }
+  var message: uint64 = (uint64)16 + (uint64)block.x * (uint64)3;
+  if (thread.x == 0) {
+    state[message + (uint64)1] = (uint32)(0x5a00 + block.x);
+    atomic_store(state, message, one, order: release, scope: device);
+  }
+  if (thread.x == 32) {
+    var observed: uint32 = 0;
+    while (observed == 0) {
+      observed = atomic_load(state, message, order: acquire, scope: device);
+    }
+    state[message + (uint64)2] = state[message + (uint64)1];
+  }
+}
+
+kernel index_3d(out: int32*) {
+  var local_linear: int32 = (thread.z * block_dim.y + thread.y) * block_dim.x + thread.x;
+  var block_linear: int32 = (block.z * grid_dim.y + block.y) * grid_dim.x + block.x;
+  var block_threads: int32 = block_dim.x * block_dim.y * block_dim.z;
+  var base: int32 = (block_linear * block_threads + local_linear) * 12;
+  out[base + 0] = thread.x;
+  out[base + 1] = thread.y;
+  out[base + 2] = thread.z;
+  out[base + 3] = block.x;
+  out[base + 4] = block.y;
+  out[base + 5] = block.z;
+  out[base + 6] = block_dim.x;
+  out[base + 7] = block_dim.y;
+  out[base + 8] = block_dim.z;
+  out[base + 9] = grid_dim.x;
+  out[base + 10] = grid_dim.y;
+  out[base + 11] = grid_dim.z;
+}
+
+@noinline fn multiply_add(alpha: float32, x: float32, y: float32) -> float32 {
+  return alpha * x + y;
+}
+
+kernel saxpy_odd(alpha: float32, x: float32*, y: float32*, n: int32) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  if (i < n) {
+    y[i] = multiply_add(alpha, x[i], y[i]);
+  }
+}
+
+fn pick_activation(v: float32, kind: int32) -> float32 {
+  if (kind == 0) { return v * ((float32)1.0 / ((float32)1.0 + expf((float32)0.0 - v))); }
+  if (kind == 1) { return v * (float32)0.5; }
+  if (v > (float32)0.0) { return v; }
+  return (float32)0.0;
+}
+
+kernel branch_return_join(x: float32*, y: float32*, kinds: int32*, out: float32*, n: int32) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  if (i < n) {
+    out[i] = pick_activation(x[i], kinds[i]) * y[i];
+  }
+}
+
+kernel row_norm(inp: float32*, out: float32*, rows: int32, cols: int32) {
+  var row: int32 = block.x * block_dim.x + thread.x;
+  if (row < rows) {
+    var sum: float32 = 0.0;
+    var col: int32 = 0;
+    while (col < cols) {
+      var value: float32 = inp[row * cols + col];
+      sum = sum + value * value;
+      col = col + 1;
+    }
+    out[row] = sqrtf(sum);
+  }
+}
+
+kernel staged_copy(x: float32*, out: float32*, n: int32) {
+  workgroup var tile: float32[64];
+  private var scratch: int32[4];
+  var lane: int32 = thread.x;
+  var i: int32 = block.x * block_dim.x + lane;
+  scratch[0] = lane;
+  if (i < n) {
+    tile[lane] = x[i];
+  }
+  barrier(workgroup, global, acq_rel);
+  if (i < n) {
+    out[i] = tile[lane] + (float32)(scratch[0] - lane);
+  }
+}
+
+kernel async_stage_u32x4(src: uint32*, out: uint32*) {
+  workgroup var tile: uint32[128];
+  var lane: int32 = thread.x;
+  var base: int32 = lane * 4;
+  async_copy_workgroup(&tile[base], src + base, 4,
+                       transaction: 16, cache: global);
+  async_copy_commit();
+  async_copy_wait(0);
+  barrier(workgroup, acq_rel);
+  out[base] = tile[(base + 124) % 128];
+  out[base + 1] = tile[(base + 125) % 128];
+  out[base + 2] = tile[(base + 126) % 128];
+  out[base + 3] = tile[(base + 127) % 128];
+}
+
+kernel auto_stage_u32(src: uint32*, out: uint32*) {
+  workgroup var tile: uint32[32];
+  var lane: int32 = thread.x;
+  tile[lane] = src[lane];
+  var mix: uint32 = (uint32)lane * (uint32)1664525 + (uint32)1013904223;
+  barrier(workgroup, acq_rel);
+  out[lane] = tile[(lane + 31) % 32] ^ mix;
+}
+
+kernel dynamic_staged_copy(x: float32*, out: float32*, n: int32) {
+  workgroup var values: float32*;
+  workgroup var metadata: uint32*;
+  var lane: int32 = thread.x;
+  var i: int32 = block.x * block_dim.x + lane;
+  if (i < n) {
+    values[lane] = x[i];
+    metadata[64 + lane] = (uint32)i;
+  }
+  barrier(workgroup, acq_rel);
+  if (i < n) {
+    out[i] = values[lane] + (float32)(metadata[64 + lane] - (uint32)i);
+  }
+}
+
+kernel subgroup_contract(fsrc: float32*, fdst: float32*,
+                         usrc: uint32*, udst: uint32*, n: int32) {
+  var lane: uint32 = subgroup_local_id();
+  var i: int32 = block.x * block_dim.x + thread.x;
+  var fv: float32 = 0.0;
+  var uv: uint32 = 0;
+  if (i < n) {
+    fv = fsrc[i];
+    uv = usrc[i];
+  }
+  var fsum: float32 = subgroup_reduce_add(fv);
+  var usum: uint32 = subgroup_reduce_add(uv);
+  var ffirst: float32 = subgroup_broadcast(fv, 0);
+  var ufirst: uint32 = subgroup_broadcast(uv, 0);
+  if (i < n) {
+    fdst[i] = fsum + ffirst;
+    udst[i] = usum + ufirst + lane - lane;
+  }
+}
+
+kernel subgroup_extended(fsrc: float32*, fdst: float32*,
+                         usrc: uint32*, udst: uint32*, n: int32) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  var fadd: float32 = 0.0;
+  var uadd: uint32 = 0;
+  var fmin_input: float32 = (float32)340282300000000000000000000000000000000.0;
+  var umin_input: uint32 = (uint32)4294967295;
+  var fmax_input: float32 = (float32)-340282300000000000000000000000000000000.0;
+  var umax_input: uint32 = 0;
+  if (i < n) {
+    fadd = fsrc[i];
+    uadd = usrc[i];
+    fmin_input = fadd;
+    umin_input = uadd;
+    fmax_input = fadd;
+    umax_input = uadd;
+  }
+  var fmin: float32 = subgroup_reduce_min(fmin_input);
+  var fmax: float32 = subgroup_reduce_max(fmax_input);
+  var finc: float32 = subgroup_scan_inclusive_add(fadd);
+  var fexc: float32 = subgroup_scan_exclusive_add(fadd);
+  var umin: uint32 = subgroup_reduce_min(umin_input);
+  var umax: uint32 = subgroup_reduce_max(umax_input);
+  var uinc: uint32 = subgroup_scan_inclusive_add(uadd);
+  var uexc: uint32 = subgroup_scan_exclusive_add(uadd);
+  if (i < n) {
+    fdst[i] = fmin;
+    fdst[n + i] = fmax;
+    fdst[n * 2 + i] = finc;
+    fdst[n * 3 + i] = fexc;
+    udst[i] = umin;
+    udst[n + i] = umax;
+    udst[n * 2 + i] = uinc;
+    udst[n * 3 + i] = uexc;
+  }
+}
+
+kernel subgroup_exchange_vote(usrc: uint32*, uout: uint32*,
+                              fsrc: float32*, fout: float32*) {
+  var lane: uint32 = subgroup_local_id();
+  var i: int32 = thread.x;
+  var source: uint32 = (lane * 5 + 7) % subgroup_size();
+  var predicate: bool = lane % 3 == 1;
+  var no_lane: bool = lane >= subgroup_size();
+  uout[i * 7] = subgroup_shuffle(usrc[i], source);
+  uout[i * 7 + 1] = subgroup_ballot(predicate, 0);
+  uout[i * 7 + 2] = subgroup_ballot(predicate, 1);
+  uout[i * 7 + 3] = (uint32)subgroup_any(predicate);
+  uout[i * 7 + 4] = (uint32)subgroup_all(lane < subgroup_size());
+  uout[i * 7 + 5] = (uint32)subgroup_all(predicate);
+  uout[i * 7 + 6] = (uint32)subgroup_any(no_lane);
+  fout[i] = subgroup_shuffle(fsrc[i], source);
+}
+
+kernel softmax_rows_f32(inp: float32*, out: float32*, rows: int32, cols: int32,
+                        ldin: int32, ldout: int32) {
+  var row: int32 = block.x;
+  var lane: int32 = (int32)subgroup_local_id();
+  var width: int32 = (int32)subgroup_size();
+  if (row < rows && cols > 0) {
+    var in_base: int64 = (int64)row * (int64)ldin;
+    var out_base: int64 = (int64)row * (int64)ldout;
+    var local_max: float32 = (float32)-340282300000000000000000000000000000000.0;
+    var col: int32 = lane;
+    while (col < cols) {
+      var value: float32 = inp[in_base + (int64)col];
+      if (value > local_max) {
+        local_max = value;
+      }
+      col = col + width;
+    }
+    var row_max: float32 = subgroup_reduce_max(local_max);
+    var local_sum: float32 = 0.0;
+    col = lane;
+    while (col < cols) {
+      local_sum = local_sum + expf(inp[in_base + (int64)col] - row_max);
+      col = col + width;
+    }
+    var row_sum: float32 = subgroup_reduce_add(local_sum);
+    col = lane;
+    while (col < cols) {
+      var normalized: float32 = expf(inp[in_base + (int64)col] - row_max) / row_sum;
+      out[out_base + (int64)col] = normalized;
+      col = col + width;
+    }
+  }
+}
+
+kernel layer_norm_rows_f32(inp: float32*, gamma: float32*, beta: float32*,
+                           out: float32*, rows: int32, cols: int32,
+                           ldin: int32, ldout: int32, epsilon: float32) {
+  var row: int32 = block.x;
+  var lane: int32 = (int32)subgroup_local_id();
+  var width: int32 = (int32)subgroup_size();
+  if (row < rows && cols > 0) {
+    var in_base: int64 = (int64)row * (int64)ldin;
+    var out_base: int64 = (int64)row * (int64)ldout;
+    var local_sum: float32 = 0.0;
+    var col: int32 = lane;
+    while (col < cols) {
+      local_sum = local_sum + inp[in_base + (int64)col];
+      col = col + width;
+    }
+    var row_sum: float32 = subgroup_reduce_add(local_sum);
+    var mean: float32 = row_sum / (float32)cols;
+    var local_squared: float32 = 0.0;
+    col = lane;
+    while (col < cols) {
+      var centered: float32 = inp[in_base + (int64)col] - mean;
+      local_squared = local_squared + centered * centered;
+      col = col + width;
+    }
+    var squared_sum: float32 = subgroup_reduce_add(local_squared);
+    var inverse_stddev: float32 = rsqrtf(squared_sum / (float32)cols + epsilon);
+    col = lane;
+    while (col < cols) {
+      var normalized: float32 = (inp[in_base + (int64)col] - mean) * inverse_stddev;
+      out[out_base + (int64)col] = normalized * gamma[col] + beta[col];
+      col = col + width;
+    }
+  }
+}
+
+kernel tensor_f16_f32(a: uint16*, b: uint16*, c: float32*, d: float32*, lda: int32, ldb: int32, ldc: int32, ldd: int32) {
+  tensor_mma(a, b, c, d, shape: m16n16k16, input_type: f16, output_type: f32, a_layout: row, b_layout: col, c_layout: row, d_layout: row, lda: lda, ldb: ldb, ldc: ldc, ldd: ldd);
+}
+
+kernel tensor_chain4(a: uint16*, b: uint16*, c: float32*, d: float32*,
+                     lda: int32, ldb: int32, ldc: int32, ldd: int32) {
+  var a1: uint16* = a + 16;
+  var a2: uint16* = a + 32;
+  var a3: uint16* = a + 48;
+  var b1: uint16* = b + 16;
+  var b2: uint16* = b + 32;
+  var b3: uint16* = b + 48;
+  tensor_mma(a, b, c, d,
+             shape: m16n16k16, input_type: f16, output_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: lda, ldb: ldb, ldc: ldc, ldd: ldd);
+  tensor_mma(a1, b1, d, d,
+             shape: m16n16k16, input_type: f16, output_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: lda, ldb: ldb, ldc: ldd, ldd: ldd);
+  tensor_mma(a2, b2, d, d,
+             shape: m16n16k16, input_type: f16, output_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: lda, ldb: ldb, ldc: ldd, ldd: ldd);
+  tensor_mma(a3, b3, d, d,
+             shape: m16n16k16, input_type: f16, output_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: lda, ldb: ldb, ldc: ldd, ldd: ldd);
+}
+
+kernel gemm_full_tiles_f16_f32(a: uint16*, b: uint16*, c: float32*, d: float32*,
+                               m: int32, n: int32, k: int32,
+                               lda: int32, ldb: int32, ldc: int32, ldd: int32) {
+  var tile_row: int64 = (int64)block.y * 16;
+  var tile_col: int64 = (int64)block.x * 16;
+  if (tile_row + 16 <= (int64)m && tile_col + 16 <= (int64)n &&
+      k >= 16 && k % 16 == 0) {
+    var a_tile: uint16* = a + tile_row * (int64)lda;
+    var b_tile: uint16* = b + tile_col * (int64)ldb;
+    var c_tile: float32* = c + tile_row * (int64)ldc + tile_col;
+    var d_tile: float32* = d + tile_row * (int64)ldd + tile_col;
+    tensor_mma(a_tile, b_tile, c_tile, d_tile,
+               shape: m16n16k16, input_type: f16, output_type: f32,
+               a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+               lda: lda, ldb: ldb, ldc: ldc, ldd: ldd);
+    var inner: int32 = 16;
+    while (inner < k) {
+      tensor_mma(a_tile + inner, b_tile + inner, d_tile, d_tile,
+                 shape: m16n16k16, input_type: f16, output_type: f32,
+                 a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+                 lda: lda, ldb: ldb, ldc: ldd, ldd: ldd);
+      inner = inner + 16;
+    }
+  }
+}
+
+kernel tensor_pipeline_f16_f32(a: uint16*, b: uint16*,
+                               c: float32*, d: float32*) {
+  workgroup var a_stage: uint16[512];
+  workgroup var b_stage: uint16[512];
+  var lane: int32 = thread.x;
+  var base: int32 = lane * 8;
+  async_copy_workgroup(&a_stage[base], a + base, 8,
+                       transaction: 16, cache: global);
+  async_copy_workgroup(&b_stage[base], b + base, 8,
+                       transaction: 16, cache: global);
+  async_copy_commit();
+  async_copy_workgroup(&a_stage[256 + base], a + 256 + base, 8,
+                       transaction: 16, cache: global);
+  async_copy_workgroup(&b_stage[256 + base], b + 256 + base, 8,
+                       transaction: 16, cache: global);
+  async_copy_commit();
+  async_copy_wait(1);
+  barrier(workgroup, acq_rel);
+  tensor_mma(&a_stage[0], &b_stage[0], c, d,
+             shape: m16n16k16, input_type: f16, output_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: 16, ldb: 16, ldc: 16, ldd: 16);
+  async_copy_wait(0);
+  barrier(workgroup, acq_rel);
+  tensor_mma(&a_stage[256], &b_stage[256], d, d,
+             shape: m16n16k16, input_type: f16, output_type: f32,
+             a_layout: row, b_layout: col, c_layout: row, d_layout: row,
+             lda: 16, ldb: 16, ldc: 16, ldd: 16);
+}
+
+kernel(block = 32) q4_scaled(a: int8*, b: uint8*, d: float32*, sa: float32*, sb: uint16*) {
+  tensor_mma(a, b, 0.0, d, shape: m32n32k64,
+             a_type: i8, b_type: u4, b_packing: halves, b_zero_point: 8,
+             accumulator_type: f32, result_type: f32,
+             a_scale_mode: block32, b_scale_mode: block32,
+             a_scale_type: f32, b_scale_type: f16,
+             a_scale: sa, b_scale: sb,
+             a_layout: row, b_layout: col,
+             lda: 64, ldb: 64, ldd: 32,
+             a_scale_ld: 2, b_scale_ld: 2);
+}
+
+kernel narrow_scalar_abi(i8: int8, u8: uint8, i16: int16, u16: uint16,
+                         flag: bool, out: int32*) {
+  if (flag) {
+    out[0] = (int32)i8 + (int32)u8 + (int32)i16 + (int32)u16;
+  }
+}
+
+struct RecParams { count: int32; alpha: float32; beta: float32; }
+struct RecPair { lo: float32; hi: float32; }
+
+@noinline fn rec_scale(v: RecPair, k: float32) -> RecPair {
+  var r: RecPair;
+  r.lo = v.lo * k;
+  r.hi = v.hi + k;
+  return r;
+}
+
+@noinline fn rec_span(p: RecPair*) -> float32 {
+  return p->hi - p->lo;
+}
+
+@noinline fn rec_accumulate(slot: float32*, value: float32) {
+  slot[0] = slot[0] + value;
+}
+
+kernel record_pipeline(out: float32*, src: float32*, p: RecParams) {
+  var i: int32 = block.x * block_dim.x + thread.x;
+  if (i < p.count) {
+    var seed: RecPair;
+    seed.lo = src[i];
+    seed.hi = (float32)i;
+    var scaled: RecPair = rec_scale(seed, p.alpha);
+    var copy: RecPair = scaled;
+    var table: RecPair[4];
+    var k: int32 = 0;
+    while (k < 4) {
+      table[k].lo = copy.lo + (float32)k;
+      table[k].hi = copy.hi;
+      k = k + 1;
+    }
+    var pick: int32 = i % 4;
+    var total: float32 = 100.0;
+    rec_accumulate(&total, rec_span(&table[pick]));
+    rec_accumulate(&total, p.beta);
+    out[i] = total;
+  }
+}
+
+kernel narrow_wrap(out: int32*) {
+  var t: int32 = thread.x;
+  var a8: int8 = (int8)(t * 37);
+  var b8: int8 = (int8)(100 + t);
+  var s8: int8 = a8 + b8;
+  var u8: uint8 = (uint8)(t * 91);
+  var v8: uint8 = u8 * (uint8)3;
+  var a16: int16 = (int16)(t * 2311);
+  var m16: int16 = a16 * (int16)19;
+  var big: int32 = 2147483600 + t * 13;
+  var wrap: int32 = big + 100;
+  var neg: int32 = 0 - 7 - t;
+  var q: int32 = neg / 3;
+  var r: int32 = neg % 3;
+  var minus_one: int32 = 0 - 1;
+  var lowest: int32 = 0 - 2147483647 - 1;
+  var q2: int32 = lowest / minus_one;
+  var r2: int32 = lowest % minus_one;
+  var sh: int32 = 1 << (t + 30);
+  var ush: uint32 = (uint32)0x80000000 >> (uint32)(t + 31);
+  var ash: int32 = lowest >> (t + 1);
+  var w64: int64 = (int64)9223372036854775000 + (int64)(t * 1000);
+  var base: int32 = t * 16;
+  out[base] = (int32)s8;
+  out[base + 1] = (int32)v8;
+  out[base + 2] = (int32)m16;
+  out[base + 3] = wrap;
+  out[base + 4] = q;
+  out[base + 5] = r;
+  out[base + 6] = q2;
+  out[base + 7] = r2;
+  out[base + 8] = sh;
+  out[base + 9] = (int32)ush;
+  out[base + 10] = ash;
+  out[base + 11] = (int32)(w64 >> 32);
+  out[base + 12] = (int32)w64;
+  out[base + 13] = (int32)((uint32)t * (uint32)4000000000);
+  out[base + 14] = (int32)((int64)t * (int64)-3);
+  out[base + 15] = (int32)(uint8)(t * 300);
+}
+
+kernel float_rules(x: float32*, out: float32*, flags: int32*) {
+  var t: int32 = thread.x;
+  var v: float32 = x[t];
+  out[t * 4] = v * 2.0;
+  out[t * 4 + 1] = (float32)1.0 / v;
+  out[t * 4 + 2] = (float32)(-(3.000001e38));
+  out[t * 4 + 3] = v + (float32)0.1;
+  var flag: int32 = 0;
+  if (v > 0.1) { flag = flag + 1; }
+  if (v >= 0.1) { flag = flag + 2; }
+  if (v < 0.1) { flag = flag + 4; }
+  if (v <= 0.1) { flag = flag + 8; }
+  if (v == 0.1) { flag = flag + 16; }
+  if (v != 0.1) { flag = flag + 32; }
+  if (v > 1.0) { flag = flag + 64; }
+  flags[t] = flag;
+}
+
+kernel bit_ops(a: uint32*, b: uint32*, out: uint32*, fout: float32*) {
+  var t: int32 = thread.x;
+  var x: uint32 = a[t];
+  var y: uint32 = b[t];
+  var base: int32 = t * 12;
+  out[base] = dp4a_u32(x, y, (uint32)t);
+  out[base + 1] = (uint32)dp4a_s32((int32)x, (int32)y, t - 5);
+  out[base + 2] = dp2a_lo_u32(x, y, (uint32)7);
+  out[base + 3] = dp2a_hi_u32(x, y, (uint32)7);
+  out[base + 4] = (uint32)dp2a_lo_s32((int32)x, (int32)y, 0 - 3);
+  out[base + 5] = (uint32)dp2a_hi_s32((int32)x, (int32)y, 0 - 3);
+  out[base + 6] = prmt_b32(x, y, (uint32)(0x7531 + t * 0x1111) & (uint32)0xffff);
+  out[base + 7] = f2bf(f32_from_bits(x));
+  out[base + 8] = (uint32)f2h(f32_from_bits(y));
+  out[base + 9] = hadd2(x, y);
+  out[base + 10] = hmul2(x, y);
+  out[base + 11] = hfma2(x, y, x ^ y);
+  fout[t * 3] = bf2f(x & (uint32)0xffff);
+  fout[t * 3 + 1] = h2f((int32)(y & (uint32)0xffff));
+  fout[t * 3 + 2] = h2f_hi(x) + h2f_lo(y);
+}
+
+kernel control_flow(out: int32*, limits: int32*) {
+  var t: int32 = thread.x;
+  var limit: int32 = limits[t];
+  var acc: int32 = 0;
+  var i: int32 = 0;
+  while (i < 10) {
+    i = i + 1;
+    if (i % 3 == t % 3) { continue; }
+    var j: int32 = 0;
+    while (j < i) {
+      if (j * i > limit) { break; }
+      if (j == 7 && t % 5 == 0) {
+        out[t] = acc * 1000 + i * 10 + j;
+        return;
+      }
+      acc = acc + j;
+      j = j + 1;
+    }
+    if (acc > limit * 4) { break; }
+  }
+  out[t] = acc * 1000 + i;
+}

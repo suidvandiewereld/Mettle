@@ -1,0 +1,150 @@
+import "std/gpu";
+
+struct HostParams { count: int32; alpha: float32; beta: float32; }
+
+extern kernel(block = 64) host_vadd(a: float32*, b: float32*, c: float32*, n: int32);
+extern kernel host_mixed(out: int64*, i8: int8, u16: uint16, x: float32, wide: int64,
+                         p: HostParams, flag: bool, last: int32);
+extern kernel host_scale_rows(data: float32*, p: HostParams);
+extern kernel host_block_sum(x: int32*, out: int32*, n: int32);
+
+extern fn malloc(bytes: int64) -> uint8* = "malloc";
+extern fn getenv(name: cstring) -> cstring = "getenv";
+
+fn check_vadd() -> int32 {
+  var n: int32 = 1000;
+  var bytes: int64 = (int64)n * 4;
+  var ha: float32* = (float32*)malloc(bytes);
+  var hb: float32* = (float32*)malloc(bytes);
+  var hc: float32* = (float32*)malloc(bytes);
+  var i: int32 = 0;
+  while (i < n) {
+    ha[i] = (float32)i;
+    hb[i] = (float32)(3 * i + 1);
+    hc[i] = (float32)-7;
+    i = i + 1;
+  }
+  var da: int64 = gpu_malloc(bytes);
+  var db: int64 = gpu_malloc(bytes);
+  var dc: int64 = gpu_malloc(bytes);
+  if (da == 0 || db == 0 || dc == 0) { return 11; }
+  if (gpu_to_device(da, (uint8*)ha, bytes) != 0) { return 12; }
+  if (gpu_to_device(db, (uint8*)hb, bytes) != 0) { return 12; }
+  dispatch host_vadd[work: n](da, db, dc, n);
+  if (gpu_to_host((uint8*)hc, dc, bytes) != 0) { return 13; }
+  i = 0;
+  while (i < n) {
+    if (hc[i] != (float32)(4 * i + 1)) { return 14; }
+    i = i + 1;
+  }
+  gpu_free(da);
+  gpu_free(db);
+  gpu_free(dc);
+  return 0;
+}
+
+fn check_mixed() -> int32 {
+  var dout: int64 = gpu_malloc(64);
+  if (dout == 0) { return 21; }
+  var p: HostParams;
+  p.count = 7;
+  p.alpha = (float32)1.5;
+  p.beta = (float32)-0.25;
+  var wide: int64 = 0x123456789A;
+  dispatch host_mixed[1, 32](dout, (int8)-5, (uint16)65000, (float32)2.25, wide,
+                             p, true, 424242);
+  var out: int64[8];
+  if (gpu_to_host((uint8*)&out[0], dout, 64) != 0) { return 22; }
+  if (out[0] != (int64)-5) { return 23; }
+  if (out[1] != (int64)65000) { return 24; }
+  if (out[2] != (int64)9) { return 25; }
+  if (out[3] != wide) { return 26; }
+  if (out[4] != (int64)7) { return 27; }
+  if (out[5] != (int64)12) { return 28; }
+  if (out[6] != (int64)-2) { return 29; }
+  if (out[7] != (int64)424242) { return 30; }
+  gpu_free(dout);
+  return 0;
+}
+
+fn check_rows() -> int32 {
+  var cols: int32 = 100;
+  var rows: int32 = 3;
+  var bytes: int64 = (int64)(cols * rows) * 4;
+  var host: float32* = (float32*)malloc(bytes);
+  var r: int32 = 0;
+  while (r < rows) {
+    var c: int32 = 0;
+    while (c < cols) {
+      host[r * cols + c] = (float32)(r * 1000 + c);
+      c = c + 1;
+    }
+    r = r + 1;
+  }
+  var dd: int64 = gpu_malloc(bytes);
+  if (dd == 0) { return 31; }
+  if (gpu_to_device(dd, (uint8*)host, bytes) != 0) { return 32; }
+  var p: HostParams;
+  p.count = cols;
+  p.alpha = (float32)1.5;
+  p.beta = (float32)-0.25;
+  dispatch host_scale_rows[grid: ((cols + 31) / 32, rows, 1),
+                           block: (32, 1, 1)](dd, p);
+  if (gpu_to_host((uint8*)host, dd, bytes) != 0) { return 33; }
+  r = 0;
+  while (r < rows) {
+    var c: int32 = 0;
+    while (c < cols) {
+      var want: float32 = (float32)(r * 1000 + c) * (float32)1.5 - (float32)0.25;
+      if (host[r * cols + c] != want) { return 34; }
+      c = c + 1;
+    }
+    r = r + 1;
+  }
+  gpu_free(dd);
+  return 0;
+}
+
+fn check_block_sum() -> int32 {
+  var n: int32 = 300;
+  var blocks: int32 = (n + 63) / 64;
+  var hx: int32* = (int32*)malloc((int64)n * 4);
+  var i: int32 = 0;
+  while (i < n) {
+    hx[i] = i * 7 - 100;
+    i = i + 1;
+  }
+  var dx: int64 = gpu_malloc((int64)n * 4);
+  var dsum: int64 = gpu_malloc((int64)blocks * 4);
+  if (dx == 0 || dsum == 0) { return 41; }
+  if (gpu_to_device(dx, (uint8*)hx, (int64)n * 4) != 0) { return 42; }
+  dispatch host_block_sum[grid: (blocks, 1, 1), block: (64, 1, 1),
+                          shared: 256](dx, dsum, n);
+  var sums: int32[8];
+  if (gpu_to_host((uint8*)&sums[0], dsum, (int64)blocks * 4) != 0) { return 43; }
+  var b: int32 = 0;
+  while (b < blocks) {
+    var want: int32 = 0;
+    var k: int32 = b * 64;
+    while (k < n && k < b * 64 + 64) {
+      want = want + hx[k];
+      k = k + 1;
+    }
+    if (sums[b] != want) { return 44; }
+    b = b + 1;
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  var path: cstring = getenv("METTLE_METAL_HOST_LIBRARY");
+  if (path == 0) { return 90; }
+  if (gpu_open(path) == 0) { return 91; }
+  var status: int32 = check_vadd();
+  if (status != 0) { return status; }
+  status = check_mixed();
+  if (status != 0) { return status; }
+  status = check_rows();
+  if (status != 0) { return status; }
+  return check_block_sum();
+}

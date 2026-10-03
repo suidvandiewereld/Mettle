@@ -2109,8 +2109,8 @@ static void emit_binary(MslFn *fn, const IRInstruction *in) {
         store_dest(fn, in, expr, op_cls);
       } else {
         snprintf(expr, sizeof(expr),
-                 "(%s == (%s)(-1)) ? (%s)(0 - %s) : (%s)(%s / %s)", sy, st, ut,
-                 x, ut, sx, sy);
+                 "(%s == (%s)(-1)) ? (%s)((%s)0 - %s) : (%s)(%s / %s)", sy,
+                 st, ut, ut, x, ut, sx, sy);
         store_dest(fn, in, expr, op_cls);
       }
     } else if (!strcmp(t, "%")) {
@@ -2730,9 +2730,13 @@ static void emit_subgroup(MslFn *fn, const IRInstruction *in) {
     line(fn, "%s mtl_v_%zu = %s;", class_type(value_cls), id, x);
     line(fn, "uint mtl_src_%zu = %s;", id, y);
     line(fn,
-         "bool mtl_ok_%zu = mtl_src_%zu < mtl_lanes && (((ulong)(simd_vote::"
-         "vote_t)simd_active_threads_mask() >> mtl_src_%zu) & 1ul) != 0ul;",
-         id, id, id);
+         "ulong mtl_mask_%zu = (ulong)(simd_vote::vote_t)"
+         "simd_active_threads_mask();",
+         id);
+    line(fn,
+         "bool mtl_ok_%zu = mtl_src_%zu < mtl_lanes && ((mtl_mask_%zu >> "
+         "mtl_src_%zu) & 1ul) != 0ul;",
+         id, id, id, id);
     line(fn,
          "%s mtl_got_%zu = simd_shuffle(mtl_v_%zu, (ushort)(mtl_ok_%zu ? "
          "mtl_src_%zu : mtl_lane));",
@@ -3452,7 +3456,7 @@ static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
       snprintf(col, sizeof(col), "%uu", j * 8u);
       mma_block_pointer(fn, ops->pointer[2], ops->space[2], acc_type, acc_size,
                         ops->stride[2], c_rows, row, col, ptr, sizeof(ptr));
-      line(fn, "simdgroup_load(mtl_acc_%zu[%u], %s, %s, ulong2(0, 0), %s);", id,
+      line(fn, "simdgroup_load(mtl_acc_%zu[%u], %s, %s, ulong2(0ul, 0ul), %s);", id,
            i * nb + j, ptr, ops->stride[2], c_rows ? "false" : "true");
     }
   }
@@ -3473,14 +3477,14 @@ static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
       snprintf(row, sizeof(row), "%uu", i * 8u);
       mma_block_pointer(fn, ops->pointer[0], ops->space[0], in_type, in_size,
                         ops->stride[0], a_rows, row, kexpr, ptr, sizeof(ptr));
-      line(fn, "simdgroup_load(mtl_ma_%zu[%u], %s, %s, ulong2(0, 0), %s);", id,
+      line(fn, "simdgroup_load(mtl_ma_%zu[%u], %s, %s, ulong2(0ul, 0ul), %s);", id,
            i, ptr, ops->stride[0], a_rows ? "false" : "true");
     }
     for (unsigned j = 0; j < nb; j++) {
       snprintf(col, sizeof(col), "%uu", j * 8u);
       mma_block_pointer(fn, ops->pointer[1], ops->space[1], in_type, in_size,
                         ops->stride[1], b_rows, kexpr, col, ptr, sizeof(ptr));
-      line(fn, "simdgroup_load(mtl_mb_%zu[%u], %s, %s, ulong2(0, 0), %s);", id,
+      line(fn, "simdgroup_load(mtl_mb_%zu[%u], %s, %s, ulong2(0ul, 0ul), %s);", id,
            j, ptr, ops->stride[1], b_rows ? "false" : "true");
     }
     for (unsigned i = 0; i < mb; i++) {
@@ -3509,7 +3513,7 @@ static void emit_mma_native_tile(MslFn *fn, const MtlcTensorMmaDesc *desc,
       snprintf(col, sizeof(col), "%uu", j * 8u);
       mma_block_pointer(fn, ops->pointer[3], ops->space[3], out_type, out_size,
                         ops->stride[3], d_rows, row, col, ptr, sizeof(ptr));
-      line(fn, "simdgroup_store(mtl_acc_%zu[%u], %s, %s, ulong2(0, 0), %s);", id,
+      line(fn, "simdgroup_store(mtl_acc_%zu[%u], %s, %s, ulong2(0ul, 0ul), %s);", id,
            i * nb + j, ptr, ops->stride[3], d_rows ? "false" : "true");
     }
   }
