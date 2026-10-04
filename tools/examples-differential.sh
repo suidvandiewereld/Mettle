@@ -28,7 +28,7 @@ if [ ${#MODES[@]} -eq 0 ]; then
   MODES=("debug:" "release:--release" "fallback:-s --release")
 fi
 if [ "$JOBS" -eq 0 ]; then
-  JOBS=$(nproc 2>/dev/null || echo 4)
+  JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 fi
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -86,6 +86,18 @@ numeric_match() {
   ' "$1" "$2"
 }
 export -f numeric_match
+
+limit() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$@"
+    return
+  fi
+  perl -e 'alarm shift; exec @ARGV or exit 127' "$@"
+  local rc=$?
+  [ "$rc" = 142 ] && return 124
+  return "$rc"
+}
+export -f limit
 
 run_one() {
   local source="$1"
@@ -156,7 +168,7 @@ run_one() {
       return
     fi
 
-    raw=$(timeout "$TIMEOUT" "$exe" 2>&1)
+    raw=$(limit "$TIMEOUT" "$exe" 2>&1)
     rc=$?
     got=$(printf '%s\n' "$raw" | grep -viE "$NOISE")
 

@@ -1379,6 +1379,7 @@ static int elf_collect_on_demand_objects(const char *runtime_directory,
       {"parallel.o", "parallel.o", object_needs_parallel_runtime},
       {"metal_runtime.o", "metal_runtime.o", object_needs_metal_runtime},
       {"metal_provider.o", "metal_provider.o", object_needs_metal_runtime},
+      {"tracy_helpers.o", "tracy_helpers.o", object_needs_tracy_helpers},
   };
   size_t i = 0u;
 
@@ -1934,7 +1935,7 @@ static int mettle_link_elf_executable(const char *object_filename,
   char *profile_object = NULL;
   char *freestanding_object = NULL;
   char *startup_object = NULL;
-  char *extra_objects[8];
+  char *extra_objects[16];
   size_t extra_object_count = 0u;
   size_t on_demand_object_count = 0u;
   size_t extra_index = 0u;
