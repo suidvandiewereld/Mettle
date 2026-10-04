@@ -15252,6 +15252,15 @@ try {
     throw "native_link.o has no .rela.text relocations for its extern call"
   }
 
+  $fnGlobalObj = Join-Path $objDir "fn_pointer_global.o"
+  & $CompilerPath --emit-arm64-obj tests/arm64/fn_pointer_global.mettle -o $fnGlobalObj 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "mettle --emit-arm64-obj failed on fn_pointer_global.mettle"
+  }
+  if ((Get-ElfSectionSize ([IO.File]::ReadAllBytes($fnGlobalObj)) ".rela.data") -le 0) {
+    throw "fn_pointer_global.o leaves its function-pointer global without a data relocation"
+  }
+
   # Cross output chooses its target OS standard library, not the compiler host.
   # A Windows hosted compiler must put Linux stream symbols in an AArch64 ELF.
   $crossStdObj = Join-Path $objDir "owned_dir_linux_std.o"

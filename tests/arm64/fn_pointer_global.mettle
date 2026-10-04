@@ -1,0 +1,7 @@
+fn seven() -> int32 { return 7; }
+
+var pick: fn() -> int32 = &seven;
+
+fn main() -> int32 {
+  return pick();
+}

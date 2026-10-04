@@ -3712,6 +3712,30 @@ static int arm64_object_emit_global(Arm64ObjectContext *object,
                                        bss_section);
   }
 
+  if (symbol->init_symbol_ref && symbol->init_symbol_ref[0]) {
+    const char *target = symbol->init_symbol_ref;
+    const IRModuleSymbol *referenced =
+        object->program ? ir_program_lookup_symbol(object->program, target)
+                        : NULL;
+    size_t slot = 0;
+    if (symbol->type->kind != MTLC_TYPE_POINTER &&
+        symbol->type->kind != MTLC_TYPE_FUNCTION_POINTER) {
+      return 0;
+    }
+    if (referenced) {
+      target = module_link_name(referenced);
+    }
+    if (!binary_emitter_align_section(emitter, data_section, 8, 0) ||
+        !binary_emitter_append_zeros(emitter, data_section, 8, &slot) ||
+        !binary_emitter_add_relocation(emitter, data_section, slot,
+                                       BINARY_RELOCATION_ADDR64, target, 0)) {
+      return 0;
+    }
+    return binary_emitter_define_symbol(emitter, link_name,
+                                        BINARY_SYMBOL_GLOBAL, data_section,
+                                        slot, 8);
+  }
+
   size_t size = mtlc_type_size(symbol->type);
   if (size == 0 || size > 8) return 0;
   size_t alignment = symbol->type->alignment ? symbol->type->alignment : size;
