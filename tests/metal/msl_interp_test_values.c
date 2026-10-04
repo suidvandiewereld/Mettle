@@ -197,8 +197,8 @@ static const char float_ops_body[] =
   "  *(a.out + 4) = (x < y) ? 1u : 0u;\n"
   "  *(a.out + 5) = as_type<uint>(-x);\n"
   "  *(a.out + 6) = as_type<uint>(3.00000001e+38f * 10.0f);\n"
-  "  *(a.out + 7) = as_type<uint>(as_type<float>(1u) * 1.0f);\n"
-  "  *(a.out + 8) = as_type<uint>(1.17549435e-38f * 0.5f);\n"
+  "  *(a.out + 7) = as_type<uint>(as_type<float>(*(a.in + 0)) * as_type<float>(*(a.in + 1)));\n"
+  "  *(a.out + 8) = as_type<uint>(as_type<float>(*(a.in + 2)) * 0.5f);\n"
   "  *(a.out + 9) = (z / z != z / z) ? 1u : 0u;\n"
   "  *(a.out + 10) = (z / z == z / z) ? 7u : 3u;\n"
   "  *(a.out + 11) = as_type<uint>(1.0f / z);\n"
@@ -206,9 +206,38 @@ static const char float_ops_body[] =
   "  *(a.out + 13) = as_type<uint>(-z);\n"
   "  *(a.out + 14) = (z == -z) ? 1u : 0u;\n";
 
+static const uint32_t float_ops_input[] = {1, 0x3f800000u, 0x00800000u};
+
 static const uint32_t float_ops_expect[] = {
-  0x3e99999au, 0x3eaaaaabu, 0x3ca3d70bu, 0xbdcccccdu, 1, 0xbdcccccdu, 0x7f800000u, 1, 0x00400000u, 1, 3, 0x7f800000u,
+  0x3e99999au, 0x3eaaaaabu, 0x3ca3d70bu, 0xbdcccccdu, 1, 0xbdcccccdu, 0x7f800000u, 0, 0, 1, 3, 0x7f800000u,
   0x4b800000u, 0x80000000u, 1
+};
+
+static const char float_subnormal_body[] =
+  "  float d = as_type<float>(*(a.in + 0));\n"
+  "  float nd = as_type<float>(*(a.in + 1));\n"
+  "  float one = as_type<float>(*(a.in + 2));\n"
+  "  float p = as_type<float>(*(a.in + 3));\n"
+  "  float q = as_type<float>(*(a.in + 4));\n"
+  "  half2 h = as_type<half2>(*(a.in + 5));\n"
+  "  *(a.out + 0) = as_type<uint>(d * one);\n"
+  "  *(a.out + 1) = as_type<uint>(nd * one);\n"
+  "  *(a.out + 2) = (d > 0.0f) ? 1u : 0u;\n"
+  "  *(a.out + 3) = (d == 0.0f) ? 1u : 0u;\n"
+  "  *(a.out + 4) = as_type<uint>(fabs(nd));\n"
+  "  *(a.out + 5) = as_type<uint>(-d);\n"
+  "  *(a.out + 6) = as_type<uint>(precise::sqrt(d));\n"
+  "  *(a.out + 7) = as_type<uint>(p * q);\n"
+  "  *(a.out + 8) = as_type<uint>(fma(p, q, 0.0f));\n"
+  "  *(a.out + 9) = as_type<uint>(fma(p, q, one));\n"
+  "  *(a.out + 10) = (uint)as_type<ushort>(h.x * h.y);\n"
+  "  *(a.out + 11) = (uint)as_type<ushort>(h.x + h.x);\n"
+  "  *(a.out + 12) = as_type<uint>((one > 0.0f) ? d : 0.0f);\n";
+
+static const uint32_t float_subnormal_input[] = {0x0020aac8u, 0x8020aac8u, 0x3f800000u, 0x1e3ce508u, 0x1fec1e4au, 0x3c000001u};
+
+static const uint32_t float_subnormal_expect[] = {
+  0, 0x80000000u, 0, 1, 0x0020aac8u, 0x8020aac8u, 0, 0, 0, 0x3f800000u, 0x0001, 0x0002, 0x0020aac8u
 };
 
 #define HB(expr) "(uint)as_type<ushort>(" expr ")"
@@ -311,10 +340,10 @@ static const uint32_t fma_float_expect[] = {0x4b800001u, 0xcb800001u, 0x40e00000
 static const char math_body[] =
   "  *(a.out + 0) = as_type<uint>(precise::sqrt(2.0f));\n"
   "  *(a.out + 1) = as_type<uint>(precise::rsqrt(2.0f));\n"
-  "  *(a.out + 2) = as_type<uint>(precise::sin(1.0f));\n"
-  "  *(a.out + 3) = as_type<uint>(precise::cos(1.0f));\n"
-  "  *(a.out + 4) = as_type<uint>(precise::log(2.0f));\n"
-  "  *(a.out + 5) = as_type<uint>(precise::exp(1.0f));\n"
+  "  *(a.out + 2) = as_type<uint>(precise::sqrt(9.0f));\n"
+  "  *(a.out + 3) = as_type<uint>(precise::rsqrt(16.0f));\n"
+  "  *(a.out + 4) = as_type<uint>(precise::sqrt(0.25f));\n"
+  "  *(a.out + 5) = as_type<uint>(fmod((-5.5f), 2.0f));\n"
   "  *(a.out + 6) = as_type<uint>(fast::sqrt(16.0f));\n"
   "  *(a.out + 7) = as_type<uint>(fabs((-1.5f)));\n"
   "  *(a.out + 8) = as_type<uint>(fmod(5.5f, 2.0f));\n"
@@ -326,9 +355,21 @@ static const char math_body[] =
   "  *(a.out + 12) = as_type<uint>(fast::log(1.0f) + fast::sin(0.0f) + fast::cos(0.0f) + fast::rsqrt(1.0f));\n";
 
 static const uint32_t math_expect[] = {
-  0x3fb504f3u, 0x3f3504f3u, 0x3f576aa4u, 0x3f0a5140u, 0x3f317218u, 0x402df854u, 0x40800000u, 0x3fc00000u, 0x3fc00000u,
+  0x3fb504f3u, 0x3f3504f3u, 0x40400000u, 0x3e800000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3fc00000u, 0x3fc00000u,
   0x3f000000u, 1, 0x3f800000u, 0x40000000u
 };
+
+static const char transcendental_body[] =
+  "  float one = as_type<float>(*(a.in + 0));\n"
+  "  float two = as_type<float>(*(a.in + 1));\n"
+  "  *(a.out + 0) = as_type<uint>(precise::sin(one));\n"
+  "  *(a.out + 1) = as_type<uint>(precise::cos(one));\n"
+  "  *(a.out + 2) = as_type<uint>(precise::log(two));\n"
+  "  *(a.out + 3) = as_type<uint>(precise::exp(one));\n";
+
+static const uint32_t transcendental_input[] = {0x3f800000u, 0x40000000u};
+
+static const uint32_t transcendental_expect[] = {0x3f576aa4u, 0x3f0a5140u, 0x3f317218u, 0x402df854u};
 
 static const char astype_body[] =
   "  *(a.out + 0) = as_type<uint>(1.0f);\n"
@@ -435,12 +476,19 @@ const MslCase msl_value_cases[] = {
   {.name = "uint_ops", .body = uint_ops_body, .expect = uint_ops_expect, .expect_count = COUNT(uint_ops_expect)},
   {.name = "long_ops", .body = long_ops_body, .expect = long_ops_expect, .expect_count = COUNT(long_ops_expect)},
   {.name = "casts", .body = casts_body, .expect = casts_expect, .expect_count = COUNT(casts_expect)},
-  {.name = "float_ops", .body = float_ops_body, .expect = float_ops_expect, .expect_count = COUNT(float_ops_expect)},
+  {.name = "float_ops", .body = float_ops_body, .input = float_ops_input, .input_count = COUNT(float_ops_input),
+   .expect = float_ops_expect, .expect_count = COUNT(float_ops_expect)},
+  {.name = "float_subnormals", .body = float_subnormal_body, .input = float_subnormal_input,
+   .input_count = COUNT(float_subnormal_input), .expect = float_subnormal_expect,
+   .expect_count = COUNT(float_subnormal_expect)},
   {.name = "half_bfloat_conversions", .body = half_conv_body, .expect = half_conv_expect, .expect_count = COUNT(half_conv_expect)},
   {.name = "half_arithmetic", .body = half_arith_body, .expect = half_arith_expect, .expect_count = COUNT(half_arith_expect)},
   {.name = "fma_half2", .body = fma_body, .expect = fma_expect, .expect_count = COUNT(fma_expect)},
   {.name = "fma_float", .body = fma_float_body, .expect = fma_float_expect, .expect_count = COUNT(fma_float_expect)},
   {.name = "math", .body = math_body, .expect = math_expect, .expect_count = COUNT(math_expect)},
+  {.name = "math_transcendental", .body = transcendental_body, .input = transcendental_input,
+   .input_count = COUNT(transcendental_input), .expect = transcendental_expect, .expect_count = COUNT(transcendental_expect),
+   .device_ulp = 4},
   {.name = "as_type_vectors", .body = astype_body, .input = astype_input, .input_count = COUNT(astype_input),
    .expect = astype_expect, .expect_count = COUNT(astype_expect)},
   {.name = "records", .body = records_source, .full = 1, .input = records_input, .input_count = COUNT(records_input),

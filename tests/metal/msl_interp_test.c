@@ -5,7 +5,7 @@
 
 #define MSL_TEST_FILL 0xcdcdcdcdu
 
-static const char msl_test_header[] =
+const char msl_test_header[] =
   "#include <metal_stdlib>\n"
   "using namespace metal;\n"
   "struct A { device uint* out; device uint* in; };\n"
@@ -135,6 +135,10 @@ static int compare_outputs(const MslCase *tc, const MslTestBuffers *b, char *err
                        (unsigned)b->expect[i]);
       return 0;
     }
+  }
+  if (tc->device_accept != NULL && !tc->device_accept(b->out, b->expect)) {
+    msl_format_error(error, error_size, "test '%s': its device acceptance check rejects the interpreter's outcome", tc->name);
+    return 0;
   }
   if (tc->log != NULL && (b->log.text == NULL || strcmp(b->log.text, tc->log) != 0)) {
     msl_format_error(error, error_size, "test '%s': log was \"%s\", expected \"%s\"", tc->name, b->log.text != NULL ? b->log.text : "",

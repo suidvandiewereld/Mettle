@@ -323,9 +323,16 @@ int msl_int_shift(int scalar, int left, uint64_t a, int count_scalar, uint64_t c
   return 1;
 }
 
+uint64_t msl_flush_subnormal(int scalar, uint64_t bits) {
+  if (scalar == MSL_S_FLOAT && (bits & 0x7f800000u) == 0) {
+    return bits & 0x80000000u;
+  }
+  return bits;
+}
+
 int msl_float_binary(int scalar, int op, uint64_t a, uint64_t b, uint64_t *out, char *msg, size_t msg_size) {
-  double x = msl_float_kind_to_double(scalar, a);
-  double y = msl_float_kind_to_double(scalar, b);
+  double x = msl_float_kind_to_double(scalar, msl_flush_subnormal(scalar, a));
+  double y = msl_float_kind_to_double(scalar, msl_flush_subnormal(scalar, b));
   double r;
   switch (op) {
     case MSL_BIN_ADD: r = x + y; break;
@@ -340,7 +347,7 @@ int msl_float_binary(int scalar, int op, uint64_t a, uint64_t b, uint64_t *out, 
     case MSL_BIN_GE: *out = x >= y; return 1;
     default: return fail_msg(msg, msg_size, "operator needs integers");
   }
-  *out = msl_double_to_float_kind(scalar, r, 0);
+  *out = msl_flush_subnormal(scalar, msl_double_to_float_kind(scalar, r, 0));
   return 1;
 }
 
@@ -475,7 +482,7 @@ uint16_t msl_fma_half(uint16_t a, uint16_t b, uint16_t c) {
   return (uint16_t)msl_round_format(sum, sticky, 10, 5);
 }
 
-uint32_t msl_fma_float(uint32_t a, uint32_t b, uint32_t c) {
+static uint32_t fma_float_rounded(uint32_t a, uint32_t b, uint32_t c) {
   double x = (double)msl_bits_to_float(a);
   double y = (double)msl_bits_to_float(b);
   double z = (double)msl_bits_to_float(c);
@@ -496,6 +503,13 @@ uint32_t msl_fma_float(uint32_t a, uint32_t b, uint32_t c) {
     return msl_round_format(exact_zero, 0, 23, 8);
   }
   return msl_round_format(sum, sticky, 23, 8);
+}
+
+uint32_t msl_fma_float(uint32_t a, uint32_t b, uint32_t c) {
+  uint32_t x = (uint32_t)msl_flush_subnormal(MSL_S_FLOAT, a);
+  uint32_t y = (uint32_t)msl_flush_subnormal(MSL_S_FLOAT, b);
+  uint32_t z = (uint32_t)msl_flush_subnormal(MSL_S_FLOAT, c);
+  return (uint32_t)msl_flush_subnormal(MSL_S_FLOAT, fma_float_rounded(x, y, z));
 }
 
 double msl_math_unary(int builtin, double x) {

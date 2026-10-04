@@ -137,12 +137,12 @@ static const char prefix_body[] =
 static void prepare_prefix(uint32_t *input, uint32_t *expect) {
   uint32_t i;
   uint32_t running = 0;
-  float frunning = 0.0f;
+  float frunning = -0.0f;
   (void)input;
   for (i = 0; i < 40; i++) {
     if (i == 32) {
       running = 0;
-      frunning = 0.0f;
+      frunning = -0.0f;
     }
     expect[40 + i] = running;
     expect[120 + i] = float_bits(frunning);
@@ -309,8 +309,8 @@ static const char atomics_body[] =
   "  atomic_fetch_max_explicit(c + 2, i * 3u, memory_order_relaxed);\n"
   "  atomic_fetch_min_explicit(c + 3, i + 5u, memory_order_relaxed);\n"
   "  atomic_fetch_and_explicit(c + 4, ~(1u << (i % 32u)), memory_order_relaxed);\n"
-  "  atomic_fetch_or_explicit(c + 5, 1u << (i % 32u), memory_order_acq_rel);\n"
-  "  atomic_fetch_xor_explicit(c + 6, i + 1u, memory_order_seq_cst);\n"
+  "  atomic_fetch_or_explicit(c + 5, 1u << (i % 32u), memory_order_relaxed);\n"
+  "  atomic_fetch_xor_explicit(c + 6, i + 1u, memory_order_relaxed);\n"
   "  uint prev = atomic_exchange_explicit(c + 7, i, memory_order_relaxed);\n"
   "  atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n"
   "  alignas(16) threadgroup uint counter[1];\n"
@@ -322,11 +322,24 @@ static const char atomics_body[] =
   "  atomic_fetch_add_explicit(tc, 2u, memory_order_relaxed);\n"
   "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
   "  if (i == 0u) {\n"
-  "    atomic_store_explicit(c + 8, atomic_load_explicit(tc, memory_order_acquire), memory_order_release);\n"
+  "    atomic_store_explicit(c + 8, atomic_load_explicit(tc, memory_order_relaxed), memory_order_relaxed);\n"
   "  }\n"
   "  *(a.out + (16u + i)) = old * 1000u + prev;\n";
 
 static const uint32_t atomics_initial[80] = {0, 1000, 0, 0xffffffffu, 0xffffffffu, 0, 0, 0, 0};
+
+static const char atomics_ordered_body[] =
+  "  device atomic_uint* c = (device atomic_uint*)a.out;\n"
+  "  uint i = tid.x;\n"
+  "  atomic_fetch_or_explicit(c, 1u << (i % 32u), memory_order_acq_rel);\n"
+  "  atomic_fetch_xor_explicit(c + 1, i + 1u, memory_order_seq_cst);\n"
+  "  atomic_fetch_add_explicit(c + 2, 1u, memory_order_release);\n"
+  "  threadgroup_barrier(mem_flags::mem_device);\n"
+  "  if (i == 0u) {\n"
+  "    atomic_store_explicit(c + 3, atomic_load_explicit(c + 2, memory_order_acquire), memory_order_release);\n"
+  "  }\n";
+
+static const uint32_t atomics_ordered_expect[] = {0xffffffffu, 32, 32, 32};
 
 static void prepare_atomics(uint32_t *input, uint32_t *expect) {
   static const uint32_t head[9] = {64, 872, 189, 5, 0, 0xffffffffu, 64, 63, 128};
@@ -336,6 +349,38 @@ static void prepare_atomics(uint32_t *input, uint32_t *expect) {
   for (i = 0; i < 64; i++) {
     expect[16 + i] = i * 1000 + (i == 0 ? 0 : i - 1);
   }
+}
+
+static int accept_atomics_any_order(const uint32_t *out, const uint32_t *expect) {
+  uint8_t old_seen[64];
+  uint8_t held[64];
+  uint32_t i;
+  memset(old_seen, 0, sizeof old_seen);
+  memset(held, 0, sizeof held);
+  for (i = 0; i < 9; i++) {
+    if (i != 7 && out[i] != expect[i]) {
+      return 0;
+    }
+  }
+  for (i = 0; i < 64; i++) {
+    uint32_t old = out[16 + i] / 1000u;
+    uint32_t prev = out[16 + i] % 1000u;
+    if (old >= 64 || old_seen[old] || prev >= 64) {
+      return 0;
+    }
+    old_seen[old] = 1;
+    held[prev]++;
+  }
+  if (out[7] >= 64) {
+    return 0;
+  }
+  held[out[7]]++;
+  for (i = 0; i < 64; i++) {
+    if (held[i] != (i == 0 ? 2 : 1)) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 static const char cas_loop_body[] =
@@ -423,17 +468,15 @@ static float matrix_source(int k) {
 }
 
 static float matrix_dot(const float *src, int row, int col, int transposed) {
-  double sum = 1.0;
+  volatile float sum = 1.0f;
   int k;
   for (k = 0; k < 8; k++) {
     double left = (double)src[row * 16 + k];
     double right = transposed ? (double)src[col * 16 + 8 + k] : (double)src[k * 16 + 8 + col];
-    sum += left * right;
+    volatile double product = left * right;
+    sum = (float)((double)sum + product);
   }
-  {
-    volatile float rounded = (float)sum;
-    return rounded;
-  }
+  return sum;
 }
 
 static void prepare_matrix_float(uint32_t *input, uint32_t *expect) {
@@ -532,7 +575,10 @@ const MslCase msl_collective_cases[] = {
    .expect_count = 256, .prepare = prepare_attributes},
   {.name = "simd_and_barrier_mix", .body = mixed_body, .block = {64}, .expect_count = 64, .prepare = prepare_mixed},
   {.name = "simd_sum_inside_helper", .body = helper_source, .full = 1, .block = {40}, .expect_count = 40, .prepare = prepare_helper},
-  {.name = "atomics", .body = atomics_body, .block = {64}, .initial = atomics_initial, .expect_count = 80, .prepare = prepare_atomics},
+  {.name = "atomics", .body = atomics_body, .block = {64}, .initial = atomics_initial, .expect_count = 80, .prepare = prepare_atomics,
+   .device_accept = accept_atomics_any_order},
+  {.name = "atomics_ordered", .body = atomics_ordered_body, .block = {32}, .initial = zeros, .expect = atomics_ordered_expect,
+   .expect_count = COUNT(atomics_ordered_expect), .device_skip = "MSL 4.1 ordered atomics; Metal 4.0 does not declare them"},
   {.name = "cas_loop_spurious", .body = cas_loop_body, .block = {64}, .spurious = 1, .initial = zeros,
    .expect = cas_loop_expect, .expect_count = COUNT(cas_loop_expect)},
   {.name = "cas_weak_semantics", .body = cas_body, .spurious = 1, .initial = zeros, .expect = cas_expect,

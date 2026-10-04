@@ -35,11 +35,11 @@ static size_t sync_result_slots(const MslInsn *insn) {
 }
 
 static uint64_t float_result(double value) {
-  return msl_float_to_bits(msl_round_float(value));
+  return msl_flush_subnormal(MSL_S_FLOAT, msl_float_to_bits(msl_round_float(value)));
 }
 
 static double float_value(uint64_t bits) {
-  return (double)msl_bits_to_float((uint32_t)bits);
+  return (double)msl_bits_to_float((uint32_t)msl_flush_subnormal(MSL_S_FLOAT, bits));
 }
 
 static int exec_math(MslThread *t, const MslInsn *in) {
@@ -352,7 +352,7 @@ static uint64_t pick_extreme(int is_float, int want_max, uint64_t acc, uint64_t 
 static void simd_reduce(MslThread **lanes, uint32_t count, const MslInsn *in, uint64_t *results) {
   int is_float = is_float_insn(in);
   uint64_t acc = lane_arg(lanes[0], 1);
-  uint64_t running = 0;
+  uint64_t running = is_float ? 0x80000000u : 0;
   uint32_t i;
   for (i = 1; i < count; i++) {
     uint64_t v = lane_arg(lanes[i], 1);
@@ -592,9 +592,22 @@ static double matrix_element(const MslType *matrix, const uint64_t *slots, int r
   return msl_float_kind_to_double(matrix->scalar, bits);
 }
 
+static uint32_t float_chain(const uint64_t *a, const uint64_t *b, const uint64_t *c, int row, int col) {
+  uint32_t sum = (uint32_t)element_bits((const uint8_t *)c, (size_t)(row * 8 + col), 4);
+  int i;
+  for (i = 0; i < 8; i++) {
+    uint32_t left = (uint32_t)element_bits((const uint8_t *)a, (size_t)(row * 8 + i), 4);
+    uint32_t right = (uint32_t)element_bits((const uint8_t *)b, (size_t)(i * 8 + col), 4);
+    sum = msl_fma_float(left, right, sum);
+  }
+  return sum;
+}
+
 static void multiply_accumulate(const MslType *const *types, const uint64_t *a, const uint64_t *b, const uint64_t *c, uint8_t *out) {
   const MslType *d = types[0];
   size_t size = d->elem->size;
+  int all_float = d->scalar == MSL_S_FLOAT && types[1]->scalar == MSL_S_FLOAT && types[2]->scalar == MSL_S_FLOAT &&
+                  types[3]->scalar == MSL_S_FLOAT;
   int row;
   int col;
   for (row = 0; row < 8; row++) {
@@ -606,7 +619,7 @@ static void multiply_accumulate(const MslType *const *types, const uint64_t *a, 
       for (i = 0; i < 8; i++) {
         sum += matrix_element(types[1], a, row, i) * matrix_element(types[2], b, i, col);
       }
-      bits = msl_double_to_float_kind(d->scalar, sum, 0);
+      bits = all_float ? float_chain(a, b, c, row, col) : msl_double_to_float_kind(d->scalar, sum, 0);
       for (k = 0; k < size; k++) {
         out[(size_t)(row * 8 + col) * size + k] = (uint8_t)(bits >> (8 * k));
       }

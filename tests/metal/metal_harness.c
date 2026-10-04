@@ -261,6 +261,11 @@ static float f32_from(uint32_t bits) {
   return f;
 }
 
+static float metal_f32(float f) {
+  uint32_t bits = f32_bits(f);
+  return (bits & 0x7f800000u) == 0 ? f32_from(bits & 0x80000000u) : f;
+}
+
 static float half_to_float(uint16_t h) {
   uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
   int exponent = (h >> 10) & 0x1f;
@@ -1158,10 +1163,10 @@ static void contract_float_rules(void) {
     double v = inputs[t];
     int flag = 0;
     float want[4];
-    want[0] = (float)(v * 2.0);
-    want[1] = (float)(1.0 / v);
-    want[2] = (float)(-3.000001e38);
-    want[3] = inputs[t] + 0.1f;
+    want[0] = metal_f32((float)(v * 2.0));
+    want[1] = metal_f32((float)(1.0 / v));
+    want[2] = metal_f32((float)(-3.000001e38));
+    want[3] = metal_f32(inputs[t] + 0.1f);
     if (v > 0.1) flag += 1;
     if (v >= 0.1) flag += 2;
     if (v < 0.1) flag += 4;

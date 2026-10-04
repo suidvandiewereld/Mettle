@@ -228,6 +228,7 @@ uint64_t msl_double_to_float_kind(int scalar, double value, int sticky);
 uint64_t msl_canonical(int scalar, uint64_t raw);
 int msl_int_binary(int scalar, int op, uint64_t a, uint64_t b, uint64_t *out, char *msg, size_t msg_size);
 int msl_int_shift(int scalar, int left, uint64_t a, int count_scalar, uint64_t count, uint64_t *out, char *msg, size_t msg_size);
+uint64_t msl_flush_subnormal(int scalar, uint64_t bits);
 int msl_float_binary(int scalar, int op, uint64_t a, uint64_t b, uint64_t *out, char *msg, size_t msg_size);
 int msl_unary(int scalar, int op, uint64_t a, uint64_t *out, char *msg, size_t msg_size);
 int msl_convert(int from, int to, uint64_t value, uint64_t *out, char *msg, size_t msg_size);
@@ -346,8 +347,12 @@ struct MslCase {
   const char *error;
   const char *log;
   uint64_t budget;
+  uint32_t device_ulp;
+  const char *device_skip;
+  int (*device_accept)(const uint32_t *out, const uint32_t *expect);
 };
 
+extern const char msl_test_header[];
 extern const MslCase msl_value_cases[];
 extern const size_t msl_value_case_count;
 extern const MslCase msl_collective_cases[];

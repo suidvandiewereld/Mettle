@@ -487,9 +487,9 @@ jobs:
       - name: Build and run programs
         run: |
           ./bin/mettle --build examples/hello/hello.mettle -o /tmp/hello
-          /tmp/hello
+          test "$(/tmp/hello)" = "Hello, world!"
           ./bin/mettle --build tests/test_native_heap_threads.mettle -o /tmp/threads
-          /tmp/threads
+          test "$(/tmp/threads)" = "THREADS OK"
           ./bin/mettle --build tests/test_parallel_loop.mettle -o /tmp/parallel
           /tmp/parallel
 
@@ -525,6 +525,14 @@ jobs:
             src/runtime/metal_provider.c -framework Metal -framework Foundation \
             -lobjc -o /tmp/metal_harness
           /tmp/metal_harness /tmp/metal/metal_kernels.metal
+
+      - name: The MSL interpreter's selftests agree with the GPU
+        if: steps.gpu.outputs.metal3 == 'true'
+        run: |
+          cc -std=c99 -O2 tests/metal/msl_device_cases.c tests/metal/msl_interp*.c \
+            src/runtime/metal_provider.c -framework Metal -framework Foundation \
+            -lobjc -lm -o /tmp/msl_device_cases
+          /tmp/msl_device_cases -v
 
       - name: A Mettle host program drives Metal
         if: steps.gpu.outputs.metal3 == 'true'
