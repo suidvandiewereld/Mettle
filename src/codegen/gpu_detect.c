@@ -169,7 +169,11 @@ static int gpu_detect_via_nvidia_smi(GpuDetectResult *out) {
   char line[512];
   if (!gpu_read_command_line(
           "nvidia-smi --query-gpu=compute_cap,name,memory.total "
-          "--format=csv,noheader,nounits",
+#if defined(_WIN32)
+          "--format=csv,noheader,nounits 2>nul",
+#else
+          "--format=csv,noheader,nounits 2>/dev/null",
+#endif
           line, sizeof(line))) {
     return 0;
   }

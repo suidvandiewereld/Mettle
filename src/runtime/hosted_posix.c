@@ -32,6 +32,7 @@
 #if defined(__APPLE__)
 #include <crt_externs.h>
 #include <mach-o/dyld.h>
+#include <sys/syslimits.h>
 #else
 extern char **environ;
 #endif

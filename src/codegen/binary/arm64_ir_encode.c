@@ -1561,11 +1561,17 @@ static void emit_fixed_copy(Arm64Emit *e, Arm64Reg dst, Arm64Reg src,
   }
 }
 
+static int call_uses_io_stub(const SlotMap *s, const IRInstruction *call,
+                             int *is_string) {
+  return !s->object && call->text &&
+         io_stub_intrinsic(call->text, NULL, is_string);
+}
+
 static int arg_is_wide_aggregate(const IRProgram *prog, SlotMap *s,
                                  const IRInstruction *call,
                                  const IROperand *arg) {
   if (arg->kind != IR_OPERAND_SYMBOL) return 0;
-  if (call->text && io_stub_intrinsic(call->text, NULL, NULL)) return 0;
+  if (call_uses_io_stub(s, call, NULL)) return 0;
   if (agg_size_of(s->aggregates, arg->name) > 8) return 1;
   const IRModuleSymbol *global = module_variable(s, arg->name);
   (void)prog;
@@ -1605,13 +1611,19 @@ static int binary_is_string_concat(const IRInstruction *in) {
          in->value_type && in->value_type->kind == MTLC_TYPE_STRING;
 }
 
+static int type_is_cstring(const MtlcType *type) {
+  if (!type || type->kind != MTLC_TYPE_POINTER) return 0;
+  if (type->name && strcmp(type->name, "cstring") == 0) return 1;
+  return type->base_type && type->base_type->name &&
+         strcmp(type->base_type->name, "uint8") == 0;
+}
+
 static void load_call_argument(Arm64Emit *e, SlotMap *slots,
                                const IRProgram *prog,
                                const IRInstruction *call, const IROperand *arg,
                                Arm64Reg dest) {
   int stub_is_string = 0;
-  int is_stub =
-      call->text && io_stub_intrinsic(call->text, NULL, &stub_is_string);
+  int is_stub = call_uses_io_stub(slots, call, &stub_is_string);
   if (is_stub &&
       (arg->kind == IR_OPERAND_STRING ||
        (stub_is_string && arg->kind == IR_OPERAND_TEMP) ||
@@ -1619,6 +1631,12 @@ static void load_call_argument(Arm64Emit *e, SlotMap *slots,
         agg_size_of(slots->aggregates, arg->name) > 8))) {
     load_into(e, slots, arg, dest);
     arm64_emit_word(e, arm64_ldr_imm(1, dest, dest, 0));
+    return;
+  }
+  if (arg->kind == IR_OPERAND_STRING &&
+      type_is_cstring(
+          call_arg_type(prog, call, (size_t)(arg - call->arguments)))) {
+    emit_string_literal_address(e, slots->object, arg->name, dest);
     return;
   }
   if (arg->kind == IR_OPERAND_SYMBOL &&
