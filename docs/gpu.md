@@ -2114,6 +2114,7 @@ mettle -O --emit-metal --metal-version=4.1 kernels.mettle -o kernels.metal
 ```
 
 `--metal-version` takes 3.1, 3.2 (the default, macOS 15), 4.0 or 4.1.
+macOS 26.6 compiles up to 4.0, so a 4.1 library does not load there yet.
 `--metal-fast-math` lets Metal reassociate and contract float arithmetic. By
 default the module starts with `#pragma METAL fp math_mode(safe)` and
 `fp contract(off)`, and the math built-ins call the `precise::` forms, so
@@ -2167,6 +2168,27 @@ Each of these is refused with a message naming the kernel and the line:
 - A pointer that holds workgroup memory on one path and device memory on
   another. Metal has no generic address space; a helper that takes a plain
   `T*` is compiled once per address space it is called with.
+
+### Float results on Apple GPUs
+
+Measured on an M4 Pro under macOS 26.6, in every Metal math mode:
+
+- float32 arithmetic flushes subnormals. A subnormal operand of `+`, `-`,
+  `*`, `/`, `fma`, `sqrt`, `max` or a compare reads as zero, and a result
+  below 1.18e-38 becomes a zero of the same sign. Negation, `fabs` and
+  `select` copy the bits and keep them. The PTX path keeps float32
+  subnormals, so such a kernel gives different bits under CUDA.
+- float16 keeps its subnormals.
+- `sin`, `cos`, `exp` and `log` are within 4 ulp, as Metal's specification
+  allows; `sin(1.0f)` is 1 ulp from the correctly rounded value. Division,
+  `sqrt`, `rsqrt` and `fma` are correctly rounded.
+- A float32 `simdgroup_multiply_accumulate` is a chain of fused multiply-adds
+  that starts from the accumulator and takes k in order.
+- The float exclusive prefix sum gives -0.0 to the first lane.
+
+The MSL interpreter in `tests/metal` follows these rules, and
+`tests/metal/msl_device_cases.c` runs its selftests on a Mac's GPU to check
+that it still does.
 
 ### Launching on Metal
 

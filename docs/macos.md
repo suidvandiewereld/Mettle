@@ -115,4 +115,4 @@ function that returns it.
 | Darwin argument layout | `tests/arm64_encode_test.c`, against Apple's documented examples. |
 | Metal kernels | A strict interpreter for the emitted MSL runs 25 contract kernels and a Mettle host program end to end; Apple's `metal` compiler checks every emitted file when it is installed. |
 | Hosted runtime | 99 programs give the same output on Linux built hosted and built freestanding. |
-| A real Mac | Not yet. The Objective-C calls in `src/runtime/metal_provider.c`, the Apple branches of the hosted runtime, and the `cc` link have not run on Apple hardware. |
+| A real Mac | An M4 Pro under macOS 26.6, with the Command Line Tools and no Xcode: the Darwin build, `--build` through `cc`, the hello, thread and `@parallel` programs (the last gives the same output as on Windows), `--gpu-info`, the 25 contracts, the interpreter's selftests on the GPU, `tests/metal/metal_host_main.mettle`, and `examples/gpu_inference` (every stage within its float32 bound, worst at 10% of it). |
